@@ -1718,12 +1718,17 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     email_pwd = getenv("EMAIL_PASSWORD")
     email_imap = getenv("EMAIL_IMAP_HOST")
     email_smtp = getenv("EMAIL_SMTP_HOST")
-    if all([email_addr, email_pwd, email_imap, email_smtp]):
+    email_provider = (getenv("EMAIL_PROVIDER", "imap") or "imap").strip().lower() or "imap"
+    email_proton = bool(getenv("PROTON_CLIENT_FACTORY") or getenv("PROTON_MAILBOX"))
+    if all([email_addr, email_pwd, email_imap, email_smtp]) or (
+        email_provider == "proton" and email_addr and email_proton
+    ):
         if Platform.EMAIL not in config.platforms:
             config.platforms[Platform.EMAIL] = PlatformConfig()
         config.platforms[Platform.EMAIL].enabled = True
         config.platforms[Platform.EMAIL].extra.update({
             "address": email_addr,
+            "provider": email_provider,
             "imap_host": email_imap,
             "smtp_host": email_smtp,
         })

@@ -106,7 +106,7 @@ class TestCheckRequirements(unittest.TestCase):
         "PROTON_MAILBOX": "/tmp/proton-mailbox.json",
     }, clear=True)
     def test_proton_requirements_met(self):
-        from gateway.platforms.email import check_email_requirements
+        from plugins.platforms.email.adapter import check_email_requirements
         self.assertTrue(check_email_requirements())
 
 
@@ -897,8 +897,8 @@ class TestProtonEmailAdapter(unittest.TestCase):
             "EMAIL_PROTON_SEEN_PATH": str(seen_path),
             "EMAIL_ALLOWED_USERS": allowed,
         }, clear=True):
-            from gateway.platforms.email import EmailAdapter
-            from gateway.platforms.email import _load_proton_client
+            from plugins.platforms.email.adapter import EmailAdapter
+            from plugins.platforms.email.adapter import _load_proton_client
             adapter = EmailAdapter(PlatformConfig(enabled=True))
             adapter._proton_client = _load_proton_client()
             return adapter
@@ -1028,7 +1028,7 @@ class TestProtonEmailAdapter(unittest.TestCase):
             "PROTON_MAILBOX": "/tmp/unused.json",
             "EMAIL_POLL_INTERVAL": "1",
         }, clear=True):
-            from gateway.platforms.email import EmailAdapter
+            from plugins.platforms.email.adapter import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))
 
         calls = {"count": 0}
@@ -1043,7 +1043,7 @@ class TestProtonEmailAdapter(unittest.TestCase):
 
         adapter._running = True
         adapter._check_inbox = flaky_check
-        with patch("gateway.platforms.email.asyncio.sleep", fake_sleep):
+        with patch("plugins.platforms.email.adapter.asyncio.sleep", fake_sleep):
             asyncio.run(adapter._poll_loop())
 
         self.assertEqual(calls["count"], 1)
@@ -1888,6 +1888,69 @@ class TestConnectionConfigResolution(unittest.TestCase):
             "EMAIL_IMAP_HOST": "imap.test.com", "EMAIL_SMTP_HOST": "smtp.test.com",
         }, clear=False):
             self.assertTrue(check_email_requirements())
+class TestPollLoopResilience(unittest.TestCase):
+    """The inbound poll loop must survive a hung/erroring backend without ever
+    going silently dark (prod once stalled 5 days with zero email log lines)."""
+
+    def test_watchdog_timeout_default_and_override(self):
+        from plugins.platforms.email.adapter import _poll_watchdog_timeout
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("EMAIL_POLL_TIMEOUT_SECONDS", None)
+            # Default: max(120, interval * 4).
+            self.assertEqual(_poll_watchdog_timeout(15), 120.0)
+            self.assertEqual(_poll_watchdog_timeout(40), 160.0)
+
+        with patch.dict(os.environ, {"EMAIL_POLL_TIMEOUT_SECONDS": "7"}):
+            self.assertEqual(_poll_watchdog_timeout(15), 7.0)
+
+        # Invalid override falls back to the default.
+        with patch.dict(os.environ, {"EMAIL_POLL_TIMEOUT_SECONDS": "nope"}):
+            self.assertEqual(_poll_watchdog_timeout(15), 120.0)
+
+    def _make_adapter(self):
+        from gateway.config import PlatformConfig
+
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": "hermes@test.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "imap.test.com",
+            "EMAIL_SMTP_HOST": "smtp.test.com",
+        }):
+            from plugins.platforms.email.adapter import EmailAdapter
+
+            return EmailAdapter(PlatformConfig(enabled=True))
+
+    def test_poll_loop_recovers_from_hung_check_inbox(self):
+        """A check that hangs must trip the watchdog and let the loop continue,
+        instead of blocking forever (the prod failure mode)."""
+        import asyncio
+
+        adapter = self._make_adapter()
+        adapter._provider = "proton"
+        adapter._poll_interval = 0
+        adapter._proton_reconnect_delay = 0
+        adapter._running = True
+
+        calls = {"n": 0}
+
+        async def fake_check_inbox():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                await asyncio.sleep(3600)  # hang: the watchdog must fire
+            else:
+                adapter._running = False  # stop once recovery is proven
+
+        adapter._check_inbox = fake_check_inbox
+
+        async def run():
+            with patch.dict(os.environ, {"EMAIL_POLL_TIMEOUT_SECONDS": "0.2"}):
+                # If the watchdog is broken this awaits forever; the outer
+                # timeout turns that into a test failure rather than a hang.
+                await asyncio.wait_for(adapter._poll_loop(), timeout=5)
+
+        asyncio.run(run())
+        self.assertGreaterEqual(calls["n"], 2)  # hung once, then recovered
 
 
 class TestSenderAuthentication(unittest.TestCase):

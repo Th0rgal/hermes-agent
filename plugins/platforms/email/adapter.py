@@ -135,6 +135,31 @@ class _IPv4SMTP_SSL(smtplib.SMTP_SSL):
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 _PROTON_INITIAL_RECONNECT_DELAY_SECONDS = 5
 _PROTON_MAX_RECONNECT_DELAY_SECONDS = 300
+# Emit a liveness line at most this often so a stalled poller is obvious in logs
+# instead of silently going dark (prod once went 5 days with zero email lines).
+_POLL_HEARTBEAT_INTERVAL_SECONDS = 900
+
+
+def _poll_watchdog_timeout(poll_interval: float) -> float:
+    """Maximum seconds a single inbox check may run before the poll loop treats
+    it as hung and forces a retry.
+
+    A blocking backend read with no socket timeout (notably the Proton
+    ``event_polling`` path, which — unlike IMAP — has no timeout of its own) can
+    otherwise leave the loop awaiting forever: no error, no retry, no logs. The
+    watchdog bounds every check so the loop always recovers. Generously above
+    the normal cadence so it only trips on a genuinely stuck read; override via
+    ``EMAIL_POLL_TIMEOUT_SECONDS``.
+    """
+    raw = os.getenv("EMAIL_POLL_TIMEOUT_SECONDS")
+    if raw:
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return max(120.0, poll_interval * 4)
 _DEFAULT_BLOCKED_ATTACHMENT_EXTS = {
     ".env",
     ".key",
@@ -897,6 +922,7 @@ class EmailAdapter(BasePlatformAdapter):
 
             self._running = True
             self._poll_task = asyncio.create_task(self._poll_loop())
+            self._poll_task.add_done_callback(self._on_poll_task_done)
             print(f"[Email] Connected as {self._address} via Proton")
             return True
 
@@ -963,6 +989,7 @@ class EmailAdapter(BasePlatformAdapter):
 
         self._running = True
         self._poll_task = asyncio.create_task(self._poll_loop())
+        self._poll_task.add_done_callback(self._on_poll_task_done)
         print(f"[Email] Connected as {self._address}")
         return True
 
@@ -978,21 +1005,59 @@ class EmailAdapter(BasePlatformAdapter):
             self._poll_task = None
         logger.info("[Email] Disconnected.")
 
+    def _on_poll_task_done(self, task: "asyncio.Task") -> None:
+        """Surface an unexpected poll-loop exit loudly.
+
+        The loop is meant to run until ``disconnect``. If it ever ends while
+        ``_running`` is set, inbound mail has stopped — which must never happen
+        silently (the prod symptom was exactly this: no logs, no alerts).
+        """
+        if not self._running:
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            exc = None
+        if exc is not None:
+            logger.error(
+                "[Email] poll loop crashed (%s); inbound mail has stopped: %r",
+                type(exc).__name__,
+                exc,
+            )
+        else:
+            logger.error(
+                "[Email] poll loop exited while running; inbound mail has stopped"
+            )
+
     async def _poll_loop(self) -> None:
-        """Poll the configured email backend for new messages."""
+        """Poll the configured email backend for new messages.
+
+        Hardened so the poller can never silently stall: every inbox check is
+        bounded by a watchdog timeout (a hung backend read would otherwise block
+        this loop forever — observed in prod as days of total silence), and a
+        periodic heartbeat makes liveness visible in the logs.
+        """
+        watchdog = _poll_watchdog_timeout(self._poll_interval)
+        loop = asyncio.get_running_loop()
+        last_heartbeat = loop.time()
         while self._running:
             try:
-                await self._check_inbox()
+                await asyncio.wait_for(self._check_inbox(), timeout=watchdog)
                 self._proton_reconnect_delay = _PROTON_INITIAL_RECONNECT_DELAY_SECONDS
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                # asyncio.TimeoutError (the watchdog firing) is an Exception, so
+                # it lands here too and is treated like any transient failure.
+                reason = (
+                    "timed out (watchdog)"
+                    if isinstance(e, asyncio.TimeoutError)
+                    else f"failed with {type(e).__name__}"
+                )
                 if self._provider == "proton":
                     delay = self._proton_reconnect_delay
                     logger.warning(
-                        "[Email] Proton poll failed with %s; retrying in %ss",
-                        type(e).__name__,
-                        delay,
+                        "[Email] Proton poll %s; retrying in %ss", reason, delay
                     )
                     await asyncio.sleep(delay)
                     self._proton_reconnect_delay = min(
@@ -1000,7 +1065,16 @@ class EmailAdapter(BasePlatformAdapter):
                         _PROTON_MAX_RECONNECT_DELAY_SECONDS,
                     )
                     continue
-                logger.error("[Email] Poll error: %s", e)
+                logger.error("[Email] Poll %s", reason)
+            # Heartbeat so a prolonged lack of inbound is diagnosable from logs.
+            now = loop.time()
+            if now - last_heartbeat >= _POLL_HEARTBEAT_INTERVAL_SECONDS:
+                logger.info(
+                    "[Email] poller alive (provider=%s, %d ids seen)",
+                    self._provider,
+                    len(self._seen_uids),
+                )
+                last_heartbeat = now
             await asyncio.sleep(self._poll_interval)
 
     async def _check_inbox(self) -> None:

@@ -1281,7 +1281,8 @@ class TestSendEmailStandalone(unittest.TestCase):
         import json
         import tempfile
         from pathlib import Path
-        from tools.send_message_tool import _send_email
+        from gateway.config import PlatformConfig
+        from plugins.platforms.email.adapter import _standalone_send
 
         with tempfile.TemporaryDirectory() as td:
             mailbox = Path(td) / "mailbox.json"
@@ -1292,7 +1293,7 @@ class TestSendEmailStandalone(unittest.TestCase):
                 "PROTON_MAILBOX": str(mailbox),
             }, clear=True):
                 result = asyncio.run(
-                    _send_email({}, "thomas@lfglabs.dev", "Hello")
+                    _standalone_send(PlatformConfig(enabled=True), "thomas@lfglabs.dev", "Hello")
                 )
 
             self.assertTrue(result["success"])

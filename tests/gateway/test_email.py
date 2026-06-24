@@ -1655,6 +1655,25 @@ class TestConnectionConfigResolution(unittest.TestCase):
         self.assertEqual(adapter._smtp_host, "smtp.test.com")
         self.assertEqual(adapter._address, "hermes@test.com")
 
+    def test_extra_with_explicit_none_hosts_does_not_crash(self):
+        """gateway.config can populate PlatformConfig.extra with explicit None
+        host values (a Proton setup leaves IMAP/SMTP unset). __init__ must coerce
+        None → "" rather than calling .strip() on None. Regression for a prod
+        AttributeError that took the whole email platform (and gateway) down."""
+        from gateway.config import PlatformConfig
+        from plugins.platforms.email.adapter import EmailAdapter
+        cfg = PlatformConfig(enabled=True)
+        cfg.extra.update({"address": None, "imap_host": None, "smtp_host": None})
+        with patch.dict(os.environ, {
+            "EMAIL_PROVIDER": "proton",
+            "EMAIL_ADDRESS": "agent@thomas.md",
+            "PROTON_MAILBOX": "/tmp/does-not-exist.json",
+        }, clear=True):
+            adapter = EmailAdapter(cfg)  # must not raise
+        self.assertEqual(adapter._imap_host, "")
+        self.assertEqual(adapter._smtp_host, "")
+        self.assertEqual(adapter._provider, "proton")
+
     def test_connect_aborts_without_attempting_imap_when_host_missing(self):
         """A missing host returns False without the cryptic DNS error, and marks
         the failure non-retryable so the gateway stops reconnecting (#40715)."""

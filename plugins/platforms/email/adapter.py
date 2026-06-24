@@ -783,11 +783,15 @@ class EmailAdapter(BasePlatformAdapter):
         # misleading ``[Errno 8] nodename nor servname`` (an unresolvable name)
         # instead of an obvious "host not set" error.
         extra = config.extra or {}
-        self._address = (os.getenv("EMAIL_ADDRESS", "") or extra.get("address", "")).strip()
+        # `or ""` (not the .get default) because gateway.config can populate
+        # these keys with an explicit None (e.g. a Proton setup leaves imap/smtp
+        # host unset → None); .get(key, "") only defaults when the key is ABSENT,
+        # so a present-but-None value would reach .strip() and crash.
+        self._address = (os.getenv("EMAIL_ADDRESS", "") or extra.get("address") or "").strip()
         self._password = os.getenv("EMAIL_PASSWORD", "")
-        self._imap_host = (os.getenv("EMAIL_IMAP_HOST", "") or extra.get("imap_host", "")).strip()
+        self._imap_host = (os.getenv("EMAIL_IMAP_HOST", "") or extra.get("imap_host") or "").strip()
         self._imap_port = env_int("EMAIL_IMAP_PORT", 993)
-        self._smtp_host = (os.getenv("EMAIL_SMTP_HOST", "") or extra.get("smtp_host", "")).strip()
+        self._smtp_host = (os.getenv("EMAIL_SMTP_HOST", "") or extra.get("smtp_host") or "").strip()
         self._smtp_port = env_int("EMAIL_SMTP_PORT", 587)
         self._poll_interval = env_int("EMAIL_POLL_INTERVAL", 15)
         allowed_raw = os.getenv("EMAIL_ALLOWED_USERS", "").strip()

@@ -1298,6 +1298,8 @@ class EmailAdapter(BasePlatformAdapter):
                 "body": body,
                 "attachments": [],
                 "date": str(_model_value(raw_message, "Date", "Time", "date") or ""),
+                "sender_authenticated": True,
+                "auth_reason": "proton-api",
                 "raw": raw_message,
             })
         return results
@@ -1449,7 +1451,12 @@ class EmailAdapter(BasePlatformAdapter):
         # a race between dispatch and authorization can result in the adapter
         # sending a reply even though the handler returned None.
         allowed_raw = os.getenv("EMAIL_ALLOWED_USERS", "").strip()
-        if not allowed_raw:
+        allowed = self._allowed_users or {
+            addr.strip().lower()
+            for addr in allowed_raw.split(",")
+            if addr.strip()
+        }
+        if not allowed:
             if os.getenv("EMAIL_ALLOW_ALL_USERS", "").strip().lower() not in {"true", "1", "yes"} and (
                 os.getenv("GATEWAY_ALLOW_ALL_USERS", "").strip().lower() not in {"true", "1", "yes"}
             ):
@@ -1460,7 +1467,6 @@ class EmailAdapter(BasePlatformAdapter):
                 )
                 return
         else:
-            allowed = {addr.strip().lower() for addr in allowed_raw.split(",") if addr.strip()}
             if sender_addr.lower() not in allowed:
                 logger.debug(
                     "[Email] Dropping non-allowlisted sender at dispatch: %s",

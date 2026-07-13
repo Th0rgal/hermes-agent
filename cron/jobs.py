@@ -1069,6 +1069,38 @@ def _normalized_inference_axes(job: Dict[str, Any]) -> Tuple[Optional[str], Opti
     )
 
 
+def _validate_no_agent_script(script: Optional[str]) -> None:
+    """Fail fast when a script-only job cannot possibly run.
+
+    Agent-backed jobs may intentionally reference a script that is provisioned
+    later.  A ``no_agent`` job has no fallback, however: storing it before the
+    script exists only creates an endlessly failing scheduler entry and noisy
+    delivery alerts.  Validate the effective path at both create and update
+    boundaries while retaining the scheduler's containment rules.
+    """
+    if not script:
+        raise ValueError(
+            "no_agent=True requires a script — with no agent and no script "
+            "there is nothing for the job to run."
+        )
+
+    scripts_dir = (get_hermes_home() / "scripts").resolve()
+    raw = Path(script).expanduser()
+    path = raw.resolve() if raw.is_absolute() else (scripts_dir / raw).resolve()
+    try:
+        path.relative_to(scripts_dir)
+    except ValueError as exc:
+        raise ValueError(
+            f"Cron script must resolve inside {scripts_dir}: {script!r}"
+        ) from exc
+
+    if not path.is_file():
+        raise ValueError(
+            f"Cannot create or enable a no-agent cron job before its script "
+            f"exists as a regular file: {path}"
+        )
+
+
 def create_job(
     prompt: Optional[str],
     schedule: str,
@@ -1164,14 +1196,11 @@ def create_job(
     normalized_no_agent = bool(no_agent)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
 
-    # no_agent jobs are meaningless without a script — the script IS the job.
-    # Surface this as a clear ValueError at create time so bad configs never
-    # reach the scheduler.
-    if normalized_no_agent and not normalized_script:
-        raise ValueError(
-            "no_agent=True requires a script — with no agent and no script "
-            "there is nothing for the job to run."
-        )
+    # no_agent jobs are meaningless without a runnable script — the script IS
+    # the job. Surface this at creation so an invalid watchdog never reaches
+    # the scheduler and starts emitting periodic failure deliveries.
+    if normalized_no_agent:
+        _validate_no_agent_script(normalized_script)
 
     # Normalize context_from: accept str or list of str, store as list or None
     if isinstance(context_from, str):
@@ -1358,6 +1387,19 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
             previous_inference_axes = _normalized_inference_axes(job)
             updated = _apply_skill_fields({**job, **updates})
+            # Do not strand a legacy invalid job: pausing, renaming, or fixing
+            # its schedule must remain possible even if its script disappeared.
+            # Validate whenever an update changes the execution mode/script or
+            # makes the job runnable again.
+            validates_script = (
+                "script" in updates
+                or "no_agent" in updates
+                or updates.get("enabled") is True
+            )
+            if updated.get("no_agent") and validates_script:
+                _validate_no_agent_script(
+                    _normalize_job_optional_text(updated.get("script"))
+                )
             schedule_changed = "schedule" in updates
             inference_fields_changed = bool(
                 {"provider", "model", "base_url", "no_agent"}.intersection(updates)

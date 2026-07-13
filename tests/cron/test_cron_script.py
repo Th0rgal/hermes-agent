@@ -87,6 +87,78 @@ class TestJobScriptField:
         updated = update_job(job["id"], {"script": None})
         assert updated.get("script") is None
 
+    def test_create_no_agent_job_rejects_missing_script(self, cron_env):
+        from cron.jobs import create_job, list_jobs
+
+        with pytest.raises(ValueError, match="before its script exists"):
+            create_job(
+                prompt="",
+                schedule="every 30m",
+                script="missing-watchdog.sh",
+                no_agent=True,
+            )
+
+        assert list_jobs(include_disabled=True) == []
+
+    def test_create_no_agent_job_accepts_existing_script(self, cron_env):
+        from cron.jobs import create_job
+
+        script = cron_env / "scripts" / "watchdog.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        job = create_job(
+            prompt="",
+            schedule="every 30m",
+            script="watchdog.sh",
+            no_agent=True,
+        )
+
+        assert job["script"] == "watchdog.sh"
+        assert job["no_agent"] is True
+
+    def test_update_no_agent_job_rejects_missing_replacement_script(self, cron_env):
+        from cron.jobs import create_job, get_job, update_job
+
+        script = cron_env / "scripts" / "watchdog.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        job = create_job(
+            prompt="",
+            schedule="every 30m",
+            script="watchdog.sh",
+            no_agent=True,
+        )
+
+        with pytest.raises(ValueError, match="before its script exists"):
+            update_job(job["id"], {"script": "missing-watchdog.sh"})
+
+        assert get_job(job["id"])["script"] == "watchdog.sh"
+
+    def test_existing_no_agent_job_with_missing_script_can_pause_but_not_resume(
+        self, cron_env
+    ):
+        from cron.jobs import create_job, get_job, pause_job, resume_job, update_job
+
+        script = cron_env / "scripts" / "watchdog.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        job = create_job(
+            prompt="",
+            schedule="every 30m",
+            script="watchdog.sh",
+            no_agent=True,
+        )
+        script.unlink()
+
+        # Existing jobs remain manageable after an operator removes a script:
+        # metadata edits and, crucially, pausing the noisy job still work.
+        assert update_job(job["id"], {"name": "broken watchdog"})["name"] == "broken watchdog"
+        assert pause_job(job["id"])["enabled"] is False
+        assert get_job(job["id"])["state"] == "paused"
+
+        with pytest.raises(ValueError, match="before its script exists"):
+            resume_job(job["id"])
+
+        assert get_job(job["id"])["enabled"] is False
+
 
 def test_cronjob_tool_rejects_stale_past_one_shot(cron_env, monkeypatch):
     from tools.cronjob_tools import cronjob

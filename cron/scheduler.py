@@ -1653,18 +1653,60 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     if not gateway_targets:
         return "; ".join(delivery_errors) if delivery_errors else None
 
-    try:
-        config = load_gateway_config()
-    except Exception as e:
-        msg = f"failed to load gateway config: {e}"
-        logger.error("Job '%s': %s", job["id"], msg)
-        delivery_errors.append(msg)
-        return "; ".join(delivery_errors)
+    # API-server targets are handled inside the loop below. Load messaging
+    # configuration lazily so their durable session delivery remains
+    # independent of gateway adapter setup, just like Desktop/WebUI targets.
+    config = None
 
     for target in gateway_targets:
         platform_name = target["platform"]
         chat_id = target["chat_id"]
         thread_id = target.get("thread_id")
+
+        # API-server sessions (WebUI/Desktop) do not have a live messaging
+        # adapter once the originating HTTP turn has ended.  Their durable
+        # delivery surface is the persisted session transcript itself.  The
+        # API adapter binds chat_id to the concrete session_id, so an
+        # origin-scoped cron can safely append its result to that exact
+        # conversation without falling back to a configured home platform
+        # such as Telegram.
+        if str(platform_name).lower() == "api_server":
+            db = None
+            try:
+                from hermes_state import SessionDB
+
+                db = SessionDB()
+                session = db.get_session(str(chat_id))
+                if not session or str(session.get("source") or "") != "api_server":
+                    raise ValueError(
+                        f"API session '{chat_id}' does not exist or is not an api_server session"
+                    )
+                db.append_message(
+                    session_id=str(chat_id),
+                    role="assistant",
+                    content=content,
+                )
+                logger.info(
+                    "Job '%s': appended durable delivery to API session %s",
+                    job.get("id", "?"),
+                    chat_id,
+                )
+            except Exception as e:
+                msg = f"API session delivery failed for '{chat_id}': {e}"
+                logger.warning("Job '%s': %s", job.get("id", "?"), msg)
+                delivery_errors.append(msg)
+            finally:
+                if db is not None:
+                    db.close()
+            continue
+
+        if config is None:
+            try:
+                config = load_gateway_config()
+            except Exception as e:
+                msg = f"failed to load gateway config: {e}"
+                logger.error("Job '%s': %s", job["id"], msg)
+                return msg
 
         # Diagnostic: log thread_id for topic-aware delivery debugging
         origin = _resolve_origin(job) or {}

@@ -66,13 +66,15 @@ def spool_session_delivery(
     return destination
 
 
-def replay_session_delivery_spool() -> Dict[str, int]:
+def replay_session_delivery_spool(
+    db_path: Optional[Path] = None,
+) -> Dict[str, int]:
     """Replay durable deliveries, deleting files only after a committed append."""
     spool_dir = _delivery_spool_dir()
     result = {"replayed": 0, "failed": 0}
     if not spool_dir.exists():
         return result
-    db = SessionDB()
+    db = SessionDB(db_path=db_path)
     try:
         for path in sorted(spool_dir.glob("*.json")):
             try:
@@ -212,7 +214,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 # Cap on user-controlled FTS5 query input before regex/sanitizer processing.
 # Search queries do not need to be arbitrarily large, and bounding them keeps
@@ -897,7 +899,7 @@ CREATE TABLE IF NOT EXISTS delivery_receipts (
     delivery_id TEXT PRIMARY KEY,
     message_id INTEGER,
     created_at REAL NOT NULL,
-    FOREIGN KEY (message_id) REFERENCES messages(id)
+    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS session_model_usage (
@@ -1437,7 +1439,7 @@ class SessionDB:
             "SessionDB write failed lock_wait_ms=%.1f retries=%d deadline_s=%.1f error=%s",
             (time.monotonic() - started_at) * 1000,
             attempt,
-            retry_deadline_s,
+            self._write_retry_deadline_s,
             last_err,
         )
         raise last_err or sqlite3.OperationalError(
@@ -1657,6 +1659,46 @@ class SessionDB:
                             "reconcile %s.%s: %s", table_name, col_name, exc,
                         )
 
+    @staticmethod
+    def _ensure_delivery_receipts_cascade(cursor: sqlite3.Cursor) -> None:
+        """Upgrade the delivery receipt FK without losing persisted receipts."""
+        foreign_keys = cursor.execute(
+            "PRAGMA foreign_key_list('delivery_receipts')"
+        ).fetchall()
+        if any(
+            row[2] == "messages" and str(row[6]).upper() == "CASCADE"
+            for row in foreign_keys
+        ):
+            return
+
+        # SQLite cannot ALTER a foreign-key action in place. Keep the rebuild
+        # in a savepoint so an interrupted startup leaves the old table and
+        # its idempotency receipts intact.
+        cursor.execute("SAVEPOINT delivery_receipts_cascade")
+        try:
+            cursor.execute(
+                "ALTER TABLE delivery_receipts RENAME TO delivery_receipts_v23"
+            )
+            cursor.execute(
+                """CREATE TABLE delivery_receipts (
+                       delivery_id TEXT PRIMARY KEY,
+                       message_id INTEGER,
+                       created_at REAL NOT NULL,
+                       FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+                   )"""
+            )
+            cursor.execute(
+                """INSERT INTO delivery_receipts (delivery_id, message_id, created_at)
+                   SELECT delivery_id, message_id, created_at
+                   FROM delivery_receipts_v23"""
+            )
+            cursor.execute("DROP TABLE delivery_receipts_v23")
+            cursor.execute("RELEASE delivery_receipts_cascade")
+        except BaseException:
+            cursor.execute("ROLLBACK TO delivery_receipts_cascade")
+            cursor.execute("RELEASE delivery_receipts_cascade")
+            raise
+
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
 
@@ -1680,6 +1722,11 @@ class SessionDB:
         # migration was skipped (e.g. due to version renumbering), the
         # column gets created here.
         self._reconcile_columns(cursor)
+
+        # v24: delivery receipts follow their message. Earlier builds used
+        # SQLite's default RESTRICT action, which made clear/delete/prune fail
+        # for any session containing a durably delivered cron message.
+        self._ensure_delivery_receipts_cascade(cursor)
 
         # Indexes that reference reconciler-added columns must be created
         # AFTER _reconcile_columns runs — declaring them in SCHEMA_SQL

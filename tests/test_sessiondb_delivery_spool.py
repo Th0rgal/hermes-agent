@@ -25,22 +25,71 @@ def test_delivery_id_deduplicates_transcript_append(tmp_path):
         db.close()
 
 
+def test_legacy_delivery_receipts_migrate_and_cascade(tmp_path):
+    path = tmp_path / "state.db"
+    db = SessionDB(db_path=path)
+    try:
+        db.create_session("api-1", source="api_server")
+        db.append_message(
+            "api-1", role="assistant", content="done", delivery_id="cron:api-1:j:r1"
+        )
+    finally:
+        db.close()
+
+    legacy = sqlite3.connect(path, isolation_level=None)
+    try:
+        legacy.execute("PRAGMA foreign_keys=OFF")
+        legacy.execute("ALTER TABLE delivery_receipts RENAME TO delivery_receipts_v23")
+        legacy.execute(
+            """CREATE TABLE delivery_receipts (
+                   delivery_id TEXT PRIMARY KEY,
+                   message_id INTEGER,
+                   created_at REAL NOT NULL,
+                   FOREIGN KEY (message_id) REFERENCES messages(id)
+               )"""
+        )
+        legacy.execute(
+            """INSERT INTO delivery_receipts (delivery_id, message_id, created_at)
+               SELECT delivery_id, message_id, created_at FROM delivery_receipts_v23"""
+        )
+        legacy.execute("DROP TABLE delivery_receipts_v23")
+        legacy.execute("UPDATE schema_version SET version = 23")
+    finally:
+        legacy.close()
+
+    migrated = SessionDB(db_path=path)
+    try:
+        foreign_keys = migrated._conn.execute(
+            "PRAGMA foreign_key_list('delivery_receipts')"
+        ).fetchall()
+        assert any(row[2] == "messages" and row[6] == "CASCADE" for row in foreign_keys)
+        migrated.clear_messages("api-1")
+        receipt_count = migrated._conn.execute(
+            "SELECT COUNT(*) FROM delivery_receipts"
+        ).fetchone()[0]
+        assert receipt_count == 0
+        assert migrated.delete_session("api-1") is True
+    finally:
+        migrated.close()
+
+
 def test_spool_survives_and_replays_once(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
-    db = SessionDB()
+    path = tmp_path / "state.db"
+    db = SessionDB(db_path=path)
     try:
         db.create_session("api-1", source="api_server")
     finally:
         db.close()
 
     spool_session_delivery("cron:api-1:j:r1", "api-1", "assistant", "done")
-    assert replay_session_delivery_spool() == {"replayed": 1, "failed": 0}
+    assert replay_session_delivery_spool(db_path=path) == {"replayed": 1, "failed": 0}
     # Recreating the same deterministic delivery after a crash is harmless.
     spool_session_delivery("cron:api-1:j:r1", "api-1", "assistant", "done")
-    assert replay_session_delivery_spool() == {"replayed": 1, "failed": 0}
+    assert replay_session_delivery_spool(db_path=path) == {"replayed": 1, "failed": 0}
 
-    verify = SessionDB()
+    verify = SessionDB(db_path=path)
     try:
         assert [message["content"] for message in verify.get_messages("api-1")] == ["done"]
     finally:

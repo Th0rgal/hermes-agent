@@ -12,6 +12,7 @@ import asyncio
 import atexit
 import concurrent.futures
 import contextvars
+import hashlib
 import json
 import logging
 import os
@@ -1672,6 +1673,10 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         # such as Telegram.
         if str(platform_name).lower() == "api_server":
             db = None
+            delivery_id = (
+                f"cron:{chat_id}:{job.get('id', '?')}:"
+                f"{job.get('_delivery_run_id') or job.get('last_run_at') or hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+            )
             try:
                 from hermes_state import SessionDB
 
@@ -1685,6 +1690,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                     session_id=str(chat_id),
                     role="assistant",
                     content=content,
+                    delivery_id=delivery_id,
                 )
                 logger.info(
                     "Job '%s': appended durable delivery to API session %s",
@@ -1692,9 +1698,34 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                     chat_id,
                 )
             except Exception as e:
-                msg = f"API session delivery failed for '{chat_id}': {e}"
-                logger.warning("Job '%s': %s", job.get("id", "?"), msg)
-                delivery_errors.append(msg)
+                if isinstance(e, ValueError):
+                    msg = f"API session delivery failed for '{chat_id}': {e}"
+                    logger.warning("Job '%s': %s", job.get("id", "?"), msg)
+                    delivery_errors.append(msg)
+                    continue
+                try:
+                    from hermes_state import spool_session_delivery
+
+                    spool_path = spool_session_delivery(
+                        delivery_id=delivery_id,
+                        session_id=str(chat_id),
+                        role="assistant",
+                        content=content,
+                    )
+                    logger.warning(
+                        "Job '%s': SessionDB append failed after retries; spooled delivery %s at %s: %s",
+                        job.get("id", "?"),
+                        delivery_id,
+                        spool_path,
+                        e,
+                    )
+                except Exception as spool_error:
+                    msg = (
+                        f"API session delivery and spool failed for '{chat_id}': "
+                        f"append={e}; spool={spool_error}"
+                    )
+                    logger.error("Job '%s': %s", job.get("id", "?"), msg)
+                    delivery_errors.append(msg)
             finally:
                 if db is not None:
                     db.close()
@@ -4010,7 +4041,14 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
 
             if should_deliver:
                 try:
-                    delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
+                    delivery_job = dict(job)
+                    delivery_job["_delivery_run_id"] = execution_id
+                    delivery_error = _deliver_result(
+                        delivery_job,
+                        deliver_content,
+                        adapters=adapters,
+                        loop=loop,
+                    )
                 except Exception as de:
                     delivery_error = str(de)
                     logger.error("Delivery failed for job %s: %s", job["id"], de)

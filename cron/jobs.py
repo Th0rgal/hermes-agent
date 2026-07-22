@@ -1511,6 +1511,8 @@ def resume_job(job_id: str) -> Optional[Dict[str, Any]]:
     job = resolve_job_ref(job_id)
     if not job:
         return None
+    if job.get("no_agent"):
+        _validate_no_agent_script(_normalize_job_optional_text(job.get("script")))
 
     next_run_at = compute_next_run(job["schedule"])
     if next_run_at is None and job["schedule"].get("kind") == "once":
@@ -1536,6 +1538,8 @@ def trigger_job(job_id: str) -> Optional[Dict[str, Any]]:
     job = resolve_job_ref(job_id)
     if not job:
         return None
+    if job.get("no_agent"):
+        _validate_no_agent_script(_normalize_job_optional_text(job.get("script")))
     return update_job(
         job["id"],
         {

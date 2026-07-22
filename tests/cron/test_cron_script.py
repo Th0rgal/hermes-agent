@@ -214,6 +214,24 @@ class TestJobScriptField:
         assert updated["enabled"] is True
         assert get_job(job["id"])["schedule"]["kind"] == "interval"
 
+    def test_trigger_enabled_no_agent_job_rejects_missing_script(self, cron_env):
+        from cron.jobs import create_job, get_job, trigger_job
+
+        script = cron_env / "scripts" / "watchdog.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        job = create_job(
+            prompt="",
+            schedule="every 30m",
+            script="watchdog.sh",
+            no_agent=True,
+        )
+        script.unlink()
+
+        with pytest.raises(ValueError, match="before its script exists"):
+            trigger_job(job["id"])
+
+        assert get_job(job["id"])["enabled"] is True
+
 
 def test_cronjob_tool_rejects_stale_past_one_shot(cron_env, monkeypatch):
     from tools.cronjob_tools import cronjob

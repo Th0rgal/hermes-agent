@@ -4933,6 +4933,24 @@ class TestNewEndpoints:
         resp = self.client.get("/api/cron/jobs/nonexistent-id")
         assert resp.status_code == 404
 
+    @pytest.mark.parametrize("action", ["resume", "trigger"])
+    def test_cron_enable_actions_surface_script_validation_as_400(
+        self, monkeypatch, action
+    ):
+        from hermes_cli import web_server
+
+        monkeypatch.setattr(web_server, "_find_cron_job_profile", lambda _job_id: "default")
+
+        def reject_missing_script(_profile, operation, _job_id):
+            assert operation == f"{action}_job"
+            raise ValueError("Cannot enable no-agent job before its script exists")
+
+        monkeypatch.setattr(web_server, "_call_cron_for_profile", reject_missing_script)
+
+        resp = self.client.post(f"/api/cron/jobs/broken/{action}")
+        assert resp.status_code == 400
+        assert "before its script exists" in resp.json()["detail"]
+
     # --- Automation Blueprints ---
 
     def test_cron_blueprints_list(self):

@@ -1069,7 +1069,15 @@ def _normalized_inference_axes(job: Dict[str, Any]) -> Tuple[Optional[str], Opti
     )
 
 
-def _validate_no_agent_script(script: Optional[str]) -> None:
+def _resolve_cron_script_path(script: str) -> Tuple[Path, Path]:
+    """Resolve a cron script against the active profile-scoped store."""
+    scripts_dir = (_current_cron_store().cron_dir.parent / "scripts").resolve()
+    raw = Path(script).expanduser()
+    path = raw.resolve() if raw.is_absolute() else (scripts_dir / raw).resolve()
+    return path, scripts_dir
+
+
+def _validate_no_agent_script(script: Optional[str]) -> Path:
     """Fail fast when a script-only job cannot possibly run.
 
     Agent-backed jobs may intentionally reference a script that is provisioned
@@ -1087,9 +1095,7 @@ def _validate_no_agent_script(script: Optional[str]) -> None:
     # Cron storage is context-scoped per profile. Derive the sibling scripts
     # directory from that same store instead of the ambient HERMES_HOME, which
     # may belong to a different profile in dashboard/gateway callers.
-    scripts_dir = (_current_cron_store().cron_dir.parent / "scripts").resolve()
-    raw = Path(script).expanduser()
-    path = raw.resolve() if raw.is_absolute() else (scripts_dir / raw).resolve()
+    path, scripts_dir = _resolve_cron_script_path(script)
     try:
         path.relative_to(scripts_dir)
     except ValueError as exc:
@@ -1102,6 +1108,7 @@ def _validate_no_agent_script(script: Optional[str]) -> None:
             f"Cannot create or enable a no-agent cron job before its script "
             f"exists as a regular file: {path}"
         )
+    return path
 
 
 def create_job(
@@ -1202,8 +1209,11 @@ def create_job(
     # no_agent jobs are meaningless without a runnable script — the script IS
     # the job. Surface this at creation so an invalid watchdog never reaches
     # the scheduler and starts emitting periodic failure deliveries.
+    resolved_script_for_guard = None
     if normalized_no_agent:
-        _validate_no_agent_script(normalized_script)
+        resolved_script_for_guard = _validate_no_agent_script(normalized_script)
+    elif normalized_script:
+        resolved_script_for_guard, _ = _resolve_cron_script_path(normalized_script)
 
     # Normalize context_from: accept str or list of str, store as list or None
     if isinstance(context_from, str):
@@ -1221,7 +1231,10 @@ def create_job(
     # `cronjob` model tool — which calls create_job directly — is also
     # covered, not just `hermes cron create`.
     from cron.lifecycle_guard import check_gateway_lifecycle
-    check_gateway_lifecycle(prompt_text, normalized_script)
+    check_gateway_lifecycle(
+        prompt_text,
+        str(resolved_script_for_guard) if resolved_script_for_guard else None,
+    )
 
     label_source = (prompt_text or (normalized_skills[0] if normalized_skills else None) or (normalized_script if normalized_no_agent else None)) or "cron job"
 

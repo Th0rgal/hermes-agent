@@ -48,9 +48,15 @@ def test_spool_survives_and_replays_once(tmp_path, monkeypatch):
 
 
 def test_concurrent_writer_waits_for_lock_without_losing_delivery(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_SESSIONDB_WRITE_RETRY_DEADLINE_SECONDS", "2")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "session_db:\n  write_retry_deadline_seconds: 2\n",
+        encoding="utf-8",
+    )
     path = tmp_path / "state.db"
     setup = SessionDB(path)
+    assert setup._write_retry_deadline_s == 2.0
     setup.create_session("api-1", source="api_server")
     setup.close()
 

@@ -1094,6 +1094,7 @@ class SessionDB:
     def __init__(self, db_path: Path = None, read_only: bool = False):
         self.db_path = db_path or DEFAULT_DB_PATH
         self.read_only = read_only
+        self._write_retry_deadline_s = self._configured_write_retry_deadline_s()
 
         self._lock = threading.Lock()
         self._write_count = 0
@@ -1187,6 +1188,22 @@ class SessionDB:
             # ``hermes_state._set_last_init_error(None)`` explicitly.
             _set_last_init_error(f"{type(exc).__name__}: {exc}")
             raise
+
+    @classmethod
+    def _configured_write_retry_deadline_s(cls) -> float:
+        """Resolve the SessionDB write deadline from user-facing config.yaml."""
+        try:
+            from hermes_cli.config import cfg_get, load_config
+
+            value = cfg_get(
+                load_config(),
+                "session_db",
+                "write_retry_deadline_seconds",
+                default=cls._WRITE_RETRY_DEADLINE_S,
+            )
+            return max(0.1, float(value))
+        except (ImportError, TypeError, ValueError):
+            return cls._WRITE_RETRY_DEADLINE_S
 
     # ── Core write helper ──
 
@@ -1352,17 +1369,7 @@ class SessionDB:
         """
         last_err: Optional[Exception] = None
         started_at = time.monotonic()
-        try:
-            retry_deadline_s = max(
-                0.1,
-                float(os.environ.get(
-                    "HERMES_SESSIONDB_WRITE_RETRY_DEADLINE_SECONDS",
-                    self._WRITE_RETRY_DEADLINE_S,
-                )),
-            )
-        except (TypeError, ValueError):
-            retry_deadline_s = self._WRITE_RETRY_DEADLINE_S
-        deadline_at = started_at + retry_deadline_s
+        deadline_at = started_at + self._write_retry_deadline_s
         attempt = 0
         while attempt < self._WRITE_MAX_RETRIES and time.monotonic() < deadline_at:
             transaction_started_at = time.monotonic()

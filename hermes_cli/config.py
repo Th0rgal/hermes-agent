@@ -1009,6 +1009,11 @@ DEFAULT_CONFIG = {
     # sessions (no live client) so accumulated agents don't pile up under memory
     # pressure. Reopening one re-resumes it from disk. 0/null disables.
     "max_live_sessions": 16,
+    "session_db": {
+        # Maximum wall-clock time spent retrying a contended SQLite write.
+        # SessionDB uses bounded full-jitter retries within this deadline.
+        "write_retry_deadline_seconds": 10.0,
+    },
     "agent": {
         "max_turns": 90,
         # Inactivity timeout for gateway agent execution (seconds).

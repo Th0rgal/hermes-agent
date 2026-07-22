@@ -1084,7 +1084,10 @@ def _validate_no_agent_script(script: Optional[str]) -> None:
             "there is nothing for the job to run."
         )
 
-    scripts_dir = (get_hermes_home() / "scripts").resolve()
+    # Cron storage is context-scoped per profile. Derive the sibling scripts
+    # directory from that same store instead of the ambient HERMES_HOME, which
+    # may belong to a different profile in dashboard/gateway callers.
+    scripts_dir = (_current_cron_store().cron_dir.parent / "scripts").resolve()
     raw = Path(script).expanduser()
     path = raw.resolve() if raw.is_absolute() else (scripts_dir / raw).resolve()
     try:
@@ -1391,10 +1394,11 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
             # its schedule must remain possible even if its script disappeared.
             # Validate whenever an update changes the execution mode/script or
             # makes the job runnable again.
+            reenabled = not bool(job.get("enabled", True)) and bool(
+                updated.get("enabled", True)
+            )
             validates_script = (
-                "script" in updates
-                or "no_agent" in updates
-                or updates.get("enabled") is True
+                "script" in updates or "no_agent" in updates or reenabled
             )
             if updated.get("no_agent") and validates_script:
                 _validate_no_agent_script(

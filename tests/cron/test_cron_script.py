@@ -116,6 +116,38 @@ class TestJobScriptField:
         assert job["script"] == "watchdog.sh"
         assert job["no_agent"] is True
 
+    def test_no_agent_script_uses_scoped_profile_store(self, cron_env, tmp_path):
+        from cron.jobs import create_job, use_cron_store
+
+        # A same-named default-profile script must not authorize a job stored
+        # under another profile.
+        (cron_env / "scripts" / "watchdog.sh").write_text(
+            "#!/bin/sh\n", encoding="utf-8"
+        )
+        profile_home = tmp_path / "profile"
+        (profile_home / "scripts").mkdir(parents=True)
+
+        with use_cron_store(profile_home):
+            with pytest.raises(ValueError, match="before its script exists"):
+                create_job(
+                    prompt="",
+                    schedule="every 30m",
+                    script="watchdog.sh",
+                    no_agent=True,
+                )
+
+            (profile_home / "scripts" / "watchdog.sh").write_text(
+                "#!/bin/sh\n", encoding="utf-8"
+            )
+            job = create_job(
+                prompt="",
+                schedule="every 30m",
+                script="watchdog.sh",
+                no_agent=True,
+            )
+
+        assert job["script"] == "watchdog.sh"
+
     def test_update_no_agent_job_rejects_missing_replacement_script(self, cron_env):
         from cron.jobs import create_job, get_job, update_job
 
@@ -158,6 +190,29 @@ class TestJobScriptField:
             resume_job(job["id"])
 
         assert get_job(job["id"])["enabled"] is False
+
+    def test_enabled_schedule_edit_does_not_revalidate_missing_script(self, cron_env):
+        from cron.jobs import create_job, get_job, update_job
+
+        script = cron_env / "scripts" / "watchdog.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        job = create_job(
+            prompt="",
+            schedule="every 30m",
+            script="watchdog.sh",
+            no_agent=True,
+        )
+        script.unlink()
+
+        # The cron tool includes enabled=True for an unpaused schedule edit.
+        # That is not a disabled-to-enabled transition and must remain usable
+        # to reduce the cadence of a legacy broken job.
+        updated = update_job(
+            job["id"], {"schedule": "every 2h", "enabled": True}
+        )
+
+        assert updated["enabled"] is True
+        assert get_job(job["id"])["schedule"]["kind"] == "interval"
 
 
 def test_cronjob_tool_rejects_stale_past_one_shot(cron_env, monkeypatch):

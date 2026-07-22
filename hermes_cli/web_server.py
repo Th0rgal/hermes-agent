@@ -771,6 +771,9 @@ _CATEGORY_MERGE: Dict[str, str] = {
     "prompt_caching": "agent",
     "goals": "agent",
     "updates": "general",
+    # SessionDB durability currently exposes one operator-facing setting. Keep
+    # it in the general tab until the category has enough fields of its own.
+    "session_db": "general",
     # `onboarding.profile_build` is the only schema-surfaced onboarding field
     # (`onboarding.seen` is an internal latch dict, not a user setting), so fold
     # it into the agent tab rather than spawning a one-field orphan category.

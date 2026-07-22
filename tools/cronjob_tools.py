@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cron.jobs import (
     AmbiguousJobReference,
+    _validate_no_agent_script,
     claim_job_for_fire,
     create_job,
     get_job,
@@ -618,6 +619,15 @@ def _execute_job_now(job: Dict[str, Any]) -> Dict[str, Any]:
     Returns {"claimed": bool, "success": bool, "error": str|None}.
     """
     job_id = job["id"]
+
+    # Tool-triggered runs bypass cron.jobs.trigger_job(), so enforce the same
+    # no-agent invariant before claiming or mutating the schedule.
+    if job.get("no_agent"):
+        try:
+            _validate_no_agent_script(job.get("script"))
+        except ValueError as exc:
+            return {"claimed": False, "success": False, "error": str(exc)}
+
     try:
         from cron.scheduler import run_one_job
 

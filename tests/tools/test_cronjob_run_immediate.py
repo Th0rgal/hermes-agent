@@ -17,6 +17,24 @@ _JOB = {"id": "job-run-1", "name": "manual run", "prompt": "hi",
 
 
 class TestCronjobRunExecutesImmediately:
+    def test_run_no_agent_job_validates_script_before_claim(self):
+        """The immediate tool path must fail closed before claiming a stale job."""
+        job = {**_JOB, "no_agent": True, "script": "missing-watchdog.sh"}
+        with patch("tools.cronjob_tools.resolve_job_ref", return_value=job), \
+             patch(
+                 "tools.cronjob_tools._validate_no_agent_script",
+                 side_effect=ValueError("script does not exist"),
+             ) as m_validate, \
+             patch("tools.cronjob_tools.claim_job_for_fire") as m_claim:
+            out = json.loads(cronjob(action="run", job_id="job-run-1"))
+
+        assert out["success"] is True
+        assert out["job"]["executed"] is False
+        assert out["job"]["execution_success"] is False
+        assert out["job"]["execution_skipped"] == "script does not exist"
+        m_validate.assert_called_once_with("missing-watchdog.sh")
+        m_claim.assert_not_called()
+
     def test_run_action_claims_and_fires_via_run_one_job(self):
         """action='run' must claim the job then fire it through run_one_job."""
         ran = {"job": "after-run", "last_status": "ok", "last_error": None}

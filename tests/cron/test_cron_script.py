@@ -637,6 +637,30 @@ class TestScriptPathContainment:
         assert success is True
         assert output == "ok"
 
+    def test_execution_uses_the_same_scoped_store_as_validation(
+        self, cron_env, tmp_path
+    ):
+        """A profile-scoped job must execute the script that authorized it."""
+        from cron.jobs import _validate_no_agent_script, use_cron_store
+        from cron.scheduler import _run_job_script
+
+        (cron_env / "scripts" / "watchdog.py").write_text(
+            'print("wrong profile")\n', encoding="utf-8"
+        )
+        profile_home = tmp_path / "profile"
+        (profile_home / "scripts").mkdir(parents=True)
+        (profile_home / "scripts" / "watchdog.py").write_text(
+            'print("scoped profile")\n', encoding="utf-8"
+        )
+
+        with use_cron_store(profile_home):
+            validated = _validate_no_agent_script("watchdog.py")
+            success, output = _run_job_script("watchdog.py")
+
+        assert validated == profile_home / "scripts" / "watchdog.py"
+        assert success is True
+        assert output == "scoped profile"
+
     def test_subdirectory_inside_scripts_dir_allowed(self, cron_env):
         """Relative paths to subdirectories within scripts/ should work."""
         from cron.scheduler import _run_job_script

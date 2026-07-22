@@ -87,6 +87,151 @@ class TestJobScriptField:
         updated = update_job(job["id"], {"script": None})
         assert updated.get("script") is None
 
+    def test_create_no_agent_job_rejects_missing_script(self, cron_env):
+        from cron.jobs import create_job, list_jobs
+
+        with pytest.raises(ValueError, match="before its script exists"):
+            create_job(
+                prompt="",
+                schedule="every 30m",
+                script="missing-watchdog.sh",
+                no_agent=True,
+            )
+
+        assert list_jobs(include_disabled=True) == []
+
+    def test_create_no_agent_job_accepts_existing_script(self, cron_env):
+        from cron.jobs import create_job
+
+        script = cron_env / "scripts" / "watchdog.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        job = create_job(
+            prompt="",
+            schedule="every 30m",
+            script="watchdog.sh",
+            no_agent=True,
+        )
+
+        assert job["script"] == "watchdog.sh"
+        assert job["no_agent"] is True
+
+    def test_no_agent_script_uses_scoped_profile_store(self, cron_env, tmp_path):
+        from cron.jobs import create_job, use_cron_store
+
+        # A same-named default-profile script must not authorize a job stored
+        # under another profile.
+        (cron_env / "scripts" / "watchdog.sh").write_text(
+            "#!/bin/sh\n", encoding="utf-8"
+        )
+        profile_home = tmp_path / "profile"
+        (profile_home / "scripts").mkdir(parents=True)
+
+        with use_cron_store(profile_home):
+            with pytest.raises(ValueError, match="before its script exists"):
+                create_job(
+                    prompt="",
+                    schedule="every 30m",
+                    script="watchdog.sh",
+                    no_agent=True,
+                )
+
+            (profile_home / "scripts" / "watchdog.sh").write_text(
+                "#!/bin/sh\n", encoding="utf-8"
+            )
+            job = create_job(
+                prompt="",
+                schedule="every 30m",
+                script="watchdog.sh",
+                no_agent=True,
+            )
+
+        assert job["script"] == "watchdog.sh"
+
+    def test_update_no_agent_job_rejects_missing_replacement_script(self, cron_env):
+        from cron.jobs import create_job, get_job, update_job
+
+        script = cron_env / "scripts" / "watchdog.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        job = create_job(
+            prompt="",
+            schedule="every 30m",
+            script="watchdog.sh",
+            no_agent=True,
+        )
+
+        with pytest.raises(ValueError, match="before its script exists"):
+            update_job(job["id"], {"script": "missing-watchdog.sh"})
+
+        assert get_job(job["id"])["script"] == "watchdog.sh"
+
+    def test_existing_no_agent_job_with_missing_script_can_pause_but_not_resume(
+        self, cron_env
+    ):
+        from cron.jobs import create_job, get_job, pause_job, resume_job, update_job
+
+        script = cron_env / "scripts" / "watchdog.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        job = create_job(
+            prompt="",
+            schedule="every 30m",
+            script="watchdog.sh",
+            no_agent=True,
+        )
+        script.unlink()
+
+        # Existing jobs remain manageable after an operator removes a script:
+        # metadata edits and, crucially, pausing the noisy job still work.
+        assert update_job(job["id"], {"name": "broken watchdog"})["name"] == "broken watchdog"
+        assert pause_job(job["id"])["enabled"] is False
+        assert get_job(job["id"])["state"] == "paused"
+
+        with pytest.raises(ValueError, match="before its script exists"):
+            resume_job(job["id"])
+
+        assert get_job(job["id"])["enabled"] is False
+
+    def test_enabled_schedule_edit_does_not_revalidate_missing_script(self, cron_env):
+        from cron.jobs import create_job, get_job, update_job
+
+        script = cron_env / "scripts" / "watchdog.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        job = create_job(
+            prompt="",
+            schedule="every 30m",
+            script="watchdog.sh",
+            no_agent=True,
+        )
+        script.unlink()
+
+        # The cron tool includes enabled=True for an unpaused schedule edit.
+        # That is not a disabled-to-enabled transition and must remain usable
+        # to reduce the cadence of a legacy broken job.
+        updated = update_job(
+            job["id"], {"schedule": "every 2h", "enabled": True}
+        )
+
+        assert updated["enabled"] is True
+        assert get_job(job["id"])["schedule"]["kind"] == "interval"
+
+    def test_trigger_enabled_no_agent_job_rejects_missing_script(self, cron_env):
+        from cron.jobs import create_job, get_job, trigger_job
+
+        script = cron_env / "scripts" / "watchdog.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        job = create_job(
+            prompt="",
+            schedule="every 30m",
+            script="watchdog.sh",
+            no_agent=True,
+        )
+        script.unlink()
+
+        with pytest.raises(ValueError, match="before its script exists"):
+            trigger_job(job["id"])
+
+        assert get_job(job["id"])["enabled"] is True
+
 
 def test_cronjob_tool_rejects_stale_past_one_shot(cron_env, monkeypatch):
     from tools.cronjob_tools import cronjob
@@ -491,6 +636,30 @@ class TestScriptPathContainment:
         success, output = _run_job_script("good.py")
         assert success is True
         assert output == "ok"
+
+    def test_execution_uses_the_same_scoped_store_as_validation(
+        self, cron_env, tmp_path
+    ):
+        """A profile-scoped job must execute the script that authorized it."""
+        from cron.jobs import _validate_no_agent_script, use_cron_store
+        from cron.scheduler import _run_job_script
+
+        (cron_env / "scripts" / "watchdog.py").write_text(
+            'print("wrong profile")\n', encoding="utf-8"
+        )
+        profile_home = tmp_path / "profile"
+        (profile_home / "scripts").mkdir(parents=True)
+        (profile_home / "scripts" / "watchdog.py").write_text(
+            'print("scoped profile")\n', encoding="utf-8"
+        )
+
+        with use_cron_store(profile_home):
+            validated = _validate_no_agent_script("watchdog.py")
+            success, output = _run_job_script("watchdog.py")
+
+        assert validated == profile_home / "scripts" / "watchdog.py"
+        assert success is True
+        assert output == "scoped profile"
 
     def test_subdirectory_inside_scripts_dir_allowed(self, cron_env):
         """Relative paths to subdirectories within scripts/ should work."""

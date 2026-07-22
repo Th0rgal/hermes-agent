@@ -1069,6 +1069,48 @@ def _normalized_inference_axes(job: Dict[str, Any]) -> Tuple[Optional[str], Opti
     )
 
 
+def _resolve_cron_script_path(script: str) -> Tuple[Path, Path]:
+    """Resolve a cron script against the active profile-scoped store."""
+    scripts_dir = (_current_cron_store().cron_dir.parent / "scripts").resolve()
+    raw = Path(script).expanduser()
+    path = raw.resolve() if raw.is_absolute() else (scripts_dir / raw).resolve()
+    return path, scripts_dir
+
+
+def _validate_no_agent_script(script: Optional[str]) -> Path:
+    """Fail fast when a script-only job cannot possibly run.
+
+    Agent-backed jobs may intentionally reference a script that is provisioned
+    later.  A ``no_agent`` job has no fallback, however: storing it before the
+    script exists only creates an endlessly failing scheduler entry and noisy
+    delivery alerts.  Validate the effective path at both create and update
+    boundaries while retaining the scheduler's containment rules.
+    """
+    if not script:
+        raise ValueError(
+            "no_agent=True requires a script — with no agent and no script "
+            "there is nothing for the job to run."
+        )
+
+    # Cron storage is context-scoped per profile. Derive the sibling scripts
+    # directory from that same store instead of the ambient HERMES_HOME, which
+    # may belong to a different profile in dashboard/gateway callers.
+    path, scripts_dir = _resolve_cron_script_path(script)
+    try:
+        path.relative_to(scripts_dir)
+    except ValueError as exc:
+        raise ValueError(
+            f"Cron script must resolve inside {scripts_dir}: {script!r}"
+        ) from exc
+
+    if not path.is_file():
+        raise ValueError(
+            f"Cannot create or enable a no-agent cron job before its script "
+            f"exists as a regular file: {path}"
+        )
+    return path
+
+
 def create_job(
     prompt: Optional[str],
     schedule: str,
@@ -1164,14 +1206,14 @@ def create_job(
     normalized_no_agent = bool(no_agent)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
 
-    # no_agent jobs are meaningless without a script — the script IS the job.
-    # Surface this as a clear ValueError at create time so bad configs never
-    # reach the scheduler.
-    if normalized_no_agent and not normalized_script:
-        raise ValueError(
-            "no_agent=True requires a script — with no agent and no script "
-            "there is nothing for the job to run."
-        )
+    # no_agent jobs are meaningless without a runnable script — the script IS
+    # the job. Surface this at creation so an invalid watchdog never reaches
+    # the scheduler and starts emitting periodic failure deliveries.
+    resolved_script_for_guard = None
+    if normalized_no_agent:
+        resolved_script_for_guard = _validate_no_agent_script(normalized_script)
+    elif normalized_script:
+        resolved_script_for_guard, _ = _resolve_cron_script_path(normalized_script)
 
     # Normalize context_from: accept str or list of str, store as list or None
     if isinstance(context_from, str):
@@ -1189,7 +1231,10 @@ def create_job(
     # `cronjob` model tool — which calls create_job directly — is also
     # covered, not just `hermes cron create`.
     from cron.lifecycle_guard import check_gateway_lifecycle
-    check_gateway_lifecycle(prompt_text, normalized_script)
+    check_gateway_lifecycle(
+        prompt_text,
+        str(resolved_script_for_guard) if resolved_script_for_guard else None,
+    )
 
     label_source = (prompt_text or (normalized_skills[0] if normalized_skills else None) or (normalized_script if normalized_no_agent else None)) or "cron job"
 
@@ -1358,6 +1403,20 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
             previous_inference_axes = _normalized_inference_axes(job)
             updated = _apply_skill_fields({**job, **updates})
+            # Do not strand a legacy invalid job: pausing, renaming, or fixing
+            # its schedule must remain possible even if its script disappeared.
+            # Validate whenever an update changes the execution mode/script or
+            # makes the job runnable again.
+            reenabled = not bool(job.get("enabled", True)) and bool(
+                updated.get("enabled", True)
+            )
+            validates_script = (
+                "script" in updates or "no_agent" in updates or reenabled
+            )
+            if updated.get("no_agent") and validates_script:
+                _validate_no_agent_script(
+                    _normalize_job_optional_text(updated.get("script"))
+                )
             schedule_changed = "schedule" in updates
             inference_fields_changed = bool(
                 {"provider", "model", "base_url", "no_agent"}.intersection(updates)
@@ -1452,6 +1511,8 @@ def resume_job(job_id: str) -> Optional[Dict[str, Any]]:
     job = resolve_job_ref(job_id)
     if not job:
         return None
+    if job.get("no_agent"):
+        _validate_no_agent_script(_normalize_job_optional_text(job.get("script")))
 
     next_run_at = compute_next_run(job["schedule"])
     if next_run_at is None and job["schedule"].get("kind") == "once":
@@ -1477,6 +1538,8 @@ def trigger_job(job_id: str) -> Optional[Dict[str, Any]]:
     job = resolve_job_ref(job_id)
     if not job:
         return None
+    if job.get("no_agent"):
+        _validate_no_agent_script(_normalize_job_optional_text(job.get("script")))
     return update_job(
         job["id"],
         {

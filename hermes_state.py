@@ -15,8 +15,10 @@ Key design decisions:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
 import random
 import re
 import sqlite3
@@ -31,6 +33,66 @@ from hermes_constants import get_hermes_home
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
+
+
+def _delivery_spool_dir() -> Path:
+    return Path(get_hermes_home()) / "delivery-spool"
+
+
+def spool_session_delivery(
+    delivery_id: str,
+    session_id: str,
+    role: str,
+    content: str,
+) -> Path:
+    """Atomically spool a transcript delivery after SessionDB retries expire."""
+    spool_dir = _delivery_spool_dir()
+    spool_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    digest = hashlib.sha256(delivery_id.encode("utf-8")).hexdigest()
+    destination = spool_dir / f"{digest}.json"
+    temporary = spool_dir / f".{digest}.{os.getpid()}.{threading.get_ident()}.tmp"
+    payload = {
+        "delivery_id": delivery_id,
+        "session_id": session_id,
+        "role": role,
+        "content": content,
+        "created_at": time.time(),
+    }
+    with temporary.open("x", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, destination)
+    return destination
+
+
+def replay_session_delivery_spool(
+    db_path: Optional[Path] = None,
+) -> Dict[str, int]:
+    """Replay durable deliveries, deleting files only after a committed append."""
+    spool_dir = _delivery_spool_dir()
+    result = {"replayed": 0, "failed": 0}
+    if not spool_dir.exists():
+        return result
+    db = SessionDB(db_path=db_path)
+    try:
+        for path in sorted(spool_dir.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                db.append_message(
+                    session_id=str(payload["session_id"]),
+                    role=str(payload.get("role") or "assistant"),
+                    content=payload.get("content"),
+                    delivery_id=str(payload["delivery_id"]),
+                )
+                path.unlink()
+                result["replayed"] += 1
+            except Exception:
+                result["failed"] += 1
+                logger.exception("Failed to replay SessionDB delivery spool entry %s", path)
+    finally:
+        db.close()
+    return result
 
 
 def _scrub_surrogates(value: Any) -> Any:
@@ -152,7 +214,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 24
 
 # Cap on user-controlled FTS5 query input before regex/sanitizer processing.
 # Search queries do not need to be arbitrarily large, and bounding them keeps
@@ -833,6 +895,13 @@ CREATE TABLE IF NOT EXISTS messages (
     api_content TEXT
 );
 
+CREATE TABLE IF NOT EXISTS delivery_receipts (
+    delivery_id TEXT PRIMARY KEY,
+    message_id INTEGER,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS session_model_usage (
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     model TEXT NOT NULL,
@@ -1001,6 +1070,7 @@ class SessionDB:
     _WRITE_MAX_RETRIES = 15
     _WRITE_RETRY_MIN_S = 0.020   # 20ms
     _WRITE_RETRY_MAX_S = 0.150   # 150ms
+    _WRITE_RETRY_DEADLINE_S = 10.0
     # Attempt a WAL checkpoint every N successful writes (PASSIVE mode).
     _CHECKPOINT_EVERY_N_WRITES = 50
     # Merge fragmented FTS5 segments every N successful writes. The message
@@ -1026,6 +1096,7 @@ class SessionDB:
     def __init__(self, db_path: Path = None, read_only: bool = False):
         self.db_path = db_path or DEFAULT_DB_PATH
         self.read_only = read_only
+        self._write_retry_deadline_s = self._configured_write_retry_deadline_s()
 
         self._lock = threading.Lock()
         self._write_count = 0
@@ -1119,6 +1190,22 @@ class SessionDB:
             # ``hermes_state._set_last_init_error(None)`` explicitly.
             _set_last_init_error(f"{type(exc).__name__}: {exc}")
             raise
+
+    @classmethod
+    def _configured_write_retry_deadline_s(cls) -> float:
+        """Resolve the SessionDB write deadline from user-facing config.yaml."""
+        try:
+            from hermes_cli.config import cfg_get, load_config
+
+            value = cfg_get(
+                load_config(),
+                "session_db",
+                "write_retry_deadline_seconds",
+                default=cls._WRITE_RETRY_DEADLINE_S,
+            )
+            return max(0.1, float(value))
+        except (ImportError, TypeError, ValueError):
+            return cls._WRITE_RETRY_DEADLINE_S
 
     # ── Core write helper ──
 
@@ -1283,7 +1370,11 @@ class SessionDB:
         Returns whatever *fn* returns.
         """
         last_err: Optional[Exception] = None
-        for attempt in range(self._WRITE_MAX_RETRIES):
+        started_at = time.monotonic()
+        deadline_at = started_at + self._write_retry_deadline_s
+        attempt = 0
+        while attempt < self._WRITE_MAX_RETRIES and time.monotonic() < deadline_at:
+            transaction_started_at = time.monotonic()
             try:
                 with self._lock:
                     self._conn.execute("BEGIN IMMEDIATE")
@@ -1302,17 +1393,30 @@ class SessionDB:
                     self._try_wal_checkpoint()
                 if self._write_count % self._OPTIMIZE_EVERY_N_WRITES == 0:
                     self._try_optimize_fts()
+                if attempt:
+                    logger.info(
+                        "SessionDB write recovered lock_wait_ms=%.1f retries=%d transaction_ms=%.1f",
+                        (transaction_started_at - started_at) * 1000,
+                        attempt,
+                        (time.monotonic() - transaction_started_at) * 1000,
+                    )
                 return result
             except sqlite3.OperationalError as exc:
                 err_msg = str(exc).lower()
                 if "locked" in err_msg or "busy" in err_msg:
                     last_err = exc
-                    if attempt < self._WRITE_MAX_RETRIES - 1:
-                        jitter = random.uniform(
-                            self._WRITE_RETRY_MIN_S,
+                    remaining = deadline_at - time.monotonic()
+                    if attempt < self._WRITE_MAX_RETRIES - 1 and remaining > 0:
+                        # Bounded full jitter: every retry samples from zero to
+                        # the exponentially increasing cap, avoiding writer convoys.
+                        cap = min(
                             self._WRITE_RETRY_MAX_S,
+                            self._WRITE_RETRY_MIN_S * (2 ** attempt),
+                            remaining,
                         )
+                        jitter = random.uniform(0, max(0, cap))
                         time.sleep(jitter)
+                        attempt += 1
                         continue
                 # Non-lock error or retries exhausted — propagate.
                 raise
@@ -1328,8 +1432,16 @@ class SessionDB:
                 # rebuild_fts() and retry the failed write immediately.
                 if not self._try_runtime_fts_rebuild(exc):
                     raise
+                attempt += 1
                 continue
         # Retries exhausted (shouldn't normally reach here).
+        logger.error(
+            "SessionDB write failed lock_wait_ms=%.1f retries=%d deadline_s=%.1f error=%s",
+            (time.monotonic() - started_at) * 1000,
+            attempt,
+            self._write_retry_deadline_s,
+            last_err,
+        )
         raise last_err or sqlite3.OperationalError(
             "database is locked after max retries"
         )
@@ -1547,6 +1659,46 @@ class SessionDB:
                             "reconcile %s.%s: %s", table_name, col_name, exc,
                         )
 
+    @staticmethod
+    def _ensure_delivery_receipts_cascade(cursor: sqlite3.Cursor) -> None:
+        """Upgrade the delivery receipt FK without losing persisted receipts."""
+        foreign_keys = cursor.execute(
+            "PRAGMA foreign_key_list('delivery_receipts')"
+        ).fetchall()
+        if any(
+            row[2] == "messages" and str(row[6]).upper() == "CASCADE"
+            for row in foreign_keys
+        ):
+            return
+
+        # SQLite cannot ALTER a foreign-key action in place. Keep the rebuild
+        # in a savepoint so an interrupted startup leaves the old table and
+        # its idempotency receipts intact.
+        cursor.execute("SAVEPOINT delivery_receipts_cascade")
+        try:
+            cursor.execute(
+                "ALTER TABLE delivery_receipts RENAME TO delivery_receipts_v23"
+            )
+            cursor.execute(
+                """CREATE TABLE delivery_receipts (
+                       delivery_id TEXT PRIMARY KEY,
+                       message_id INTEGER,
+                       created_at REAL NOT NULL,
+                       FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+                   )"""
+            )
+            cursor.execute(
+                """INSERT INTO delivery_receipts (delivery_id, message_id, created_at)
+                   SELECT delivery_id, message_id, created_at
+                   FROM delivery_receipts_v23"""
+            )
+            cursor.execute("DROP TABLE delivery_receipts_v23")
+            cursor.execute("RELEASE delivery_receipts_cascade")
+        except BaseException:
+            cursor.execute("ROLLBACK TO delivery_receipts_cascade")
+            cursor.execute("RELEASE delivery_receipts_cascade")
+            raise
+
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
 
@@ -1570,6 +1722,11 @@ class SessionDB:
         # migration was skipped (e.g. due to version renumbering), the
         # column gets created here.
         self._reconcile_columns(cursor)
+
+        # v24: delivery receipts follow their message. Earlier builds used
+        # SQLite's default RESTRICT action, which made clear/delete/prune fail
+        # for any session containing a durably delivered cron message.
+        self._ensure_delivery_receipts_cascade(cursor)
 
         # Indexes that reference reconciler-added columns must be created
         # AFTER _reconcile_columns runs — declaring them in SCHEMA_SQL
@@ -4169,6 +4326,7 @@ class SessionDB:
         effect_disposition: Optional[str] = None,
         timestamp: Any = None,
         api_content: Optional[str] = None,
+        delivery_id: Optional[str] = None,
     ) -> int:
         """
         Append a message to a session. Returns the message row ID.
@@ -4224,6 +4382,17 @@ class SessionDB:
             num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
 
         def _do(conn):
+            if delivery_id:
+                claimed = conn.execute(
+                    "INSERT OR IGNORE INTO delivery_receipts (delivery_id, message_id, created_at) VALUES (?, NULL, ?)",
+                    (delivery_id, time.time()),
+                )
+                if claimed.rowcount == 0:
+                    prior = conn.execute(
+                        "SELECT message_id FROM delivery_receipts WHERE delivery_id = ?",
+                        (delivery_id,),
+                    ).fetchone()
+                    return prior[0] if prior and prior[0] is not None else 0
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, effect_disposition, timestamp, token_count, finish_reason,
@@ -4265,6 +4434,11 @@ class SessionDB:
                 conn.execute(
                     "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
                     (session_id,),
+                )
+            if delivery_id:
+                conn.execute(
+                    "UPDATE delivery_receipts SET message_id = ? WHERE delivery_id = ?",
+                    (msg_id, delivery_id),
                 )
             return msg_id
 

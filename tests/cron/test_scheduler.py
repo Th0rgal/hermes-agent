@@ -4058,6 +4058,7 @@ class TestDeliverApiServerOrigin:
 
         job = {
             "id": "desktop-watch",
+            "_delivery_run_id": str(tmp_path),
             "name": "Desktop build watcher",
             "deliver": "origin",
             "origin": {
@@ -4086,6 +4087,7 @@ class TestDeliverApiServerOrigin:
 
         job = {
             "id": "bad-target",
+            "_delivery_run_id": str(tmp_path),
             "deliver": "origin",
             "origin": {
                 "platform": "api_server",

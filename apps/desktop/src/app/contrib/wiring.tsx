@@ -35,6 +35,7 @@ import { $activeGatewayProfile, $freshSessionRequest, $profileScope, refreshActi
 import { $startWorkSessionRequest, followActiveSessionCwd } from '@/store/projects'
 import {
   $activeSessionId,
+  $busy,
   $connection,
   $currentCwd,
   $freshDraftReady,
@@ -86,6 +87,7 @@ import { usePreviewRouting } from '../session/hooks/use-preview-routing'
 import { usePromptActions } from '../session/hooks/use-prompt-actions'
 import { useRouteResume } from '../session/hooks/use-route-resume'
 import { useSessionActions } from '../session/hooks/use-session-actions'
+import { preserveLocalPendingTurnMessages } from '../session/hooks/use-session-actions/utils'
 import { useSessionListActions } from '../session/hooks/use-session-list-actions'
 import { useSessionStateCache } from '../session/hooks/use-session-state-cache'
 import { startWorkspaceSession } from '../session/workspace-session-target'
@@ -341,7 +343,23 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     const storedSessionId = selectedStoredSessionIdRef.current
     const runtimeSessionId = activeSessionIdRef.current
 
-    if (!storedSessionId || !runtimeSessionId || busyRef.current) {
+    if (!storedSessionId || !runtimeSessionId || busyRef.current || $busy.get()) {
+      return
+    }
+
+    const cachedState = sessionStateByRuntimeIdRef.current.get(runtimeSessionId)
+
+    // `busyRef` follows the focused global store through a React effect and can
+    // briefly lag during a warm session switch. The per-session cache remains
+    // authoritative for an in-flight background turn; never let an external
+    // transcript poll replace its optimistic correction or streaming tail.
+    if (
+      cachedState &&
+      (cachedState.busy ||
+        cachedState.awaitingResponse ||
+        cachedState.streamId ||
+        cachedState.turnStartedAt !== null)
+    ) {
       return
     }
 
@@ -367,13 +385,26 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
       updateSessionState(
         runtimeSessionId,
-        state => ({ ...state, messages: preserveLocalAssistantErrors(messages, state.messages) }),
+        state => {
+          const withPendingTurn = preserveLocalPendingTurnMessages(messages, state.messages)
+
+          return {
+            ...state,
+            messages: preserveLocalAssistantErrors(withPendingTurn, state.messages)
+          }
+        },
         storedSessionId
       )
     } catch {
       // Non-fatal: next poll or manual refresh can hydrate.
     }
-  }, [activeSessionIdRef, busyRef, selectedStoredSessionIdRef, updateSessionState])
+  }, [
+    activeSessionIdRef,
+    busyRef,
+    selectedStoredSessionIdRef,
+    sessionStateByRuntimeIdRef,
+    updateSessionState
+  ])
 
   const { handleGatewayEvent } = useMessageStream({
     activeGatewayProfile,

@@ -96,6 +96,34 @@ def test_spool_survives_and_replays_once(tmp_path, monkeypatch):
         verify.close()
 
 
+def test_spool_preserves_observed_delivery_provenance(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / "state.db"
+    db = SessionDB(db_path=path)
+    try:
+        db.create_session("desktop-1", source="desktop")
+    finally:
+        db.close()
+
+    spool_session_delivery(
+        "cron:desktop:desktop-1:j:r1",
+        "desktop-1",
+        "user",
+        "[Cron delivery: j]\nDone.",
+        observed=True,
+    )
+    assert replay_session_delivery_spool(db_path=path) == {"replayed": 1, "failed": 0}
+
+    verify = SessionDB(path)
+    try:
+        [message] = verify.get_messages_as_conversation("desktop-1")
+        assert message["role"] == "user"
+        assert message["observed"] is True
+    finally:
+        verify.close()
+
+
 def test_concurrent_writer_waits_for_lock_without_losing_delivery(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))

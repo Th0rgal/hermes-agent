@@ -2274,7 +2274,7 @@ class APIServerAdapter(BasePlatformAdapter):
         safe_keys = (
             "id", "session_id", "role", "content", "tool_call_id", "tool_calls",
             "tool_name", "timestamp", "token_count", "finish_reason", "reasoning",
-            "reasoning_content",
+            "reasoning_content", "observed",
         )
         return {key: message.get(key) for key in safe_keys if key in message}
 
@@ -2493,6 +2493,38 @@ class APIServerAdapter(BasePlatformAdapter):
         db = await self._ensure_session_db_async()
         resolved_id = await asyncio.to_thread(db.resolve_resume_session_id, session_id)
         messages = await asyncio.to_thread(db.get_messages, resolved_id)
+
+        # This endpoint is the Desktop/Web client transcript projection, not
+        # the model replay path used by _conversation_history_for_session.
+        # Keep its durable refresh consistent with the live gateway stream:
+        # when interim assistant commentary is disabled, narration attached to
+        # tool-call rounds must not reappear on the next poll after
+        # message.complete replaced it with the terminal response.
+        try:
+            from gateway.display_config import (
+                is_interim_assistant_history_message,
+                resolve_display_setting,
+            )
+            from hermes_cli.config import load_config
+
+            include_interims = bool(
+                resolve_display_setting(
+                    load_config(),
+                    "api_server",
+                    "interim_assistant_messages",
+                    True,
+                )
+            )
+        except Exception:
+            include_interims = True
+
+        if not include_interims:
+            messages = [
+                message
+                for message in messages
+                if not is_interim_assistant_history_message(message)
+            ]
+
         return web.json_response({
             "object": "list",
             "session_id": resolved_id,
@@ -5491,19 +5523,32 @@ class APIServerAdapter(BasePlatformAdapter):
 
         try:
             from hermes_cli.auth import has_usable_secret
-            if not has_usable_secret(self._api_key, min_length=16):
-                logger.error(
-                    "[%s] Refusing to start: API_SERVER_KEY is a "
-                    "placeholder or too short (<16 chars). This endpoint "
-                    "dispatches terminal-capable agent work — a guessable "
-                    "key is remote code execution. Generate a strong secret "
-                    "(e.g. `openssl rand -hex 32`) and set API_SERVER_KEY "
-                    "before starting the API server on %s.",
-                    self.name, self._host,
-                )
-                return False
-        except ImportError:
-            pass
+        except Exception as exc:
+            # Fail CLOSED. This guard is the only thing between a guessable
+            # key and a terminal-capable endpoint, so "the check could not be
+            # run" must not resolve to "start anyway" — the same posture
+            # tools/credential_files.py takes when its deny-list cannot be
+            # consulted.
+            logger.error(
+                "[%s] Refusing to start: API_SERVER_KEY strength could not be "
+                "verified (%s: %s), and this endpoint dispatches "
+                "terminal-capable agent work. Repair the installation before "
+                "starting the API server on %s.",
+                self.name, type(exc).__name__, exc, self._host,
+            )
+            return False
+
+        if not has_usable_secret(self._api_key, min_length=16):
+            logger.error(
+                "[%s] Refusing to start: API_SERVER_KEY is a "
+                "placeholder or too short (<16 chars). This endpoint "
+                "dispatches terminal-capable agent work — a guessable "
+                "key is remote code execution. Generate a strong secret "
+                "(e.g. `openssl rand -hex 32`) and set API_SERVER_KEY "
+                "before starting the API server on %s.",
+                self.name, self._host,
+            )
+            return False
         return True
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:

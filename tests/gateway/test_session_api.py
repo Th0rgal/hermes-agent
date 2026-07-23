@@ -190,6 +190,76 @@ async def test_session_messages_follow_compression_tip(adapter, session_db):
 
 
 @pytest.mark.asyncio
+async def test_session_messages_preserve_observed_callback_provenance(adapter, session_db):
+    session_id = session_db.create_session("callback-session", "api_server")
+    session_db.append_message(
+        session_id,
+        "user",
+        "[Cron delivery: watcher]\nBuild finished.",
+        observed=True,
+    )
+
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        response = await cli.get(f"/api/sessions/{session_id}/messages")
+        assert response.status == 200
+        payload = await response.json()
+
+    assert payload["data"][0]["role"] == "user"
+    assert payload["data"][0]["observed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_session_messages_hide_tool_round_narration_when_interims_disabled(
+    adapter,
+    session_db,
+):
+    session_id = session_db.create_session("no-interims", "api_server")
+    session_db.append_message(session_id, "user", "inspect")
+    session_db.append_message(
+        session_id,
+        "assistant",
+        "Let me inspect that.",
+        tool_calls=[
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "terminal", "arguments": "{}"},
+            }
+        ],
+    )
+    session_db.append_message(
+        session_id,
+        "tool",
+        "done",
+        tool_call_id="call-1",
+        tool_name="terminal",
+    )
+    session_db.append_message(session_id, "assistant", "Final answer.")
+
+    app = _create_session_app(adapter)
+    with patch(
+        "hermes_cli.config.load_config",
+        return_value={"display": {"interim_assistant_messages": False}},
+    ):
+        async with TestClient(TestServer(app)) as cli:
+            response = await cli.get(f"/api/sessions/{session_id}/messages")
+            assert response.status == 200
+            payload = await response.json()
+
+    assert [message["role"] for message in payload["data"]] == [
+        "user",
+        "tool",
+        "assistant",
+    ]
+    assert [message["content"] for message in payload["data"]] == [
+        "inspect",
+        "done",
+        "Final answer.",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_session_fork_uses_current_sessiondb_branch_primitives(adapter, session_db):
     source_id = session_db.create_session("source-session", "api_server", model="test-model")
     session_db.set_session_title(source_id, "Original")

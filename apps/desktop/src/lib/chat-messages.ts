@@ -170,7 +170,10 @@ export interface UnspokenTurnSpeech {
  * join is a sentence boundary for the server's cutter, so a sealed bubble's
  * tail is flushed as soon as the next bubble starts.
  */
-export function collectUnspokenTurnSpeech(messages: ChatMessage[], lastSpokenId: string | null): UnspokenTurnSpeech | null {
+export function collectUnspokenTurnSpeech(
+  messages: ChatMessage[],
+  lastSpokenId: string | null
+): UnspokenTurnSpeech | null {
   const spokenIndex = lastSpokenId ? messages.findLastIndex(m => m.id === lastSpokenId) : -1
 
   let id: string | null = null
@@ -881,7 +884,22 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     }
 
     const content = message.content || message.text || message.context || message.name
-    const displayContent = displayContentForMessage(message.role, content)
+    const contentText = textFromUnknown(content)
+
+    // Cron results are stored as observed user rows because inserting a
+    // synthetic assistant row into model history can violate strict role
+    // alternation. Presentation has a different authority: an observed cron
+    // result was produced by Hermes, not typed by the human, so render it as an
+    // assistant response. Requiring both provenance and the scheduler sentinel
+    // prevents a human-authored lookalike from spoofing agent output.
+    const isObserved = message.observed === true || message.observed === 1
+
+    const isObservedCronDelivery =
+      message.role === 'user' && isObserved && contentText.trimStart().startsWith('[Cron delivery:')
+
+    const displayRole: SessionMessage['role'] = isObservedCronDelivery ? 'assistant' : message.role
+
+    const displayContent = displayContentForMessage(displayRole, content)
     const parts: ChatMessagePart[] = []
 
     const reasoning =
@@ -889,20 +907,20 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       message.reasoning_content ||
       (typeof message.reasoning_details === 'string' ? message.reasoning_details : '')
 
-    if (reasoning && message.role === 'assistant') {
+    if (reasoning && displayRole === 'assistant') {
       parts.push(reasoningPart(reasoning))
     }
 
     if (displayContent) {
-      parts.push(message.role === 'assistant' ? assistantTextPart(displayContent) : textPart(displayContent))
+      parts.push(displayRole === 'assistant' ? assistantTextPart(displayContent) : textPart(displayContent))
     }
 
-    if (message.role === 'assistant' && Array.isArray(message.tool_calls)) {
+    if (displayRole === 'assistant' && Array.isArray(message.tool_calls)) {
       parts.push(...message.tool_calls.map((call, callIndex) => toolPartFromStoredCall(call, callIndex)))
     }
 
     if (!parts.length) {
-      if (message.role !== 'assistant') {
+      if (displayRole !== 'assistant') {
         flushPendingTools(index)
         activeAssistantIndex = null
       }
@@ -911,7 +929,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     }
 
     const isToolOnlyAssistant =
-      message.role === 'assistant' && parts.length > 0 && parts.every(part => part.type === 'tool-call')
+      displayRole === 'assistant' && parts.length > 0 && parts.every(part => part.type === 'tool-call')
 
     if (isToolOnlyAssistant) {
       pendingToolParts = [...pendingToolParts, ...parts]
@@ -920,7 +938,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       return
     }
 
-    if (message.role === 'assistant') {
+    if (displayRole === 'assistant') {
       if (pendingToolParts.length) {
         if (!appendPartsToActiveAssistant(pendingToolParts, message.timestamp ?? pendingToolTimestamp)) {
           parts.unshift(...pendingToolParts)
@@ -948,13 +966,13 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     }
 
     result.push({
-      id: `${message.timestamp || Date.now()}-${index}-${message.role}`,
-      role: message.role,
+      id: `${message.timestamp || Date.now()}-${index}-${displayRole}`,
+      role: displayRole,
       parts,
       timestamp: message.timestamp
     })
 
-    activeAssistantIndex = message.role === 'assistant' ? result.length - 1 : null
+    activeAssistantIndex = displayRole === 'assistant' ? result.length - 1 : null
   })
   flushPendingTools(messages.length)
 

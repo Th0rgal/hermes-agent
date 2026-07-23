@@ -285,6 +285,7 @@ from cron.jobs import (
     get_due_jobs,
     heartbeat_run_claim,
     mark_job_run,
+    pause_job,
     save_job_output,
 )
 from cron.executions import create_execution, finish_execution, mark_execution_running
@@ -793,6 +794,17 @@ def _deliver_to_local_session(
     text = (content or "").strip()
     if not text:
         return None
+    label = job.get("name") or job.get("id") or "cron"
+    delivery_content = f"[Cron delivery: {label}]\n{text}"
+    delivery_run_id = (
+        job.get("_delivery_run_id")
+        or job.get("last_run_at")
+        or hashlib.sha256(delivery_content.encode("utf-8")).hexdigest()
+    )
+    delivery_id = (
+        f"cron:{platform_name}:{session_id}:{job.get('id', '?')}:{delivery_run_id}"
+    )
+    resolved_session_id = None
     try:
         from hermes_state import SessionDB
 
@@ -802,6 +814,7 @@ def _deliver_to_local_session(
             sid = (resolve(session_id) if callable(resolve) else None) or session_id
             resolve_resume = getattr(db, "resolve_resume_session_id", None)
             sid = (resolve_resume(sid) if callable(resolve_resume) else None) or sid
+            resolved_session_id = sid
             session = db.get_session(sid)
             if not session:
                 return f"{platform_name} session '{session_id}' not found"
@@ -811,12 +824,12 @@ def _deliver_to_local_session(
                     f"{platform_name} session '{session_id}' has source "
                     f"'{source or 'unknown'}'"
                 )
-            label = job.get("name") or job.get("id") or "cron"
             db.append_message(
                 sid,
                 "user",
-                f"[Cron delivery: {label}]\n{text}",
+                delivery_content,
                 observed=True,
+                delivery_id=delivery_id,
             )
             logger.info(
                 "Job '%s': delivered to %s session %s",
@@ -826,7 +839,34 @@ def _deliver_to_local_session(
         finally:
             db.close()
     except Exception as e:
-        msg = f"{platform_name} delivery to {session_id} failed: {e}"
+        if resolved_session_id is not None:
+            try:
+                from hermes_state import spool_session_delivery
+
+                spool_path = spool_session_delivery(
+                    delivery_id=delivery_id,
+                    session_id=str(resolved_session_id),
+                    role="user",
+                    content=delivery_content,
+                    observed=True,
+                )
+                logger.warning(
+                    "Job '%s': local SessionDB append failed after retries; "
+                    "spooled delivery %s at %s: %s",
+                    job.get("id", "?"),
+                    delivery_id,
+                    spool_path,
+                    e,
+                )
+                return None
+            except Exception as spool_error:
+                msg = (
+                    f"{platform_name} delivery and spool failed for '{session_id}': "
+                    f"append={e}; spool={spool_error}"
+                )
+                logger.error("Job '%s': %s", job.get("id", "?"), msg)
+                return msg
+        msg = f"{platform_name} delivery to {session_id} failed before validation: {e}"
         logger.warning("Job '%s': %s", job.get("id", "?"), msg)
         return msg
 
@@ -1697,63 +1737,14 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         # conversation without falling back to a configured home platform
         # such as Telegram.
         if str(platform_name).lower() == "api_server":
-            db = None
-            delivery_id = (
-                f"cron:{chat_id}:{job.get('id', '?')}:"
-                f"{job.get('_delivery_run_id') or job.get('last_run_at') or hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+            err = _deliver_to_local_session(
+                job,
+                "api_server",
+                str(chat_id),
+                content,
             )
-            try:
-                from hermes_state import SessionDB
-
-                db = SessionDB()
-                session = db.get_session(str(chat_id))
-                if not session or str(session.get("source") or "") != "api_server":
-                    raise ValueError(
-                        f"API session '{chat_id}' does not exist or is not an api_server session"
-                    )
-                db.append_message(
-                    session_id=str(chat_id),
-                    role="assistant",
-                    content=content,
-                    delivery_id=delivery_id,
-                )
-                logger.info(
-                    "Job '%s': appended durable delivery to API session %s",
-                    job.get("id", "?"),
-                    chat_id,
-                )
-            except Exception as e:
-                if isinstance(e, ValueError):
-                    msg = f"API session delivery failed for '{chat_id}': {e}"
-                    logger.warning("Job '%s': %s", job.get("id", "?"), msg)
-                    delivery_errors.append(msg)
-                    continue
-                try:
-                    from hermes_state import spool_session_delivery
-
-                    spool_path = spool_session_delivery(
-                        delivery_id=delivery_id,
-                        session_id=str(chat_id),
-                        role="assistant",
-                        content=content,
-                    )
-                    logger.warning(
-                        "Job '%s': SessionDB append failed after retries; spooled delivery %s at %s: %s",
-                        job.get("id", "?"),
-                        delivery_id,
-                        spool_path,
-                        e,
-                    )
-                except Exception as spool_error:
-                    msg = (
-                        f"API session delivery and spool failed for '{chat_id}': "
-                        f"append={e}; spool={spool_error}"
-                    )
-                    logger.error("Job '%s': %s", job.get("id", "?"), msg)
-                    delivery_errors.append(msg)
-            finally:
-                if db is not None:
-                    db.close()
+            if err:
+                delivery_errors.append(err)
             continue
 
         if config is None:
@@ -3607,6 +3598,7 @@ def run_job(
             api_key=runtime.get("api_key"),
             base_url=runtime.get("base_url"),
             provider=runtime.get("provider"),
+            requested_provider=runtime.get("requested_provider"),
             api_mode=runtime.get("api_mode"),
             acp_command=runtime.get("command"),
             acp_args=runtime.get("args"),
@@ -4156,6 +4148,16 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
 
         if not _consume_interrupted_flag(job["id"]):
             mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+            if (
+                success
+                and should_deliver
+                and delivery_error is None
+                and job.get("pause_after_delivery")
+            ):
+                pause_job(
+                    job["id"],
+                    reason="Automatically paused after successful delivery",
+                )
         finish_execution(execution_id, success=success, error=error)
         return True
 

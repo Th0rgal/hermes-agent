@@ -428,6 +428,8 @@ export interface SessionMessage {
   content: unknown
   context?: unknown
   name?: string
+  /** Persisted external delivery (cron/callback), not text typed by the human. */
+  observed?: boolean | number
   reasoning?: null | string
   reasoning_content?: null | string
   reasoning_details?: unknown

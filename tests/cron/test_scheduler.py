@@ -5,7 +5,7 @@ import itertools
 import json
 import logging
 import os
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import ANY, AsyncMock, patch, MagicMock
 
 import pytest
 
@@ -2913,6 +2913,57 @@ class TestSilentDelivery:
             tick(verbose=False)
         deliver_mock.assert_called_once()
 
+    def test_pause_after_delivery_stops_terminal_callback(self):
+        job = {
+            **self._make_job(),
+            "pause_after_delivery": True,
+        }
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", "Mission completed.", None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result", return_value=None), \
+             patch("cron.scheduler.mark_job_run"), \
+             patch("cron.scheduler.pause_job") as pause_mock:
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        pause_mock.assert_called_once_with(
+            "monitor-job",
+            reason="Automatically paused after successful delivery",
+        )
+
+    def test_pause_after_delivery_does_not_pause_silent_poll(self):
+        job = {
+            **self._make_job(),
+            "pause_after_delivery": True,
+        }
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", "[SILENT]", None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result"), \
+             patch("cron.scheduler.mark_job_run"), \
+             patch("cron.scheduler.pause_job") as pause_mock:
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        pause_mock.assert_not_called()
+
+    def test_pause_after_delivery_waits_for_successful_delivery(self):
+        job = {
+            **self._make_job(),
+            "pause_after_delivery": True,
+        }
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", "Mission completed.", None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result", return_value="transport failed"), \
+             patch("cron.scheduler.mark_job_run"), \
+             patch("cron.scheduler.pause_job") as pause_mock:
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        pause_mock.assert_not_called()
+
     def test_is_cron_silence_response_contract(self):
         """Direct behavior contract for the cron silence matcher."""
         from cron.scheduler import _is_cron_silence_response as sil
@@ -4344,8 +4395,12 @@ class TestDeliverApiServerOrigin:
         db = SessionDB()
         messages = db.get_messages("api-session-1")
         db.close()
-        assert messages[-1]["role"] == "assistant"
-        assert messages[-1]["content"] == "The build finished successfully."
+        assert messages[-1]["role"] == "user"
+        assert messages[-1]["observed"] == 1
+        assert messages[-1]["content"] == (
+            "[Cron delivery: Desktop build watcher]\n"
+            "The build finished successfully."
+        )
 
     def test_rejects_non_api_session_target(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -4368,7 +4423,7 @@ class TestDeliverApiServerOrigin:
         }
         result = _deliver_result(job, "Must not cross session types.")
         assert result is not None
-        assert "not an api_server session" in result
+        assert "has source 'telegram'" in result
 
 
 class TestDeliverOriginUnresolvableIsLocal:
@@ -5633,6 +5688,7 @@ class TestDeliverToLocalSession:
             "user",
             "[Cron delivery: daily-report]\nHere is the report.",
             observed=True,
+            delivery_id=ANY,
         )
         mock_db.close.assert_called_once()
 
@@ -5683,6 +5739,39 @@ class TestDeliverToLocalSession:
 
         assert result is None
         mock_db_cls.assert_not_called()
+
+    def test_same_execution_delivery_is_idempotent(self, tmp_path, monkeypatch):
+        from cron.scheduler import _deliver_to_local_session
+        from hermes_state import SessionDB
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        db = SessionDB()
+        try:
+            db.create_session("desktop-session", source="desktop")
+        finally:
+            db.close()
+
+        job = {
+            "id": "job-1",
+            "name": "daily-report",
+            "_delivery_run_id": "execution-1",
+        }
+        assert _deliver_to_local_session(
+            job, "desktop", "desktop-session", "Here is the report."
+        ) is None
+        assert _deliver_to_local_session(
+            job, "desktop", "desktop-session", "Here is the report."
+        ) is None
+
+        verify = SessionDB()
+        try:
+            messages = verify.get_messages_as_conversation("desktop-session")
+        finally:
+            verify.close()
+        assert [message["content"] for message in messages] == [
+            "[Cron delivery: daily-report]\nHere is the report."
+        ]
 
     def test_compression_parent_target_delivers_to_continuation_child(self, tmp_path):
         """Regression: targeting a compression parent must land the cron

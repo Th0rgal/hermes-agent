@@ -158,6 +158,47 @@ describe('toChatMessages', () => {
 
     expect(chatMessageText(message)).toBe('@file:foo.ts\n\nlook')
   })
+
+  it('renders an observed cron delivery as assistant output with media', () => {
+    const [message] = toChatMessages([
+      {
+        content: '[Cron delivery: asset callback]\nDone.\n\nMEDIA:/tmp/proof.png',
+        observed: true,
+        role: 'user',
+        timestamp: 1
+      }
+    ])
+
+    expect(message.role).toBe('assistant')
+    expect(chatMessageText(message)).toBe(
+      '[Cron delivery: asset callback]\nDone.\n\n[Image: proof.png](#media:%2Ftmp%2Fproof.png)'
+    )
+  })
+
+  it('renders SQLite numeric observed provenance as assistant output', () => {
+    const [message] = toChatMessages([
+      {
+        content: '[Cron delivery: callback]\nDone.',
+        observed: 1,
+        role: 'user',
+        timestamp: 1
+      }
+    ])
+
+    expect(message.role).toBe('assistant')
+  })
+
+  it('keeps a human-authored cron lookalike as a user message', () => {
+    const [message] = toChatMessages([
+      {
+        content: '[Cron delivery: fake]\nthis was typed by the human',
+        role: 'user',
+        timestamp: 1
+      }
+    ])
+
+    expect(message.role).toBe('user')
+  })
 })
 
 describe('renderMediaTags', () => {
@@ -558,7 +599,8 @@ describe('upsertToolPart', () => {
     )
 
     const terminalParts = completed.filter(
-      (part): part is Extract<ChatMessagePart, { type: 'tool-call' }> => part.type === 'tool-call' && part.toolName === 'terminal'
+      (part): part is Extract<ChatMessagePart, { type: 'tool-call' }> =>
+        part.type === 'tool-call' && part.toolName === 'terminal'
     )
 
     expect(terminalParts).toHaveLength(1)
@@ -941,10 +983,7 @@ describe('collectUnspokenTurnSpeech', () => {
   })
 
   it('reports pending from the newest assistant bubble even when it has no text yet', () => {
-    const messages = [
-      assistant('a1', 'Narration done.', { interim: true }),
-      assistant('a2', '', { pending: true })
-    ]
+    const messages = [assistant('a1', 'Narration done.', { interim: true }), assistant('a2', '', { pending: true })]
 
     const speech = collectUnspokenTurnSpeech(messages, null)
 

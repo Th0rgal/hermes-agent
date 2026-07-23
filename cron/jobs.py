@@ -1129,6 +1129,7 @@ def create_job(
     workdir: Optional[str] = None,
     no_agent: bool = False,
     attach_to_session: Optional[bool] = None,
+    pause_after_delivery: bool = False,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -1173,6 +1174,10 @@ def create_job(
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
                 watchdogs and periodic alerts that don't need LLM reasoning.
+        pause_after_delivery: When True, pause the job after its first successful
+                non-silent delivery. Use for terminal-state monitors and
+                callbacks that should keep polling silently until they have one
+                actionable result, then stop.
 
     Returns:
         The created job dict
@@ -1292,6 +1297,7 @@ def create_job(
         "last_status": None,
         "last_error": None,
         "last_delivery_error": None,
+        "pause_after_delivery": bool(pause_after_delivery),
         # Delivery configuration
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery

@@ -35,9 +35,11 @@ from __future__ import annotations
 import os
 import platform
 import re
+import selectors
 import signal as _signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -68,6 +70,10 @@ _MAX_OUTPUT_BYTES = 1024 * 1024
 # shape before the '='.  Anchored; `.` does not cross newlines, so a
 # multi-line blob never matches as a single "env-shaped" value.
 _ENV_LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+
+
+class _OutputLimitExceeded(Exception):
+    """Internal control flow: the helper crossed its bounded pipe budget."""
 
 
 def _is_windows() -> bool:
@@ -199,9 +205,46 @@ def _run_helper(
         )
         return None
 
+    deadline = time.monotonic() + timeout_seconds
+    stdout_bytes = bytearray()
+    total_bytes = 0
+    selector = selectors.DefaultSelector()
+
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+    selector.register(proc.stdout, selectors.EVENT_READ, data=True)
+    selector.register(proc.stderr, selectors.EVENT_READ, data=False)
+
     try:
-        stdout_bytes, _stderr_discarded = proc.communicate(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(proc.args, timeout_seconds)
+
+            events = selector.select(remaining)
+            if not events:
+                raise subprocess.TimeoutExpired(proc.args, timeout_seconds)
+
+            for key, _mask in events:
+                # Read at most one byte beyond the combined stdout/stderr cap
+                # so a noisy helper is terminated before either pipe can be
+                # buffered without bound. Stderr is counted, then discarded.
+                chunk = os.read(
+                    key.fileobj.fileno(),
+                    min(64 * 1024, max_output_bytes + 1 - total_bytes),
+                )
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+
+                total_bytes += len(chunk)
+                if total_bytes > max_output_bytes:
+                    raise _OutputLimitExceeded
+                if key.data:
+                    stdout_bytes.extend(chunk)
+
+        proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except (subprocess.TimeoutExpired, _OutputLimitExceeded) as exc:
         # Hard timeout: kill the whole process group (a helper script may
         # have forked children that would otherwise keep the pipe open).
         # POSIX-only by construction: _run_helper early-returns on Windows
@@ -211,15 +254,26 @@ def _run_helper(
         except (ProcessLookupError, PermissionError, OSError):
             proc.kill()
         try:
-            proc.communicate(timeout=1.0)
+            proc.wait(timeout=1.0)
         except (subprocess.TimeoutExpired, ValueError, OSError):
             pass
-        print(
-            f"[secrets:command] helper timed out after {timeout_seconds:g}s; "
-            f"resolving no value",
-            file=sys.stderr,
-        )
+        if isinstance(exc, _OutputLimitExceeded):
+            print(
+                f"[secrets:command] helper output exceeded the "
+                f"{max_output_bytes}-byte cap; resolving no value",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[secrets:command] helper timed out after {timeout_seconds:g}s; "
+                f"resolving no value",
+                file=sys.stderr,
+            )
         return None
+    finally:
+        selector.close()
+        proc.stdout.close()
+        proc.stderr.close()
 
     if proc.returncode != 0:
         # Structured fields ONLY — never the command string or the helper's
@@ -239,15 +293,7 @@ def _run_helper(
         )
         return None
 
-    if len(stdout_bytes) > max_output_bytes:
-        print(
-            f"[secrets:command] helper output exceeded the "
-            f"{max_output_bytes}-byte cap; resolving no value",
-            file=sys.stderr,
-        )
-        return None
-
-    return stdout_bytes.decode("utf-8", errors="replace")
+    return bytes(stdout_bytes).decode("utf-8", errors="replace")
 
 
 def _parse_dotenv_map(stdout: str) -> Dict[str, str]:

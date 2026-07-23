@@ -892,8 +892,10 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     // result was produced by Hermes, not typed by the human, so render it as an
     // assistant response. Requiring both provenance and the scheduler sentinel
     // prevents a human-authored lookalike from spoofing agent output.
+    const isObserved = message.observed === true || message.observed === 1
+
     const isObservedCronDelivery =
-      message.role === 'user' && message.observed === true && contentText.trimStart().startsWith('[Cron delivery:')
+      message.role === 'user' && isObserved && contentText.trimStart().startsWith('[Cron delivery:')
 
     const displayRole: SessionMessage['role'] = isObservedCronDelivery ? 'assistant' : message.role
 

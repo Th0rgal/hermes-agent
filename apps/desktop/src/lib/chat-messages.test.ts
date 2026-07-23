@@ -175,6 +175,19 @@ describe('toChatMessages', () => {
     )
   })
 
+  it('renders SQLite numeric observed provenance as assistant output', () => {
+    const [message] = toChatMessages([
+      {
+        content: '[Cron delivery: callback]\nDone.',
+        observed: 1,
+        role: 'user',
+        timestamp: 1
+      }
+    ])
+
+    expect(message.role).toBe('assistant')
+  })
+
   it('keeps a human-authored cron lookalike as a user message', () => {
     const [message] = toChatMessages([
       {

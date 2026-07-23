@@ -20,6 +20,7 @@ def test_code_skew_exit_can_finalize_before_first_api_call(monkeypatch):
         should_review_memory=False,
         plugin_user_context=None,
         ext_prefetch_cache=None,
+        preflight_compression_blocked=False,
     )
     monkeypatch.setattr(
         conversation_loop,

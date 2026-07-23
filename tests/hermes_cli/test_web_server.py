@@ -2160,6 +2160,61 @@ class TestWebServerEndpoints:
         assert payload["session_id"] == "desktop-tip"
         assert [m["content"] for m in payload["messages"]] == ["after compression"]
 
+    def test_get_session_messages_applies_interim_display_policy(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="display-policy", source="cli")
+            db.append_message("display-policy", role="user", content="inspect")
+            db.append_message(
+                "display-policy",
+                role="assistant",
+                content="Let me inspect that.",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": "{}"},
+                    }
+                ],
+            )
+            db.append_message(
+                "display-policy",
+                role="tool",
+                content="done",
+                tool_call_id="call-1",
+                tool_name="terminal",
+            )
+            db.append_message(
+                "display-policy",
+                role="assistant",
+                content="Final answer.",
+            )
+        finally:
+            db.close()
+
+        monkeypatch.setattr(
+            web_server,
+            "load_config",
+            lambda: {"display": {"interim_assistant_messages": False}},
+        )
+
+        response = self.client.get("/api/sessions/display-policy/messages")
+        assert response.status_code == 200
+        messages = response.json()["messages"]
+        assert [message["role"] for message in messages] == [
+            "user",
+            "tool",
+            "assistant",
+        ]
+        assert [message["content"] for message in messages] == [
+            "inspect",
+            "done",
+            "Final answer.",
+        ]
+
     def test_get_sessions_archived_is_boolean(self):
         from hermes_state import SessionDB
 

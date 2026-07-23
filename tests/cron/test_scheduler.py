@@ -4395,8 +4395,12 @@ class TestDeliverApiServerOrigin:
         db = SessionDB()
         messages = db.get_messages("api-session-1")
         db.close()
-        assert messages[-1]["role"] == "assistant"
-        assert messages[-1]["content"] == "The build finished successfully."
+        assert messages[-1]["role"] == "user"
+        assert messages[-1]["observed"] == 1
+        assert messages[-1]["content"] == (
+            "[Cron delivery: Desktop build watcher]\n"
+            "The build finished successfully."
+        )
 
     def test_rejects_non_api_session_target(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -4419,7 +4423,7 @@ class TestDeliverApiServerOrigin:
         }
         result = _deliver_result(job, "Must not cross session types.")
         assert result is not None
-        assert "not an api_server session" in result
+        assert "has source 'telegram'" in result
 
 
 class TestDeliverOriginUnresolvableIsLocal:

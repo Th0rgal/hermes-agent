@@ -1554,6 +1554,36 @@ def test_history_to_messages_preserves_tool_calls_for_resume_display():
     ]
 
 
+def test_history_to_messages_hides_tool_turn_narration_when_interims_disabled():
+    history = [
+        {"role": "user", "content": "first prompt"},
+        {
+            "role": "assistant",
+            "content": "Let me inspect that.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "function": {
+                        "name": "search_files",
+                        "arguments": json.dumps({"pattern": "resume"}),
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "content": "{}", "tool_call_id": "call_1"},
+        {"role": "assistant", "content": "Here is the final answer."},
+    ]
+
+    assert server._history_to_messages(
+        history,
+        include_interim_assistant_messages=False,
+    ) == [
+        {"role": "user", "text": "first prompt"},
+        {"context": "Searching files for resume", "name": "search_files", "role": "tool"},
+        {"role": "assistant", "text": "Here is the final answer."},
+    ]
+
+
 def test_history_to_messages_preserves_observed_delivery_provenance():
     history = [
         {"role": "user", "content": "run the check"},

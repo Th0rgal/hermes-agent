@@ -23,6 +23,36 @@ from __future__ import annotations
 
 from typing import Any
 
+
+def is_interim_assistant_history_message(message: Any) -> bool:
+    """Return whether a durable row is narration attached to a tool round.
+
+    The row remains part of model history. Display projections use this
+    predicate when ``interim_assistant_messages`` is disabled so every
+    transcript transport applies the same rule.
+    """
+    if not isinstance(message, dict):
+        return False
+    if message.get("role") != "assistant" or not message.get("tool_calls"):
+        return False
+
+    def _has_visible_text(value: Any, depth: int = 0) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip())
+        if depth >= 2:
+            return False
+        if isinstance(value, list):
+            return any(_has_visible_text(item, depth + 1) for item in value)
+        if isinstance(value, dict):
+            return any(
+                _has_visible_text(value.get(key), depth + 1)
+                for key in ("text", "content", "output_text")
+            )
+        return False
+
+    return _has_visible_text(message.get("content"))
+
+
 # ---------------------------------------------------------------------------
 # Overrideable display settings and their global defaults
 # ---------------------------------------------------------------------------

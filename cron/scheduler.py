@@ -1737,63 +1737,14 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         # conversation without falling back to a configured home platform
         # such as Telegram.
         if str(platform_name).lower() == "api_server":
-            db = None
-            delivery_id = (
-                f"cron:{chat_id}:{job.get('id', '?')}:"
-                f"{job.get('_delivery_run_id') or job.get('last_run_at') or hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+            err = _deliver_to_local_session(
+                job,
+                "api_server",
+                str(chat_id),
+                content,
             )
-            try:
-                from hermes_state import SessionDB
-
-                db = SessionDB()
-                session = db.get_session(str(chat_id))
-                if not session or str(session.get("source") or "") != "api_server":
-                    raise ValueError(
-                        f"API session '{chat_id}' does not exist or is not an api_server session"
-                    )
-                db.append_message(
-                    session_id=str(chat_id),
-                    role="assistant",
-                    content=content,
-                    delivery_id=delivery_id,
-                )
-                logger.info(
-                    "Job '%s': appended durable delivery to API session %s",
-                    job.get("id", "?"),
-                    chat_id,
-                )
-            except Exception as e:
-                if isinstance(e, ValueError):
-                    msg = f"API session delivery failed for '{chat_id}': {e}"
-                    logger.warning("Job '%s': %s", job.get("id", "?"), msg)
-                    delivery_errors.append(msg)
-                    continue
-                try:
-                    from hermes_state import spool_session_delivery
-
-                    spool_path = spool_session_delivery(
-                        delivery_id=delivery_id,
-                        session_id=str(chat_id),
-                        role="assistant",
-                        content=content,
-                    )
-                    logger.warning(
-                        "Job '%s': SessionDB append failed after retries; spooled delivery %s at %s: %s",
-                        job.get("id", "?"),
-                        delivery_id,
-                        spool_path,
-                        e,
-                    )
-                except Exception as spool_error:
-                    msg = (
-                        f"API session delivery and spool failed for '{chat_id}': "
-                        f"append={e}; spool={spool_error}"
-                    )
-                    logger.error("Job '%s': %s", job.get("id", "?"), msg)
-                    delivery_errors.append(msg)
-            finally:
-                if db is not None:
-                    db.close()
+            if err:
+                delivery_errors.append(err)
             continue
 
         if config is None:

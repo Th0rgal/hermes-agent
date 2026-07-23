@@ -5833,7 +5833,16 @@ def _is_display_hidden_marker(role: str | None, text: str) -> bool:
     return role == "user" and text.lstrip().startswith("[System:")
 
 
-def _history_to_messages(history: list[dict]) -> list[dict]:
+def _history_to_messages(
+    history: list[dict],
+    *,
+    include_interim_assistant_messages: bool | None = None,
+) -> list[dict]:
+    from gateway.display_config import is_interim_assistant_history_message
+
+    if include_interim_assistant_messages is None:
+        include_interim_assistant_messages = _load_interim_assistant_messages()
+
     messages = []
     tool_call_args = {}
 
@@ -5856,6 +5865,17 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
                     except (json.JSONDecodeError, TypeError):
                         args = {}
                     tool_call_args[tc_id] = (fn["name"], args)
+            # Assistant narration attached to a tool-call turn is durable
+            # model history, but it is an interim display segment. When the
+            # display gate is off, the live stream replaces that text with the
+            # terminal answer; a later session.history poll must apply the
+            # same projection or the hidden narration reappears after the
+            # message.complete event settled.
+            if (
+                not include_interim_assistant_messages
+                and is_interim_assistant_history_message(m)
+            ):
+                continue
             if not content_text.strip():
                 continue
         if role == "tool":

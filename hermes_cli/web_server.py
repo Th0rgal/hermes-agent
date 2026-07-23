@@ -11415,6 +11415,56 @@ def _open_session_db_for_profile(profile: Optional[str]):
     return SessionDB(db_path=Path(home) / "state.db")
 
 
+def _project_session_messages_for_display(
+    messages: List[Dict[str, Any]],
+    profile: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Apply the active profile's transcript-only display policy.
+
+    Model replay continues to read the complete durable history directly from
+    SessionDB. This projection serves Desktop/Web polling, which must agree
+    with the live gateway stream after a turn settles.
+    """
+    token = None
+    try:
+        if profile:
+            from hermes_constants import (
+                reset_hermes_home_override,
+                set_hermes_home_override,
+            )
+
+            _name, home = _cron_profile_home(profile)
+            token = set_hermes_home_override(str(home))
+
+        from gateway.display_config import (
+            is_interim_assistant_history_message,
+            resolve_display_setting,
+        )
+
+        include_interims = bool(
+            resolve_display_setting(
+                load_config(),
+                "api_server",
+                "interim_assistant_messages",
+                True,
+            )
+        )
+    except Exception:
+        include_interims = True
+    finally:
+        if token is not None:
+            reset_hermes_home_override(token)
+
+    if include_interims:
+        return messages
+
+    return [
+        message
+        for message in messages
+        if not is_interim_assistant_history_message(message)
+    ]
+
+
 @app.get("/api/sessions/{session_id}")
 async def get_session_detail(session_id: str, profile: Optional[str] = None):
     db = _open_session_db_for_profile(profile)
@@ -11469,7 +11519,12 @@ async def get_session_messages(
             sid = db.resolve_resume_session_id(sid)
             # Clamp limit to prevent abuse (max 500 per page)
             _limit = min(limit, 500) if limit is not None else None
-            return sid, _limit, db.get_messages(sid, limit=_limit, offset=offset)
+            messages = db.get_messages(sid, limit=_limit, offset=offset)
+            return (
+                sid,
+                _limit,
+                _project_session_messages_for_display(messages, profile),
+            )
         finally:
             db.close()
 

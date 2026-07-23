@@ -813,6 +813,40 @@ def run_conversation(
         )
 
     while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
+        # Check whether the source tree was updated underneath this long-lived
+        # process before calling any methods that may only exist in the new
+        # checkout. A restart is safer than retrying against a mixed code image.
+        _skew_warning = getattr(agent, "_check_code_skew_before_turn", lambda: None)()
+        if _skew_warning:
+            logger.warning(
+                "Code skew detected at API call #%d: %s",
+                api_call_count + 1,
+                _skew_warning,
+            )
+            _turn_exit_reason = "code_skew_detected"
+            final_response = (
+                "I apologize, but the agent has detected that its source code "
+                "has been updated while running. To avoid compatibility issues, "
+                f"please restart the application. ({_skew_warning})"
+            )
+            messages.append({"role": "assistant", "content": final_response})
+            return finalize_turn(
+                agent,
+                final_response=final_response,
+                api_call_count=api_call_count,
+                interrupted=False,
+                failed=True,
+                messages=messages,
+                conversation_history=conversation_history,
+                effective_task_id=effective_task_id,
+                turn_id=turn_id,
+                user_message=user_message,
+                original_user_message=original_user_message,
+                _should_review_memory=_should_review_memory,
+                _turn_exit_reason=_turn_exit_reason,
+                _pending_verification_response=_pending_verification_response,
+                _pending_verification_response_previewed=_pending_verification_response_previewed,
+            )
         _redirect_text = agent._drain_pending_redirect()
         if _redirect_text:
             _apply_active_turn_redirect(agent, messages, _redirect_text)

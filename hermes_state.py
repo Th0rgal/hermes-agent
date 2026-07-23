@@ -44,6 +44,7 @@ def spool_session_delivery(
     session_id: str,
     role: str,
     content: str,
+    observed: bool = False,
 ) -> Path:
     """Atomically spool a transcript delivery after SessionDB retries expire."""
     spool_dir = _delivery_spool_dir()
@@ -56,6 +57,7 @@ def spool_session_delivery(
         "session_id": session_id,
         "role": role,
         "content": content,
+        "observed": bool(observed),
         "created_at": time.time(),
     }
     with temporary.open("x", encoding="utf-8") as handle:
@@ -83,6 +85,7 @@ def replay_session_delivery_spool(
                     session_id=str(payload["session_id"]),
                     role=str(payload.get("role") or "assistant"),
                     content=payload.get("content"),
+                    observed=bool(payload.get("observed")),
                     delivery_id=str(payload["delivery_id"]),
                 )
                 path.unlink()

@@ -793,6 +793,17 @@ def _deliver_to_local_session(
     text = (content or "").strip()
     if not text:
         return None
+    label = job.get("name") or job.get("id") or "cron"
+    delivery_content = f"[Cron delivery: {label}]\n{text}"
+    delivery_run_id = (
+        job.get("_delivery_run_id")
+        or job.get("last_run_at")
+        or hashlib.sha256(delivery_content.encode("utf-8")).hexdigest()
+    )
+    delivery_id = (
+        f"cron:{platform_name}:{session_id}:{job.get('id', '?')}:{delivery_run_id}"
+    )
+    resolved_session_id = None
     try:
         from hermes_state import SessionDB
 
@@ -802,6 +813,7 @@ def _deliver_to_local_session(
             sid = (resolve(session_id) if callable(resolve) else None) or session_id
             resolve_resume = getattr(db, "resolve_resume_session_id", None)
             sid = (resolve_resume(sid) if callable(resolve_resume) else None) or sid
+            resolved_session_id = sid
             session = db.get_session(sid)
             if not session:
                 return f"{platform_name} session '{session_id}' not found"
@@ -811,12 +823,12 @@ def _deliver_to_local_session(
                     f"{platform_name} session '{session_id}' has source "
                     f"'{source or 'unknown'}'"
                 )
-            label = job.get("name") or job.get("id") or "cron"
             db.append_message(
                 sid,
                 "user",
-                f"[Cron delivery: {label}]\n{text}",
+                delivery_content,
                 observed=True,
+                delivery_id=delivery_id,
             )
             logger.info(
                 "Job '%s': delivered to %s session %s",
@@ -826,7 +838,34 @@ def _deliver_to_local_session(
         finally:
             db.close()
     except Exception as e:
-        msg = f"{platform_name} delivery to {session_id} failed: {e}"
+        if resolved_session_id is not None:
+            try:
+                from hermes_state import spool_session_delivery
+
+                spool_path = spool_session_delivery(
+                    delivery_id=delivery_id,
+                    session_id=str(resolved_session_id),
+                    role="user",
+                    content=delivery_content,
+                    observed=True,
+                )
+                logger.warning(
+                    "Job '%s': local SessionDB append failed after retries; "
+                    "spooled delivery %s at %s: %s",
+                    job.get("id", "?"),
+                    delivery_id,
+                    spool_path,
+                    e,
+                )
+                return None
+            except Exception as spool_error:
+                msg = (
+                    f"{platform_name} delivery and spool failed for '{session_id}': "
+                    f"append={e}; spool={spool_error}"
+                )
+                logger.error("Job '%s': %s", job.get("id", "?"), msg)
+                return msg
+        msg = f"{platform_name} delivery to {session_id} failed before validation: {e}"
         logger.warning("Job '%s': %s", job.get("id", "?"), msg)
         return msg
 

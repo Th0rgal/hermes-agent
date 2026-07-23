@@ -5824,6 +5824,13 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
         if not content_text.strip() and not has_reasoning:
             continue
         msg = {"role": role, "text": content_text}
+        # Cron/local-session deliveries are persisted as role=user to preserve
+        # provider alternation, but ``observed`` is the durable provenance that
+        # tells GUI clients this was injected by Hermes rather than typed by the
+        # human. Keep it in the display projection so Desktop can render the
+        # delivery as agent output without changing model-facing history.
+        if m.get("observed"):
+            msg["observed"] = True
         if role == "assistant":
             for key in reasoning_keys:
                 if key in m and m.get(key) is not None:

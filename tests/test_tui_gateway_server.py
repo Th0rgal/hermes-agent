@@ -1554,6 +1554,28 @@ def test_history_to_messages_preserves_tool_calls_for_resume_display():
     ]
 
 
+def test_history_to_messages_preserves_observed_delivery_provenance():
+    history = [
+        {"role": "user", "content": "run the check"},
+        {"role": "assistant", "content": "scheduled"},
+        {
+            "role": "user",
+            "content": "[Cron delivery: check]\nAll checks passed.",
+            "observed": True,
+        },
+    ]
+
+    assert server._history_to_messages(history) == [
+        {"role": "user", "text": "run the check"},
+        {"role": "assistant", "text": "scheduled"},
+        {
+            "role": "user",
+            "text": "[Cron delivery: check]\nAll checks passed.",
+            "observed": True,
+        },
+    ]
+
+
 def test_history_to_messages_keeps_reasoning_only_assistant_turn():
     # A thinking-only assistant turn (reasoning present, no visible text) is
     # persisted and recallable, but was dropped from the resumed session view

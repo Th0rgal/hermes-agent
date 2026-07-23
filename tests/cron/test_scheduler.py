@@ -5,7 +5,7 @@ import itertools
 import json
 import logging
 import os
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import ANY, AsyncMock, patch, MagicMock
 
 import pytest
 
@@ -5633,6 +5633,7 @@ class TestDeliverToLocalSession:
             "user",
             "[Cron delivery: daily-report]\nHere is the report.",
             observed=True,
+            delivery_id=ANY,
         )
         mock_db.close.assert_called_once()
 
@@ -5683,6 +5684,39 @@ class TestDeliverToLocalSession:
 
         assert result is None
         mock_db_cls.assert_not_called()
+
+    def test_same_execution_delivery_is_idempotent(self, tmp_path, monkeypatch):
+        from cron.scheduler import _deliver_to_local_session
+        from hermes_state import SessionDB
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        db = SessionDB()
+        try:
+            db.create_session("desktop-session", source="desktop")
+        finally:
+            db.close()
+
+        job = {
+            "id": "job-1",
+            "name": "daily-report",
+            "_delivery_run_id": "execution-1",
+        }
+        assert _deliver_to_local_session(
+            job, "desktop", "desktop-session", "Here is the report."
+        ) is None
+        assert _deliver_to_local_session(
+            job, "desktop", "desktop-session", "Here is the report."
+        ) is None
+
+        verify = SessionDB()
+        try:
+            messages = verify.get_messages_as_conversation("desktop-session")
+        finally:
+            verify.close()
+        assert [message["content"] for message in messages] == [
+            "[Cron delivery: daily-report]\nHere is the report."
+        ]
 
     def test_compression_parent_target_delivers_to_continuation_child(self, tmp_path):
         """Regression: targeting a compression parent must land the cron

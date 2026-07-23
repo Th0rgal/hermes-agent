@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import type { ChatMessage } from '@/lib/chat-messages'
-import { toChatMessages } from '@/lib/chat-messages'
+import { chatMessageText, toChatMessages } from '@/lib/chat-messages'
 import { $approvalModes, approvalModeForProfile } from '@/store/approval-mode'
 import { $desktopOnboarding } from '@/store/onboarding'
 import { $activeGatewayProfile } from '@/store/profile'
@@ -476,6 +476,32 @@ describe('preserveLocalPendingTurnMessages', () => {
       'user',
       'assistant'
     ])
+  })
+
+  it('keeps the pending assistant stream when an observed cron delivery arrives first', () => {
+    const authoritative = toChatMessages([
+      { content: 'first question', role: 'user', timestamp: 1 },
+      { content: 'first answer', role: 'assistant', timestamp: 2 },
+      {
+        content: '[Cron delivery: callback]\nMission finished.',
+        observed: true,
+        role: 'user',
+        timestamp: 3
+      },
+      { content: 'current question', role: 'user', timestamp: 4 }
+    ])
+
+    const warmCache = [
+      msg('user-old-1', 'user', 'first question'),
+      msg('assistant-old-1', 'assistant', 'first answer'),
+      msg('user-optimistic', 'user', 'current question'),
+      msg('assistant-stream-live', 'assistant', 'working on it', { pending: true })
+    ]
+
+    const reconciled = preserveLocalPendingTurnMessages(authoritative, warmCache)
+
+    expect(reconciled.at(-1)).toMatchObject({ id: 'assistant-stream-live', pending: true })
+    expect(reconciled.filter(message => chatMessageText(message) === 'current question')).toHaveLength(1)
   })
 })
 

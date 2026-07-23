@@ -137,6 +137,17 @@ def test_dotenv_blob_helper_resolves_multiple_keys(tmp_path):
     assert set(listed) == {"CMDTEST_API_KEY", "CMDTEST_TOKEN"}
 
 
+def test_list_dotenv_blob_skips_blank_values(tmp_path):
+    helper = _write_helper(
+        tmp_path,
+        "printf 'CMDTEST_API_KEY=\"  \"\\nCMDTEST_TOKEN=usable\\n'",
+    )
+
+    listed = list_command_secrets(command=str(helper))
+
+    assert listed == {"CMDTEST_TOKEN": "usable"}
+
+
 def test_base64_padding_value_roundtrips_through_real_helper(tmp_path):
     helper = _write_helper(tmp_path, "printf 'dGVzdA=='")
     assert get_command_secret(command=str(helper), key="CMDTEST_API_KEY") == "dGVzdA=="

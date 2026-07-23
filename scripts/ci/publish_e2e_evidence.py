@@ -158,11 +158,20 @@ def render_evidence(files: list[EvidenceFile], attachment_urls: dict[str, str]) 
         url = attachment_urls.get(item.filename)
         if url is None:
             raise ValueError(f"Missing attachment URL for {item.filename}")
+        summary_label = html.escape(item.label, quote=True)
+        alt_label = (
+            html.escape(item.label, quote=True)
+            .replace("\\", "\\\\")
+            .replace("[", "\\[")
+            .replace("]", "\\]")
+            .replace("\r", " ")
+            .replace("\n", " ")
+        )
         blocks.extend((
             "<details>",
-            f"<summary>{item.label}</summary>",
+            f"<summary>{summary_label}</summary>",
             "",
-            f"![{item.label}]({url})",
+            f"![{alt_label}]({url})",
             "",
             "</details>",
         ))

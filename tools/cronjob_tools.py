@@ -590,6 +590,7 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "state": job.get("state", "scheduled" if job.get("enabled", True) else "paused"),
         "paused_at": job.get("paused_at"),
         "paused_reason": job.get("paused_reason"),
+        "pause_after_delivery": bool(job.get("pause_after_delivery")),
     }
     if job.get("script"):
         result["script"] = job["script"]
@@ -687,6 +688,7 @@ def cronjob(
     workdir: Optional[str] = None,
     no_agent: Optional[bool] = None,
     attach_to_session: Optional[bool] = None,
+    pause_after_delivery: Optional[bool] = None,
     task_id: str = None,
 ) -> str:
     """Unified cron job management tool."""
@@ -760,6 +762,7 @@ def cronjob(
                 workdir=_normalize_optional_job_value(workdir),
                 no_agent=_no_agent,
                 attach_to_session=attach_to_session,
+                pause_after_delivery=bool(pause_after_delivery),
             )
             _notify_provider_jobs_changed_safe()
             _create_message = f"Cron job '{job['name']}' created."
@@ -933,6 +936,8 @@ def cronjob(
                 updates["enabled_toolsets"] = enabled_toolsets or None
             if attach_to_session is not None:
                 updates["attach_to_session"] = bool(attach_to_session)
+            if pause_after_delivery is not None:
+                updates["pause_after_delivery"] = bool(pause_after_delivery)
             if workdir is not None:
                 # Empty string clears the field (restores old behaviour);
                 # otherwise pass raw — update_job() validates / normalizes.
@@ -1094,6 +1099,11 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
             "attach_to_session": {
                 "type": "boolean",
                 "description": "When True, this job becomes CONTINUABLE: the user can reply to its delivery and the agent has the brief in context instead of asking 'what is that?'. On thread-capable platforms (Telegram topics, Discord/Slack threads) a dedicated thread is opened for the job and its replies; on DM-only platforms (WhatsApp/Signal) the brief is mirrored into the origin DM session. Use this for conversational recurring jobs the user will reply to — daily briefings, reminders that kick off follow-up work. Leave unset for fire-and-forget alerts/watchdogs. Overrides the global cron.mirror_delivery config for this one job. Only the origin chat is touched (never fan-out targets); no effect when deliver='local'."
+            },
+            "pause_after_delivery": {
+                "type": "boolean",
+                "default": False,
+                "description": "When True, keep polling through silent runs, then pause automatically after the first successful non-silent delivery. Use for mission/CI/build callbacks that should report one terminal result exactly once. The scheduler enforces this; do not rely on the cron agent to pause itself in its prompt."
             },
         },
         "required": ["action"]

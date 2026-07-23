@@ -285,6 +285,7 @@ from cron.jobs import (
     get_due_jobs,
     heartbeat_run_claim,
     mark_job_run,
+    pause_job,
     save_job_output,
 )
 from cron.executions import create_execution, finish_execution, mark_execution_running
@@ -4195,6 +4196,16 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
 
         if not _consume_interrupted_flag(job["id"]):
             mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+            if (
+                success
+                and should_deliver
+                and delivery_error is None
+                and job.get("pause_after_delivery")
+            ):
+                pause_job(
+                    job["id"],
+                    reason="Automatically paused after successful delivery",
+                )
         finish_execution(execution_id, success=success, error=error)
         return True
 

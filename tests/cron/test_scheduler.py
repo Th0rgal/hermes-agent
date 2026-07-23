@@ -2913,6 +2913,57 @@ class TestSilentDelivery:
             tick(verbose=False)
         deliver_mock.assert_called_once()
 
+    def test_pause_after_delivery_stops_terminal_callback(self):
+        job = {
+            **self._make_job(),
+            "pause_after_delivery": True,
+        }
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", "Mission completed.", None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result", return_value=None), \
+             patch("cron.scheduler.mark_job_run"), \
+             patch("cron.scheduler.pause_job") as pause_mock:
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        pause_mock.assert_called_once_with(
+            "monitor-job",
+            reason="Automatically paused after successful delivery",
+        )
+
+    def test_pause_after_delivery_does_not_pause_silent_poll(self):
+        job = {
+            **self._make_job(),
+            "pause_after_delivery": True,
+        }
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", "[SILENT]", None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result"), \
+             patch("cron.scheduler.mark_job_run"), \
+             patch("cron.scheduler.pause_job") as pause_mock:
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        pause_mock.assert_not_called()
+
+    def test_pause_after_delivery_waits_for_successful_delivery(self):
+        job = {
+            **self._make_job(),
+            "pause_after_delivery": True,
+        }
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", "Mission completed.", None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result", return_value="transport failed"), \
+             patch("cron.scheduler.mark_job_run"), \
+             patch("cron.scheduler.pause_job") as pause_mock:
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        pause_mock.assert_not_called()
+
     def test_is_cron_silence_response_contract(self):
         """Direct behavior contract for the cron silence matcher."""
         from cron.scheduler import _is_cron_silence_response as sil

@@ -80,6 +80,17 @@ def test_render_and_replace_evidence_uses_validated_attachment_urls():
     assert result.endswith("\nafter")
 
 
+def test_render_evidence_escapes_untrusted_labels():
+    evidence = _mod.render_evidence(
+        [_mod.EvidenceFile("shot.png", "</summary>\n![x](https://evil.invalid)[")],
+        {"shot.png": "https://github.com/user-attachments/assets/12345678-1234-1234-1234-123456789abc"},
+    )
+
+    assert "<summary>&lt;/summary&gt;\n![x](https://evil.invalid)[</summary>" in evidence
+    assert "![&lt;/summary&gt; !\\[x\\](https://evil.invalid)\\[]" in evidence
+    assert "<summary></summary>" not in evidence
+
+
 def test_upload_evidence_accepts_only_attachment_urls(tmp_path, monkeypatch):
     shot = tmp_path / "shot.png"
     shot.write_bytes(_png())

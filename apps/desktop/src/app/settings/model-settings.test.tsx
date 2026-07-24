@@ -435,4 +435,75 @@ describe('ModelSettings MoA preset editor', () => {
       vi.useRealTimers()
     }
   })
+
+  it('autosaves the selected preset when its enabled switch is toggled', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+
+    try {
+      await openReferenceEditor()
+
+      fireEvent.click(screen.getByRole('switch', { name: 'Enabled' }))
+      await vi.advanceTimersByTimeAsync(700)
+
+      expect(saveMoaModels).toHaveBeenCalledWith(
+        expect.objectContaining({
+          presets: expect.objectContaining({
+            default: expect.objectContaining({ enabled: false })
+          })
+        })
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('saves a disabled reference model without removing it (per-slot enabled toggle)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+
+    try {
+      await openReferenceEditor()
+
+      fireEvent.click(screen.getByRole('switch', { name: 'Disable reference 1' }))
+      await vi.advanceTimersByTimeAsync(700)
+
+      expect(saveMoaModels).toHaveBeenCalledWith(
+        expect.objectContaining({
+          presets: expect.objectContaining({
+            default: expect.objectContaining({
+              reference_models: [
+                expect.objectContaining({ provider: 'nous', model: 'hermes-4', enabled: false }),
+                expect.objectContaining({ provider: 'openrouter', model: 'deepseek/deepseek-v4-pro' })
+              ]
+            })
+          })
+        })
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('drops a disabled half-edited reference and saves the remaining complete ensemble', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+
+    try {
+      await openReferenceEditor()
+
+      fireEvent.click(slotSelects().ref1Provider)
+      fireEvent.click(await screen.findByRole('option', { name: 'OpenRouter' }))
+      await vi.advanceTimersByTimeAsync(700)
+      expect(saveMoaModels).not.toHaveBeenCalled()
+
+      fireEvent.click(screen.getByRole('switch', { name: 'Disable reference 1' }))
+      await vi.advanceTimersByTimeAsync(700)
+
+      expect(saveMoaModels).toHaveBeenCalledTimes(1)
+      const sent = saveMoaModels.mock.calls[0][0] as ReturnType<typeof moaConfig>
+      expect(sent.presets.default.reference_models).toEqual([
+        { provider: 'openrouter', model: 'deepseek/deepseek-v4-pro' }
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

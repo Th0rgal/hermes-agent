@@ -136,11 +136,28 @@ export const withActive = (models: readonly string[], active: string): readonly 
 // passes through an incomplete state while the user picks the new model.
 export const moaSlotComplete = (slot: MoaModelSlot): boolean => !!(slot.provider.trim() && slot.model.trim())
 
-// True when every slot in every preset is fully specified — the only state
-// that is safe to persist. The backend rejects configs with half-filled slots
-// (HTTP 422) instead of silently swapping the preset for hardcoded defaults
-// (#64156), so the autosave must simply wait for the edit to finish rather
-// than trying to "repair" the payload.
+// A disabled, half-edited reference is no longer part of the active ensemble.
+// Drop only those incomplete disabled rows before persistence. Complete
+// disabled rows remain saved so users can turn them back on without rebuilding
+// their selection.
+export const moaConfigForSave = (config: MoaConfigResponse): MoaConfigResponse => ({
+  ...config,
+  presets: Object.fromEntries(
+    Object.entries(config.presets).map(([name, preset]) => [
+      name,
+      {
+        ...preset,
+        reference_models: preset.reference_models.filter(slot => slot.enabled !== false || moaSlotComplete(slot))
+      }
+    ])
+  )
+})
+
+// True when every persisted slot in every preset is fully specified — the only
+// state that is safe to send. The backend rejects half-filled slots (HTTP 422)
+// instead of silently swapping the preset for hardcoded defaults (#64156), so
+// autosave waits for active edits but can discard an incomplete row once the
+// user explicitly disables it.
 export const moaConfigComplete = (config: MoaConfigResponse): boolean =>
   Object.values(config.presets).every(
     preset =>
@@ -390,12 +407,14 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
     const generation = moaSaveGeneration.current + 1
     moaSaveGeneration.current = generation
 
-    if (!moaConfigComplete(next)) {
+    const persistable = moaConfigForSave(next)
+
+    if (!moaConfigComplete(persistable)) {
       return
     }
 
     moaSaveTimer.current = window.setTimeout(() => {
-      void saveMoaModels(next)
+      void saveMoaModels(persistable)
         .then(saved => {
           if (moaSaveGeneration.current === generation) {
             setMoa(saved)
@@ -993,6 +1012,15 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                 ))}
               </SelectContent>
             </Select>
+            <label className="flex items-center gap-2 rounded-sm border border-border px-2 py-1 text-xs">
+              Enabled
+              <Switch
+                checked={currentMoaPreset.enabled !== false}
+                disabled={applying}
+                onCheckedChange={checked => updateMoaPreset(prev => ({ ...prev, enabled: checked }))}
+                size="xs"
+              />
+            </label>
             <Button
               disabled={applying}
               onClick={() => {
@@ -1069,6 +1097,21 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
           <div className="grid gap-1">
             {currentMoaPreset.reference_models.map((slot, index) => (
               <ListRow
+                action={
+                  <Switch
+                    aria-label={`${slot.enabled !== false ? 'Disable' : 'Enable'} reference ${index + 1}`}
+                    checked={slot.enabled !== false}
+                    disabled={applying}
+                    onCheckedChange={checked =>
+                      updateMoaPreset(prev => ({
+                        ...prev,
+                        reference_models: prev.reference_models.map((s, i) =>
+                          i === index ? { ...s, enabled: checked === true } : s
+                        )
+                      }))
+                    }
+                  />
+                }
                 below={
                   <div className="mt-2 flex flex-wrap items-center gap-2 pt-1">
                     <Select
@@ -1137,6 +1180,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                     </Button>
                   </div>
                 }
+                className={cn(slot.enabled === false && 'opacity-60')}
                 description={
                   <span className="font-mono text-[0.68rem]">
                     {slot.provider} · {slot.model || m.model}
@@ -1149,7 +1193,10 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
             <Button
               disabled={applying}
               onClick={() =>
-                updateMoaPreset(prev => ({ ...prev, reference_models: [...prev.reference_models, prev.aggregator] }))
+                updateMoaPreset(prev => ({
+                  ...prev,
+                  reference_models: [...prev.reference_models, { ...prev.aggregator, enabled: true }]
+                }))
               }
               size="sm"
               variant="textStrong"

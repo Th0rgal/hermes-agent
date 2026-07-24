@@ -66,7 +66,11 @@ def _fake_slack_sdk(client):
     sdk = ModuleType("slack_sdk")
     web = ModuleType("slack_sdk.web")
     async_client = ModuleType("slack_sdk.web.async_client")
-    async_client.AsyncWebClient = MagicMock(return_value=client)
+    if isinstance(client, (list, tuple)):
+        factory = MagicMock(side_effect=client)
+    else:
+        factory = MagicMock(return_value=client)
+    async_client.AsyncWebClient = factory
     sdk.web = web
     web.async_client = async_client
 
@@ -78,7 +82,7 @@ def _fake_slack_sdk(client):
     old = {name: sys.modules.get(name) for name in modules}
     sys.modules.update(modules)
     try:
-        yield
+        yield factory
     finally:
         for name, prev in old.items():
             if prev is None:
@@ -129,6 +133,56 @@ def test_media_only_skips_text_post():
         assert result["success"] is True
         client.chat_postMessage.assert_not_awaited()
         client.files_upload_v2.assert_awaited_once()
+    finally:
+        os.unlink(pdf)
+
+
+def test_media_retries_later_workspace_token():
+    """A channel owned by a later workspace token still receives its file."""
+    pdf = _tmpfile(".pdf")
+    wrong_workspace = _mock_client(upload_ok=False)
+    owning_workspace = _mock_client()
+    try:
+        with _fake_slack_sdk([wrong_workspace, owning_workspace]) as factory:
+            result = asyncio.run(
+                _standalone_send(
+                    _pconfig("xoxb-first,xoxb-second"),
+                    "C012AB3CD",
+                    "",
+                    media_files=[(pdf, False)],
+                )
+            )
+        assert result["success"] is True
+        assert [call.kwargs["token"] for call in factory.call_args_list] == [
+            "xoxb-first",
+            "xoxb-second",
+        ]
+        wrong_workspace.files_upload_v2.assert_awaited_once()
+        owning_workspace.files_upload_v2.assert_awaited_once()
+    finally:
+        os.unlink(pdf)
+
+
+def test_text_and_media_select_workspace_before_upload():
+    """A failed text post selects the next token without duplicating content."""
+    pdf = _tmpfile(".pdf")
+    wrong_workspace = _mock_client(post_ok=False)
+    owning_workspace = _mock_client()
+    try:
+        with _fake_slack_sdk([wrong_workspace, owning_workspace]):
+            result = asyncio.run(
+                _standalone_send(
+                    _pconfig("xoxb-first,xoxb-second"),
+                    "C012AB3CD",
+                    "report",
+                    media_files=[(pdf, False)],
+                )
+            )
+        assert result["success"] is True
+        wrong_workspace.chat_postMessage.assert_awaited_once()
+        wrong_workspace.files_upload_v2.assert_not_awaited()
+        owning_workspace.chat_postMessage.assert_awaited_once()
+        owning_workspace.files_upload_v2.assert_awaited_once()
     finally:
         os.unlink(pdf)
 

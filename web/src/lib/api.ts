@@ -2333,6 +2333,8 @@ export interface MoaModelSlot {
   model: string;
   /** Optional per-slot reasoning effort — round-tripped, not edited here. */
   reasoning_effort?: string;
+  /** Optional per-advisor output cap — round-tripped, not edited here. */
+  max_tokens?: number | null;
   enabled?: boolean;
 }
 

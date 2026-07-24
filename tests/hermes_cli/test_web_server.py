@@ -874,7 +874,7 @@ class TestWebServerEndpoints:
 
         payload = {
             "reference_models": [
-                {"provider": "openai-codex", "model": "gpt-5.5"},
+                {"provider": "openai-codex", "model": "gpt-5.5", "max_tokens": 768},
                 {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"},
             ],
             "aggregator": {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
@@ -895,13 +895,20 @@ class TestWebServerEndpoints:
         # round-trip exactly.
         assert [
             {"provider": s["provider"], "model": s["model"]} for s in saved_refs
-        ] == payload["reference_models"]
+        ] == [
+            {"provider": s["provider"], "model": s["model"]}
+            for s in payload["reference_models"]
+        ]
+        assert saved_refs[0]["max_tokens"] == 768
+        assert "max_tokens" not in saved_refs[1]
         assert all(s.get("enabled", True) is True for s in saved_refs)
         agg = cfg["moa"]["aggregator"]
         assert {"provider": agg["provider"], "model": agg["model"]} == payload["aggregator"]
         assert cfg["moa"]["reference_timeout"] == 44.5
         assert cfg["moa"]["degraded_reference_policy"] == "silent"
         returned = self.client.get("/api/model/moa").json()
+        assert returned["reference_models"][0]["max_tokens"] == 768
+        assert "max_tokens" not in returned["reference_models"][1]
         assert returned["reference_timeout"] == 44.5
         assert returned["degraded_reference_policy"] == "silent"
 

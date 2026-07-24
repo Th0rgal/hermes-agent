@@ -11001,6 +11001,56 @@ def _open_session_db_for_profile(profile: Optional[str]):
     return SessionDB(db_path=Path(home) / "state.db")
 
 
+def _project_session_messages_for_display(
+    messages: List[Dict[str, Any]],
+    profile: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Apply the active profile's transcript-only display policy.
+
+    Model replay continues to read the complete durable history directly from
+    SessionDB. This projection serves Desktop/Web polling, which must agree
+    with the live gateway stream after a turn settles.
+    """
+    token = None
+    try:
+        if profile:
+            from hermes_constants import (
+                reset_hermes_home_override,
+                set_hermes_home_override,
+            )
+
+            _name, home = _cron_profile_home(profile)
+            token = set_hermes_home_override(str(home))
+
+        from gateway.display_config import (
+            is_interim_assistant_history_message,
+            resolve_display_setting,
+        )
+
+        include_interims = bool(
+            resolve_display_setting(
+                load_config(),
+                "api_server",
+                "interim_assistant_messages",
+                True,
+            )
+        )
+    except Exception:
+        include_interims = True
+    finally:
+        if token is not None:
+            reset_hermes_home_override(token)
+
+    if include_interims:
+        return messages
+
+    return [
+        message
+        for message in messages
+        if not is_interim_assistant_history_message(message)
+    ]
+
+
 # In-process throttle for the opportunistic auto-archive trigger, keyed by
 # profile. Bounds the config.yaml read to at most once per this window per
 # profile; the actual sweep is throttled far more coarsely by state_meta

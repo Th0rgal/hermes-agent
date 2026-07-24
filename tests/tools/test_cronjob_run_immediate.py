@@ -17,6 +17,24 @@ _JOB = {"id": "job-run-1", "name": "manual run", "prompt": "hi",
 
 
 class TestCronjobRunExecutesImmediately:
+    def test_run_no_agent_job_validates_script_before_claim(self):
+        """The immediate tool path must fail closed before claiming a stale job."""
+        job = {**_JOB, "no_agent": True, "script": "missing-watchdog.sh"}
+        with patch("tools.cronjob_tools.resolve_job_ref", return_value=job), \
+             patch(
+                 "tools.cronjob_tools._validate_no_agent_script",
+                 side_effect=ValueError("script does not exist"),
+             ) as m_validate, \
+             patch("tools.cronjob_tools.claim_job_for_fire") as m_claim:
+            out = json.loads(cronjob(action="run", job_id="job-run-1"))
+
+        assert out["success"] is True
+        assert out["job"]["executed"] is False
+        assert out["job"]["execution_success"] is False
+        assert out["job"]["execution_skipped"] == "script does not exist"
+        m_validate.assert_called_once_with("missing-watchdog.sh")
+        m_claim.assert_not_called()
+
     def test_run_action_claims_and_fires_via_run_one_job(self):
         """action='run' must claim the job then fire it through run_one_job."""
         ran = {"job": "after-run", "last_status": "ok", "last_error": None}
@@ -32,6 +50,38 @@ class TestCronjobRunExecutesImmediately:
         m_claim.assert_called_once_with("job-run-1")   # at-most-once claim taken
         m_run.assert_called_once()                       # fired via the shared body
 
+
+    def test_run_reports_success_after_finite_job_is_deleted(self):
+        """The durable execution survives repeat-limit job deletion."""
+        with patch("tools.cronjob_tools.resolve_job_ref", return_value=dict(_JOB)), \
+             patch("tools.cronjob_tools.claim_job_for_fire", return_value=True), \
+             patch("cron.scheduler.run_one_job", return_value=True), \
+             patch("tools.cronjob_tools.get_job", return_value=None), \
+             patch(
+                 "cron.executions.latest_execution",
+                 return_value={"status": "completed", "error": None},
+             ):
+            out = json.loads(cronjob(action="run", job_id="job-run-1"))
+
+        assert out["job"]["executed"] is True
+        assert out["job"]["execution_success"] is True
+        assert "execution_error" not in out["job"]
+
+    def test_run_reports_failure_after_finite_job_is_deleted(self):
+        """A deleted finite job still exposes its durable terminal error."""
+        with patch("tools.cronjob_tools.resolve_job_ref", return_value=dict(_JOB)), \
+             patch("tools.cronjob_tools.claim_job_for_fire", return_value=True), \
+             patch("cron.scheduler.run_one_job", return_value=True), \
+             patch("tools.cronjob_tools.get_job", return_value=None), \
+             patch(
+                 "cron.executions.latest_execution",
+                 return_value={"status": "failed", "error": "provider 500"},
+             ):
+            out = json.loads(cronjob(action="run", job_id="job-run-1"))
+
+        assert out["job"]["executed"] is True
+        assert out["job"]["execution_success"] is False
+        assert out["job"]["execution_error"] == "provider 500"
 
     def test_execute_job_now_bails_without_claim(self):
         """_execute_job_now never calls run_one_job when the claim is lost."""

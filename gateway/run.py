@@ -2970,6 +2970,17 @@ def _channel_override_lookup_keys(
             continue
         seen.add(sk)
         keys.append(sk)
+    # Webhook sessions use per-delivery chat ids ("webhook:<route>:<delivery>");
+    # also try the route-level "webhook:<route>" key so a static
+    # channel_overrides entry can target every delivery on a route.
+    for key in list(keys):
+        if key.startswith("webhook:"):
+            parts = key.split(":")
+            if len(parts) >= 3:
+                route_key = ":".join(parts[:2])
+                if route_key not in seen:
+                    seen.add(route_key)
+                    keys.append(route_key)
     return keys
 
 
@@ -25411,6 +25422,24 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         _lifecycle_record_startup()
     except Exception as _lc_exc:
         logger.debug("Lifecycle ledger startup record failed: %s", _lc_exc)
+
+    # Recover cron/controller transcript deliveries that exhausted SessionDB
+    # lock retries in a previous process. The receipt row and message append
+    # commit together, so replay is idempotent across gateway crashes.
+    try:
+        from hermes_state import replay_session_delivery_spool
+
+        replay_result = await asyncio.get_running_loop().run_in_executor(
+            None, replay_session_delivery_spool
+        )
+        if replay_result["replayed"] or replay_result["failed"]:
+            logger.info(
+                "SessionDB delivery spool replayed=%d failed=%d",
+                replay_result["replayed"],
+                replay_result["failed"],
+            )
+    except Exception:
+        logger.exception("SessionDB delivery spool replay failed during gateway startup")
 
     try:
         from hermes_cli.nous_auth_keepalive import start_nous_auth_keepalive

@@ -12,6 +12,7 @@ import asyncio
 import atexit
 import concurrent.futures
 import contextvars
+import hashlib
 import json
 import logging
 import os
@@ -281,7 +282,16 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
     "QQBOT_HOME_CHANNEL": "QQ_HOME_CHANNEL",
 }
 
-from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run, claim_dispatch, heartbeat_run_claim
+from cron.jobs import (
+    _resolve_cron_script_path,
+    advance_next_run,
+    claim_dispatch,
+    get_due_jobs,
+    heartbeat_run_claim,
+    mark_job_run,
+    pause_job,
+    save_job_output,
+)
 from cron.executions import create_execution, finish_execution, mark_execution_running
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
@@ -709,14 +719,11 @@ def _maybe_mirror_cron_delivery(
     try:
         from gateway.mirror import mirror_to_session
 
-        # Mirror as a USER turn with a labelled prefix, NOT an assistant turn.
-        # The brief is not the agent speaking; an assistant-role mirror lands as
-        # assistant→assistant after the agent's last turn and breaks strict
-        # alternation (issue #2221, the exact failure #2313 removed). A
-        # user-role turn collapses safely via repair_message_sequence's
-        # consecutive-user merge on every provider, and the prefix preserves the
-        # "this came from cron" context that the dropped SQLite mirror metadata
-        # would otherwise lose on replay.
+        # The delivered text is the cron agent's completed response, not user
+        # input. Persist it as ASSISTANT so UIs render the callback on Hermes's
+        # side of the conversation. Adjacent assistant turns are normalized by
+        # repair_message_sequence before provider replay; the labelled prefix
+        # preserves callback provenance when SQLite drops mirror metadata.
         ok = mirror_to_session(
             platform_name,
             str(chat_id),
@@ -724,7 +731,7 @@ def _maybe_mirror_cron_delivery(
             source_label="cron",
             thread_id=thread_id,
             user_id=user_id,
-            role="user",
+            role="assistant",
         )
         if ok:
             logger.info(
@@ -742,6 +749,110 @@ def _maybe_mirror_cron_delivery(
             "Job '%s': delivery mirror failed for %s:%s: %s",
             job.get("id", "?"), platform_name, chat_id, e,
         )
+
+
+def _deliver_to_local_session(
+    job: dict,
+    platform_name: str,
+    session_id: str,
+    content: str,
+) -> Optional[str]:
+    """Persist a cron delivery into a local WebUI/Desktop session.
+
+    Local GUI surfaces have no messaging adapter to push through — the
+    ``SessionDB`` row *is* their durable delivery surface. Appends a labelled
+    ASSISTANT-role message: the callback is the cron agent's completed response,
+    not user input. The client picks it up on its transcript poll or next
+    reload.
+
+    A target may name a compression parent — the session that existed before
+    context compression forked a continuation child (see
+    ``resolve_resume_session_id``). Local clients read through that redirect, so
+    appending to the parent would land the cron message somewhere the active
+    conversation never looks. Resolve the live continuation tip before
+    appending, same as the WebUI/gateway resume path does.
+
+    Returns ``None`` on success, or an error string on failure — never
+    raises, matching the other delivery paths in ``_deliver_result``.
+    """
+    text = (content or "").strip()
+    if not text:
+        return None
+    label = job.get("name") or job.get("id") or "cron"
+    delivery_content = f"[Cron delivery: {label}]\n{text}"
+    delivery_run_id = (
+        job.get("_delivery_run_id")
+        or job.get("last_run_at")
+        or hashlib.sha256(delivery_content.encode("utf-8")).hexdigest()
+    )
+    delivery_id = (
+        f"cron:{platform_name}:{session_id}:{job.get('id', '?')}:{delivery_run_id}"
+    )
+    resolved_session_id = None
+    try:
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            resolve = getattr(db, "resolve_session_id", None)
+            sid = (resolve(session_id) if callable(resolve) else None) or session_id
+            resolve_resume = getattr(db, "resolve_resume_session_id", None)
+            sid = (resolve_resume(sid) if callable(resolve_resume) else None) or sid
+            resolved_session_id = sid
+            session = db.get_session(sid)
+            if not session:
+                return f"{platform_name} session '{session_id}' not found"
+            source = str(session.get("source") or "").strip().lower()
+            if source != platform_name:
+                return (
+                    f"{platform_name} session '{session_id}' has source "
+                    f"'{source or 'unknown'}'"
+                )
+            db.append_message(
+                sid,
+                "assistant",
+                delivery_content,
+                observed=True,
+                delivery_id=delivery_id,
+            )
+            logger.info(
+                "Job '%s': delivered to %s session %s",
+                job.get("id", "?"), platform_name, sid,
+            )
+            return None
+        finally:
+            db.close()
+    except Exception as e:
+        if resolved_session_id is not None:
+            try:
+                from hermes_state import spool_session_delivery
+
+                spool_path = spool_session_delivery(
+                    delivery_id=delivery_id,
+                    session_id=str(resolved_session_id),
+                    role="assistant",
+                    content=delivery_content,
+                    observed=True,
+                )
+                logger.warning(
+                    "Job '%s': local SessionDB append failed after retries; "
+                    "spooled delivery %s at %s: %s",
+                    job.get("id", "?"),
+                    delivery_id,
+                    spool_path,
+                    e,
+                )
+                return None
+            except Exception as spool_error:
+                msg = (
+                    f"{platform_name} delivery and spool failed for '{session_id}': "
+                    f"append={e}; spool={spool_error}"
+                )
+                logger.error("Job '%s': %s", job.get("id", "?"), msg)
+                return msg
+        msg = f"{platform_name} delivery to {session_id} failed before validation: {e}"
+        logger.warning("Job '%s': %s", job.get("id", "?"), msg)
+        return msg
 
 
 def _open_continuable_cron_thread(
@@ -1121,6 +1232,35 @@ def cron_delivery_targets() -> list[dict]:
     return targets
 
 
+# WebUI and Desktop are local session-store surfaces, not gateway platforms.
+# They must never reach ``gateway.config.Platform(...)``. Tag their targets so
+# ``_deliver_result`` can split them out before the messaging-adapter loop.
+_LOCAL_SESSION_PLATFORMS = frozenset({"desktop", "webui"})
+_LOCAL_SESSION_TARGET_KIND = "local_session"
+
+
+def _local_session_platform(origin: Optional[dict]) -> Optional[str]:
+    if not origin:
+        return None
+    platform_name = str(origin.get("platform", "")).strip().lower()
+    return platform_name if platform_name in _LOCAL_SESSION_PLATFORMS else None
+
+
+def _local_session_delivery_target(
+    platform_name: str,
+    session_id: str,
+    thread_id: Optional[str] = None,
+) -> dict:
+    sid = str(session_id)
+    return {
+        "kind": _LOCAL_SESSION_TARGET_KIND,
+        "platform": platform_name,
+        "chat_id": sid,
+        "session_id": sid,
+        "thread_id": thread_id,
+    }
+
+
 def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[dict]:
     """Resolve one concrete auto-delivery target for a cron job."""
 
@@ -1129,7 +1269,24 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
     if deliver_value == "local":
         return None
 
+    explicit_platform, separator, explicit_session_id = deliver_value.partition(":")
+    explicit_platform = explicit_platform.strip().lower()
+    if separator and explicit_platform in _LOCAL_SESSION_PLATFORMS:
+        session_id = explicit_session_id.strip()
+        return (
+            _local_session_delivery_target(explicit_platform, session_id)
+            if session_id
+            else None
+        )
+
     if deliver_value == "origin":
+        local_platform = _local_session_platform(origin)
+        if origin and local_platform:
+            return _local_session_delivery_target(
+                local_platform,
+                origin["chat_id"],
+                origin.get("thread_id"),
+            )
         if origin:
             return {
                 "platform": origin["platform"],
@@ -1525,19 +1682,62 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         _, mirror_text = BasePlatformAdapter.extract_media(content)
         mirror_text = (mirror_text or "").strip()
 
-    try:
-        config = load_gateway_config()
-    except Exception as e:
-        msg = f"failed to load gateway config: {e}"
-        logger.error("Job '%s': %s", job["id"], msg)
-        return msg
+    # Local-session targets are not gateway platforms. Split them out before
+    # touching gateway config, so a Desktop/WebUI-only
+    # delivery never depends on (or fails because of) gateway setup.
+    local_targets = [t for t in targets if t.get("kind") == _LOCAL_SESSION_TARGET_KIND]
+    gateway_targets = [t for t in targets if t.get("kind") != _LOCAL_SESSION_TARGET_KIND]
 
     delivery_errors = []
 
-    for target in targets:
+    for target in local_targets:
+        err = _deliver_to_local_session(
+            job,
+            target["platform"],
+            target.get("session_id") or target["chat_id"],
+            content,
+        )
+        if err:
+            delivery_errors.append(err)
+
+    if not gateway_targets:
+        return "; ".join(delivery_errors) if delivery_errors else None
+
+    # API-server targets are handled inside the loop below. Load messaging
+    # configuration lazily so their durable session delivery remains
+    # independent of gateway adapter setup, just like Desktop/WebUI targets.
+    config = None
+
+    for target in gateway_targets:
         platform_name = target["platform"]
         chat_id = target["chat_id"]
         thread_id = target.get("thread_id")
+
+        # API-server sessions (WebUI/Desktop) do not have a live messaging
+        # adapter once the originating HTTP turn has ended.  Their durable
+        # delivery surface is the persisted session transcript itself.  The
+        # API adapter binds chat_id to the concrete session_id, so an
+        # origin-scoped cron can safely append its result to that exact
+        # conversation without falling back to a configured home platform
+        # such as Telegram.
+        if str(platform_name).lower() == "api_server":
+            err = _deliver_to_local_session(
+                job,
+                "api_server",
+                str(chat_id),
+                content,
+            )
+            if err:
+                delivery_errors.append(err)
+            continue
+
+        if config is None:
+            try:
+                config = load_gateway_config()
+            except Exception as e:
+                msg = f"failed to load gateway config: {e}"
+                logger.error("Job '%s': %s", job["id"], msg)
+                return msg
 
         # Diagnostic: log thread_id for topic-aware delivery debugging
         origin = _resolve_origin(job) or {}
@@ -2196,8 +2396,9 @@ def _run_job_script(
 ) -> tuple[bool, str]:
     """Execute a cron job's data-collection script and capture its output.
 
-    Scripts must reside within HERMES_HOME/scripts/.  Both relative and
-    absolute paths are resolved and validated against this directory to
+    Scripts must reside within the active cron store's sibling scripts/
+    directory. Both relative and absolute paths are resolved and validated
+    against this directory to
     prevent arbitrary script execution via path traversal or absolute
     path injection.
 
@@ -2230,15 +2431,9 @@ def _run_job_script(
         (success, output) — on failure *output* contains the error message so the
         LLM can report the problem to the user.
     """
-    scripts_dir = _get_hermes_home() / "scripts"
+    path, scripts_dir = _resolve_cron_script_path(script_path)
     scripts_dir.mkdir(parents=True, exist_ok=True)
     scripts_dir_resolved = scripts_dir.resolve()
-
-    raw = Path(script_path).expanduser()
-    if raw.is_absolute():
-        path = raw.resolve()
-    else:
-        path = (scripts_dir / raw).resolve()
 
     # Guard against path traversal, absolute path injection, and symlink
     # escape — scripts MUST reside within HERMES_HOME/scripts/.
@@ -4008,7 +4203,14 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
                     and not _resolve_delivery_targets(job)
                 )
                 try:
-                    delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
+                    delivery_job = dict(job)
+                    delivery_job["_delivery_run_id"] = execution_id
+                    delivery_error = _deliver_result(
+                        delivery_job,
+                        deliver_content,
+                        adapters=adapters,
+                        loop=loop,
+                    )
                 except Exception as de:
                     delivery_error = str(de)
                     logger.error("Delivery failed for job %s: %s", job["id"], de)
@@ -4028,6 +4230,16 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
 
         if not _consume_interrupted_flag(job["id"]):
             mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+            if (
+                success
+                and should_deliver
+                and delivery_error is None
+                and job.get("pause_after_delivery")
+            ):
+                pause_job(
+                    job["id"],
+                    reason="Automatically paused after successful delivery",
+                )
         normalized_deliver = _normalize_deliver_value(job.get("deliver", "local"))
         if delivery_error:
             delivery_outcome = "failed"

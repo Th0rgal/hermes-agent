@@ -5,7 +5,7 @@ import itertools
 import json
 import logging
 import os
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import ANY, AsyncMock, patch, MagicMock
 
 import pytest
 
@@ -935,6 +935,76 @@ class TestSilentDelivery:
             tick(verbose=False)
         deliver_mock.assert_called_once()
 
+    def test_pause_after_delivery_stops_terminal_callback(self):
+        job = {
+            **self._make_job(),
+            "pause_after_delivery": True,
+        }
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", "Mission completed.", None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result", return_value=None), \
+             patch("cron.scheduler.mark_job_run"), \
+             patch("cron.scheduler.pause_job") as pause_mock:
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        pause_mock.assert_called_once_with(
+            "monitor-job",
+            reason="Automatically paused after successful delivery",
+        )
+
+    def test_pause_after_delivery_does_not_pause_silent_poll(self):
+        job = {
+            **self._make_job(),
+            "pause_after_delivery": True,
+        }
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", "[SILENT]", None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result"), \
+             patch("cron.scheduler.mark_job_run"), \
+             patch("cron.scheduler.pause_job") as pause_mock:
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        pause_mock.assert_not_called()
+
+    def test_pause_after_delivery_waits_for_successful_delivery(self):
+        job = {
+            **self._make_job(),
+            "pause_after_delivery": True,
+        }
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", "Mission completed.", None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result", return_value="transport failed"), \
+             patch("cron.scheduler.mark_job_run"), \
+             patch("cron.scheduler.pause_job") as pause_mock:
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        pause_mock.assert_not_called()
+
+    def test_is_cron_silence_response_contract(self):
+        """Direct behavior contract for the cron silence matcher."""
+        from cron.scheduler import _is_cron_silence_response as sil
+        # Suppress: bare/bracketed/bracketless tokens, prefix, trailing-line.
+        assert sil("[SILENT]")
+        assert sil("[silent] nothing new")
+        assert sil("[SILENT] No changes detected")
+        assert sil("2 deals filtered.\n\n[SILENT]")
+        assert sil("SILENT")
+        assert sil("NO_REPLY")
+        assert sil("NO REPLY")
+        assert sil("Summary.\nSILENT")
+        # Deliver: real content, mid-sentence quotes, bare words, junk.
+        assert not sil("Daily report: 4 PRs merged.")
+        assert not sil("I stayed [SILENT] but here is the report: 3 items.")
+        assert not sil("Silent retry succeeded after 2 attempts.")
+        assert not sil("[SILENT")  # malformed open-bracket is not the sentinel
+        assert not sil("")
+        assert not sil("   \n\t ")
 
     def test_failed_job_always_delivers(self):
         """Failed jobs deliver regardless of [SILENT] in output."""
@@ -1427,6 +1497,70 @@ class TestDeliverResultLiveAdapterUnconfirmed:
         standalone_send.assert_awaited_once()
 
 
+class TestDeliverApiServerOrigin:
+    def test_appends_result_to_origin_session(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        db.create_session("api-session-1", "api_server")
+        db.append_message("api-session-1", role="user", content="Watch the build")
+        db.append_message(
+            "api-session-1",
+            role="assistant",
+            content="I will report back when it finishes.",
+        )
+        db.close()
+
+        job = {
+            "id": "desktop-watch",
+            "_delivery_run_id": str(tmp_path),
+            "name": "Desktop build watcher",
+            "deliver": "origin",
+            "origin": {
+                "platform": "api_server",
+                "chat_id": "api-session-1",
+            },
+        }
+
+        assert _deliver_result(job, "The build finished successfully.") is None
+
+        db = SessionDB()
+        messages = db.get_messages("api-session-1")
+        db.close()
+        assert messages[-1]["role"] == "assistant"
+        assert messages[-1]["observed"] == 1
+        assert messages[-1]["content"] == (
+            "[Cron delivery: Desktop build watcher]\n"
+            "The build finished successfully."
+        )
+
+    def test_rejects_non_api_session_target(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        db.create_session("telegram-session", "telegram")
+        db.close()
+
+        job = {
+            "id": "bad-target",
+            "_delivery_run_id": str(tmp_path),
+            "deliver": "origin",
+            "origin": {
+                "platform": "api_server",
+                "chat_id": "telegram-session",
+            },
+        }
+        result = _deliver_result(job, "Must not cross session types.")
+        assert result is not None
+        assert "has source 'telegram'" in result
+
+
 class TestDeliverOriginUnresolvableIsLocal:
     """Regression for #43014.
 
@@ -1571,11 +1705,8 @@ class TestCronDeliveryMirror:
     """
 
 
-    def test_mirror_writes_user_role_with_label_not_assistant(self):
-        """Regression for #2221 / #2313: the cron brief must mirror as a USER
-        turn (with a [Cron delivery: ...] label), NOT assistant — an
-        assistant-role mirror lands as assistant->assistant after the agent's
-        last turn and breaks strict alternation on non-Anthropic providers."""
+    def test_mirror_writes_assistant_role_with_label(self):
+        """Cron callbacks are agent responses, not user-authored messages."""
         from cron.scheduler import _maybe_mirror_cron_delivery
 
         with patch("gateway.mirror.mirror_to_session", return_value=True) as m:
@@ -1585,7 +1716,7 @@ class TestCronDeliveryMirror:
             )
         m.assert_called_once()
         args, kwargs = m.call_args
-        assert kwargs.get("role") == "user", "cron mirror must be a user turn, not assistant"
+        assert kwargs.get("role") == "assistant"
         # The brief text is prefixed with a human-readable cron-delivery label
         # so replay (where the mirror metadata is dropped at the SQLite
         # boundary) still distinguishes it from a genuine user message.
@@ -1901,3 +2032,356 @@ class TestSetCronSessionTitle:
         db.get_next_title_in_lineage.assert_called_once_with("Nightly Synthesis")
 
 
+    def test_returns_none_for_blank_base(self):
+        from cron.scheduler import _set_cron_session_title
+        db = MagicMock()
+        assert _set_cron_session_title(db, "sess-1", "   ") is None
+        db.set_session_title.assert_not_called()
+
+    def test_returns_none_without_db_or_session(self):
+        from cron.scheduler import _set_cron_session_title
+        assert _set_cron_session_title(None, "sess-1", "X") is None
+        assert _set_cron_session_title(MagicMock(), "", "X") is None
+
+
+class TestLocalSessionDeliveryTargetResolution:
+    """GUI delivery resolves to a local session target, never a gateway
+    platform adapter (``unknown platform 'webui'`` in #45360)."""
+
+    def test_webui_origin_resolves_to_webui_session_target(self):
+        from cron.scheduler import _resolve_delivery_targets
+
+        job = {
+            "id": "j",
+            "deliver": "origin",
+            "origin": {"platform": "webui", "chat_id": "abc123"},
+        }
+        assert _resolve_delivery_targets(job) == [
+            {
+                "kind": "local_session",
+                "platform": "webui",
+                "chat_id": "abc123",
+                "session_id": "abc123",
+                "thread_id": None,
+            }
+        ]
+
+    def test_explicit_webui_target_resolves(self):
+        from cron.scheduler import _resolve_delivery_targets
+
+        job = {"id": "j", "deliver": "webui:sess-42"}
+        assert _resolve_delivery_targets(job) == [
+            {
+                "kind": "local_session",
+                "platform": "webui",
+                "chat_id": "sess-42",
+                "session_id": "sess-42",
+                "thread_id": None,
+            }
+        ]
+
+    def test_desktop_origin_uses_durable_session_id(self):
+        from cron.scheduler import _resolve_delivery_targets
+
+        job = {
+            "id": "j",
+            "deliver": "origin",
+            "origin": {"platform": "desktop", "chat_id": "desktop-session-7"},
+        }
+        assert _resolve_delivery_targets(job) == [
+            {
+                "kind": "local_session",
+                "platform": "desktop",
+                "chat_id": "desktop-session-7",
+                "session_id": "desktop-session-7",
+                "thread_id": None,
+            }
+        ]
+
+    def test_explicit_webui_target_with_empty_session_id_resolves_to_none(self):
+        from cron.scheduler import _resolve_delivery_targets
+
+        job = {"id": "j", "deliver": "webui:"}
+        assert _resolve_delivery_targets(job) == []
+
+    def test_webui_origin_thread_id_preserved(self):
+        from cron.scheduler import _resolve_delivery_targets
+
+        job = {
+            "id": "j",
+            "deliver": "origin",
+            "origin": {"platform": "webui", "chat_id": "abc123", "thread_id": "t1"},
+        }
+        assert _resolve_delivery_targets(job) == [
+            {
+                "kind": "local_session",
+                "platform": "webui",
+                "chat_id": "abc123",
+                "session_id": "abc123",
+                "thread_id": "t1",
+            }
+        ]
+
+
+class TestWebuiDeliveryDispatch:
+    """``_deliver_result`` must route ``webui_session`` targets through the
+    local SessionDB append helper, never through the gateway adapter/Platform
+    path, and must not load gateway config when every target is WebUI."""
+
+    def test_webui_only_delivery_does_not_load_gateway_config(self):
+        job = {"id": "j", "deliver": "webui:sess-1"}
+        with patch("cron.scheduler._deliver_to_local_session", return_value=None) as m_deliver, \
+             patch("gateway.config.load_gateway_config") as m_gw_cfg:
+            result = _deliver_result(job, "hello")
+
+        assert result is None
+        m_deliver.assert_called_once_with(job, "webui", "sess-1", "hello")
+        m_gw_cfg.assert_not_called()
+
+    def test_webui_delivery_never_constructs_gateway_platform(self):
+        """Regression for #45360: a webui target must not reach Platform("webui")."""
+        job = {"id": "j", "deliver": "webui:sess-1"}
+        with patch("gateway.config.load_gateway_config") as m_gw_cfg, \
+             patch("hermes_state.SessionDB") as mock_db_cls:
+            mock_db = MagicMock()
+            mock_db.resolve_session_id.return_value = "sess-1"
+            mock_db.get_session.return_value = {"id": "sess-1", "source": "webui"}
+            mock_db_cls.return_value = mock_db
+
+            result = _deliver_result(job, "hello")
+
+        assert result is None
+        m_gw_cfg.assert_not_called()
+        mock_db.append_message.assert_called_once()
+
+    def test_mixed_webui_and_gateway_targets_both_attempted(self):
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        job = {
+            "id": "j",
+            "deliver": "webui:sess-1,telegram:123",
+        }
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg) as m_gw_cfg, \
+             patch("cron.scheduler._deliver_to_local_session", return_value=None) as m_webui, \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            result = _deliver_result(job, "hello")
+
+        assert result is None
+        m_webui.assert_called_once_with(job, "webui", "sess-1", "hello")
+        m_gw_cfg.assert_called_once()
+        send_mock.assert_called_once()
+
+    def test_webui_delivery_error_is_aggregated(self):
+        job = {"id": "j", "deliver": "webui:missing-session"}
+        with patch(
+            "cron.scheduler._deliver_to_local_session",
+            return_value="webui session 'missing-session' not found",
+        ):
+            result = _deliver_result(job, "hello")
+
+        assert result is not None
+        assert "missing-session" in result
+
+    def test_desktop_only_delivery_does_not_fall_back_to_home_channel(self):
+        job = {
+            "id": "j",
+            "deliver": "origin",
+            "origin": {"platform": "desktop", "chat_id": "desktop-session-7"},
+        }
+        with patch(
+            "cron.scheduler._deliver_to_local_session", return_value=None
+        ) as deliver_local, patch("gateway.config.load_gateway_config") as gateway_config:
+            result = _deliver_result(job, "overnight report")
+
+        assert result is None
+        deliver_local.assert_called_once_with(
+            job, "desktop", "desktop-session-7", "overnight report"
+        )
+        gateway_config.assert_not_called()
+
+
+class TestDeliverToLocalSession:
+    """Unit tests for the SessionDB-backed local delivery helper."""
+
+    def test_appends_labelled_observed_assistant_message(self):
+        from cron.scheduler import _deliver_to_local_session
+
+        mock_db = MagicMock()
+        mock_db.resolve_session_id.return_value = "sess-1"
+        mock_db.resolve_resume_session_id.return_value = "sess-1"
+        mock_db.get_session.return_value = {"id": "sess-1", "source": "webui"}
+
+        with patch("hermes_state.SessionDB", return_value=mock_db):
+            job = {"id": "job-1", "name": "daily-report"}
+            result = _deliver_to_local_session(
+                job, "webui", "sess-1", "Here is the report."
+            )
+
+        assert result is None
+        mock_db.append_message.assert_called_once_with(
+            "sess-1",
+            "assistant",
+            "[Cron delivery: daily-report]\nHere is the report.",
+            observed=True,
+            delivery_id=ANY,
+        )
+        mock_db.close.assert_called_once()
+
+    def test_missing_session_returns_error_and_does_not_append(self):
+        from cron.scheduler import _deliver_to_local_session
+
+        mock_db = MagicMock()
+        mock_db.resolve_session_id.return_value = None
+        mock_db.get_session.return_value = None
+
+        with patch("hermes_state.SessionDB", return_value=mock_db):
+            result = _deliver_to_local_session(
+                {"id": "job-1"}, "webui", "does-not-exist", "text"
+            )
+
+        assert result is not None
+        assert "does-not-exist" in result
+        mock_db.append_message.assert_not_called()
+        mock_db.close.assert_called_once()
+
+    def test_rejects_cross_surface_session_id(self):
+        from cron.scheduler import _deliver_to_local_session
+
+        mock_db = MagicMock()
+        mock_db.resolve_session_id.return_value = "telegram-session"
+        mock_db.resolve_resume_session_id.return_value = "telegram-session"
+        mock_db.get_session.return_value = {
+            "id": "telegram-session",
+            "source": "telegram",
+        }
+
+        with patch("hermes_state.SessionDB", return_value=mock_db):
+            result = _deliver_to_local_session(
+                {"id": "job-1"}, "desktop", "telegram-session", "text"
+            )
+
+        assert result is not None
+        assert "source 'telegram'" in result
+        mock_db.append_message.assert_not_called()
+
+    def test_empty_content_is_a_noop(self):
+        from cron.scheduler import _deliver_to_local_session
+
+        with patch("hermes_state.SessionDB") as mock_db_cls:
+            result = _deliver_to_local_session(
+                {"id": "job-1"}, "webui", "sess-1", "   "
+            )
+
+        assert result is None
+        mock_db_cls.assert_not_called()
+
+    def test_same_execution_delivery_is_idempotent(self, tmp_path, monkeypatch):
+        from cron.scheduler import _deliver_to_local_session
+        from hermes_state import SessionDB
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        db = SessionDB()
+        try:
+            db.create_session("desktop-session", source="desktop")
+        finally:
+            db.close()
+
+        job = {
+            "id": "job-1",
+            "name": "daily-report",
+            "_delivery_run_id": "execution-1",
+        }
+        assert _deliver_to_local_session(
+            job, "desktop", "desktop-session", "Here is the report."
+        ) is None
+        assert _deliver_to_local_session(
+            job, "desktop", "desktop-session", "Here is the report."
+        ) is None
+
+        verify = SessionDB()
+        try:
+            messages = verify.get_messages_as_conversation("desktop-session")
+        finally:
+            verify.close()
+        assert [message["content"] for message in messages] == [
+            "[Cron delivery: daily-report]\nHere is the report."
+        ]
+
+    def test_compression_parent_target_delivers_to_continuation_child(self, tmp_path):
+        """Regression: targeting a compression parent must land the cron
+        message on the live continuation child, not the frozen parent.
+
+        ``resolve_session_id()`` only resolves an exact/unique-prefix match —
+        it has no notion of compression continuations, so a target naming a
+        parent id resolves right back to that same parent. WebUI reads
+        instead advance through ``resolve_resume_session_id()``, which walks
+        the parent -> child chain forged by auto-compression. Without doing
+        the same redirect here, the delivery would sit on a session the
+        WebUI never re-reads (#60923 review).
+        """
+        import time
+
+        from hermes_state import SessionDB
+        from cron.scheduler import _deliver_to_local_session
+
+        db_path = tmp_path / "state.db"
+        db = SessionDB(db_path)
+        base = int(time.time()) - 10_000
+        try:
+            db.create_session("parent-session", source="webui")
+            db.append_message("parent-session", role="user", content="pre-compression turn")
+            db.end_session("parent-session", "compression")
+
+            db.create_session("child-session", source="webui", parent_session_id="parent-session")
+            db.append_message("child-session", role="assistant", content="post-compression reply")
+
+            conn = db._conn
+            conn.execute(
+                "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = 'parent-session'",
+                (base, base + 50),
+            )
+            conn.execute(
+                "UPDATE sessions SET started_at = ? WHERE id = 'child-session'",
+                (base + 100,),
+            )
+            conn.commit()
+
+            # Confirm this is a genuine compression lineage per the same
+            # helpers the WebUI/gateway resume path relies on — not just an
+            # assumption this test bakes in.
+            assert db.get_compression_tip("parent-session") == "child-session"
+            assert db.resolve_resume_session_id("parent-session") == "child-session"
+
+            with patch("hermes_state.SessionDB", return_value=db):
+                job = {"id": "job-1", "name": "daily-report"}
+                result = _deliver_to_local_session(
+                    job, "webui", "parent-session", "Here is the report."
+                )
+        finally:
+            # _deliver_to_local_session already closed the connection via its
+            # own finally block; guard against double-close if it raised
+            # before reaching that point.
+            if db._conn is not None:
+                db.close()
+
+        assert result is None
+
+        verify_db = SessionDB(db_path)
+        try:
+            parent_messages = verify_db.get_messages("parent-session")
+            child_messages = verify_db.get_messages("child-session")
+        finally:
+            verify_db.close()
+
+        assert [m["content"] for m in parent_messages] == ["pre-compression turn"]
+        child_contents = [m["content"] for m in child_messages]
+        assert child_contents == [
+            "post-compression reply",
+            "[Cron delivery: daily-report]\nHere is the report.",
+        ]

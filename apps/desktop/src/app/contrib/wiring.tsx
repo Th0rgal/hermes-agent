@@ -26,7 +26,6 @@ import { emitGatewayEvent } from '@/contrib/events'
 import { getSessionMessages, triggerCronJob } from '@/hermes'
 import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
 import { sessionMessagesSignature } from '@/lib/session-signatures'
-import { isMessagingSource } from '@/lib/session-source'
 import { latestSessionTodos } from '@/lib/todos'
 import { $billingSettingsRequest } from '@/store/billing-block'
 import { setCronFocusJobId } from '@/store/cron'
@@ -36,6 +35,7 @@ import { $activeGatewayProfile, $freshSessionRequest, $profileScope, refreshActi
 import { $startWorkSessionRequest, followActiveSessionCwd } from '@/store/projects'
 import {
   $activeSessionId,
+  $busy,
   $connection,
   $currentCwd,
   $freshDraftReady,
@@ -87,6 +87,7 @@ import { usePreviewRouting } from '../session/hooks/use-preview-routing'
 import { usePromptActions } from '../session/hooks/use-prompt-actions'
 import { useRouteResume } from '../session/hooks/use-route-resume'
 import { useSessionActions } from '../session/hooks/use-session-actions'
+import { preserveLocalPendingTurnMessages } from '../session/hooks/use-session-actions/utils'
 import { useSessionListActions } from '../session/hooks/use-session-list-actions'
 import { useSessionStateCache } from '../session/hooks/use-session-state-cache'
 import { startWorkspaceSession } from '../session/workspace-session-target'
@@ -128,11 +129,11 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
   const busyRef = useRef(false)
   const creatingSessionRef = useRef(false)
+  const transcriptSignatureRef = useRef(new Map<string, string>())
   // Billing recovery routes to Settings → Billing from surfaces without router
   // context (the sticky toast). The shell owns `navigate`, so it consumes the
   // intent counter here; the ref skips the initial mount value.
   const billingSettingsSeenRef = useRef(0)
-  const messagingTranscriptSignatureRef = useRef(new Map<string, string>())
   // Stable identity for the whole callback surface (see WiringActions). Mutated
   // in place each render so memoized surfaces never re-render on churn.
   const actionsRef = useRef<WiringActions | null>(null)
@@ -336,20 +337,39 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     [activeSessionIdRef, selectedStoredSessionIdRef, updateSessionState]
   )
 
-  // Refresh the open messaging transcript (inbound platform turns arrive via
-  // the background gateway, not the desktop websocket). Signature-gated so a
-  // no-change poll doesn't churn the thread.
-  const refreshActiveMessagingTranscript = useCallback(async () => {
+  // Refresh the open persisted transcript. Besides messaging turns, local cron
+  // delivery can be appended by a sibling scheduler process and therefore does
+  // not arrive on this Desktop websocket. Signature-gated so a no-change poll
+  // does not churn the thread.
+  const refreshActiveStoredTranscript = useCallback(async () => {
     const storedSessionId = selectedStoredSessionIdRef.current
     const runtimeSessionId = activeSessionIdRef.current
 
-    if (!storedSessionId || !runtimeSessionId || busyRef.current) {
+    if (!storedSessionId || !runtimeSessionId || busyRef.current || $busy.get()) {
       return
     }
 
-    const stored = $messagingSessions.get().find(s => sessionMatchesStoredId(s, storedSessionId))
+    const cachedState = sessionStateByRuntimeIdRef.current.get(runtimeSessionId)
 
-    if (!stored || !isMessagingSource(stored.source)) {
+    // `busyRef` follows the focused global store through a React effect and can
+    // briefly lag during a warm session switch. The per-session cache remains
+    // authoritative for an in-flight background turn; never let an external
+    // transcript poll replace its optimistic correction or streaming tail.
+    if (
+      cachedState &&
+      (cachedState.busy ||
+        cachedState.awaitingResponse ||
+        cachedState.streamId ||
+        cachedState.turnStartedAt !== null)
+    ) {
+      return
+    }
+
+    const stored = [...$sessions.get(), ...$messagingSessions.get()].find(s =>
+      sessionMatchesStoredId(s, storedSessionId)
+    )
+
+    if (!stored) {
       return
     }
 
@@ -358,22 +378,35 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       const signatureKey = `${stored.profile ?? 'default'}:${storedSessionId}`
       const sig = sessionMessagesSignature(latest.messages)
 
-      if (messagingTranscriptSignatureRef.current.get(signatureKey) === sig) {
+      if (transcriptSignatureRef.current.get(signatureKey) === sig) {
         return
       }
 
-      messagingTranscriptSignatureRef.current.set(signatureKey, sig)
+      transcriptSignatureRef.current.set(signatureKey, sig)
       const messages = toChatMessages(latest.messages)
 
       updateSessionState(
         runtimeSessionId,
-        state => ({ ...state, messages: preserveLocalAssistantErrors(messages, state.messages) }),
+        state => {
+          const withPendingTurn = preserveLocalPendingTurnMessages(messages, state.messages)
+
+          return {
+            ...state,
+            messages: preserveLocalAssistantErrors(withPendingTurn, state.messages)
+          }
+        },
         storedSessionId
       )
     } catch {
       // Non-fatal: next poll or manual refresh can hydrate.
     }
-  }, [activeSessionIdRef, busyRef, selectedStoredSessionIdRef, updateSessionState])
+  }, [
+    activeSessionIdRef,
+    busyRef,
+    selectedStoredSessionIdRef,
+    sessionStateByRuntimeIdRef,
+    updateSessionState
+  ])
 
   const { handleGatewayEvent } = useMessageStream({
     activeGatewayProfile,
@@ -673,21 +706,19 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     refreshSessions
   })
 
-  // Only the open messaging transcript needs its own poll — local chats are
-  // live over the websocket already.
-  const activeIsMessaging =
-    !!selectedStoredSessionId &&
-    isMessagingSource(messagingSessions.find(s => sessionMatchesStoredId(s, selectedStoredSessionId))?.source)
+  // Every selected persisted session is eligible: messaging writes and local
+  // cron delivery can both happen outside this window's websocket.
+  const activeTranscriptPollEnabled = !!selectedStoredSessionId
 
   // Keep app data live while the gateway is open (on-connect reseed + the
   // cron / messaging / transcript visibility polls + fresh-draft reseed).
   useBackgroundSync({
     activeGatewayProfile,
-    activeIsMessaging,
+    activeTranscriptPollEnabled,
     activeSessionId,
     freshDraftReady,
     gatewayState,
-    refreshActiveMessagingTranscript,
+    refreshActiveStoredTranscript,
     refreshCronJobs,
     refreshCurrentModel,
     refreshHermesConfig,

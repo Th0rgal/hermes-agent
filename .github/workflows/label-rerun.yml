@@ -76,6 +76,19 @@ jobs:
             fi
           fi
 
+          # A push may have advanced the PR while this job waited. Rerunning a
+          # stale run would enter the same CI concurrency group and cancel the
+          # validation for the new head, so fail closed unless the labeled SHA
+          # is still current.
+          CURRENT_HEAD=$(gh pr view "${{ github.event.pull_request.number }}" \
+            --repo "$REPO" \
+            --json headRefOid \
+            --jq '.headRefOid' 2>/dev/null || true)
+          if [ "$CURRENT_HEAD" != "$HEAD_SHA" ]; then
+            echo "PR head advanced from $HEAD_SHA to ${CURRENT_HEAD:-unknown}; skipping stale rerun."
+            exit 0
+          fi
+
           echo "Run completed. Rerunning all failed jobs..."
           gh run rerun "$RUN_ID" --repo "$REPO" --failed || true
           echo "Done. GitHub will rerun review-labels and all dependent jobs."

@@ -427,6 +427,16 @@ class TestUpdateJob:
 
 
 class TestPauseResumeJob:
+    def test_create_persists_pause_after_delivery(self, tmp_cron_dir):
+        job = create_job(
+            prompt="Wait for a terminal result",
+            schedule="every 5m",
+            pause_after_delivery=True,
+        )
+
+        assert job["pause_after_delivery"] is True
+        assert get_job(job["id"])["pause_after_delivery"] is True
+
     def test_pause_sets_state(self, tmp_cron_dir):
         job = create_job(prompt="Pause me", schedule="every 1h")
         paused = pause_job(job["id"], reason="user paused")

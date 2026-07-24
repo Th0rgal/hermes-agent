@@ -929,7 +929,7 @@ class TestWebServerEndpoints:
 
         payload = {
             "reference_models": [
-                {"provider": "openai-codex", "model": "gpt-5.5"},
+                {"provider": "openai-codex", "model": "gpt-5.5", "max_tokens": 768},
                 {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"},
             ],
             "aggregator": {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
@@ -950,13 +950,20 @@ class TestWebServerEndpoints:
         # round-trip exactly.
         assert [
             {"provider": s["provider"], "model": s["model"]} for s in saved_refs
-        ] == payload["reference_models"]
+        ] == [
+            {"provider": s["provider"], "model": s["model"]}
+            for s in payload["reference_models"]
+        ]
+        assert saved_refs[0]["max_tokens"] == 768
+        assert "max_tokens" not in saved_refs[1]
         assert all(s.get("enabled", True) is True for s in saved_refs)
         agg = cfg["moa"]["aggregator"]
         assert {"provider": agg["provider"], "model": agg["model"]} == payload["aggregator"]
         assert cfg["moa"]["reference_timeout"] == 44.5
         assert cfg["moa"]["degraded_reference_policy"] == "silent"
         returned = self.client.get("/api/model/moa").json()
+        assert returned["reference_models"][0]["max_tokens"] == 768
+        assert "max_tokens" not in returned["reference_models"][1]
         assert returned["reference_timeout"] == 44.5
         assert returned["degraded_reference_policy"] == "silent"
 
@@ -2369,6 +2376,61 @@ class TestWebServerEndpoints:
         payload = resp.json()
         assert payload["session_id"] == "desktop-tip"
         assert [m["content"] for m in payload["messages"]] == ["after compression"]
+
+    def test_get_session_messages_applies_interim_display_policy(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="display-policy", source="cli")
+            db.append_message("display-policy", role="user", content="inspect")
+            db.append_message(
+                "display-policy",
+                role="assistant",
+                content="Let me inspect that.",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": "{}"},
+                    }
+                ],
+            )
+            db.append_message(
+                "display-policy",
+                role="tool",
+                content="done",
+                tool_call_id="call-1",
+                tool_name="terminal",
+            )
+            db.append_message(
+                "display-policy",
+                role="assistant",
+                content="Final answer.",
+            )
+        finally:
+            db.close()
+
+        monkeypatch.setattr(
+            web_server,
+            "load_config",
+            lambda: {"display": {"interim_assistant_messages": False}},
+        )
+
+        response = self.client.get("/api/sessions/display-policy/messages")
+        assert response.status_code == 200
+        messages = response.json()["messages"]
+        assert [message["role"] for message in messages] == [
+            "user",
+            "tool",
+            "assistant",
+        ]
+        assert [message["content"] for message in messages] == [
+            "inspect",
+            "done",
+            "Final answer.",
+        ]
 
     def test_get_sessions_archived_is_boolean(self):
         from hermes_state import SessionDB
@@ -5523,6 +5585,24 @@ class TestNewEndpoints:
     def test_cron_job_not_found(self):
         resp = self.client.get("/api/cron/jobs/nonexistent-id")
         assert resp.status_code == 404
+
+    @pytest.mark.parametrize("action", ["resume", "trigger"])
+    def test_cron_enable_actions_surface_script_validation_as_400(
+        self, monkeypatch, action
+    ):
+        from hermes_cli import web_server
+
+        monkeypatch.setattr(web_server, "_find_cron_job_profile", lambda _job_id: "default")
+
+        def reject_missing_script(_profile, operation, _job_id):
+            assert operation == f"{action}_job"
+            raise ValueError("Cannot enable no-agent job before its script exists")
+
+        monkeypatch.setattr(web_server, "_call_cron_for_profile", reject_missing_script)
+
+        resp = self.client.post(f"/api/cron/jobs/broken/{action}")
+        assert resp.status_code == 400
+        assert "before its script exists" in resp.json()["detail"]
 
     # --- Automation Blueprints ---
 

@@ -25,7 +25,18 @@ export type ChatMessage = {
   interim?: boolean
   /** Composer attachment ref strings (`@file:...`, `@image:...`) sent with this user message. */
   attachmentRefs?: string[]
+  /** Durable cron/callback delivery provenance, lifted from the scheduler
+   *  sentinel ("[Cron delivery: <label>]"). Presence renders the message
+   *  under a delivery divider; the sentinel itself is stripped from the
+   *  visible text. */
+  delivery?: { label: string }
 }
+
+/** Scheduler-written durable deliveries prefix their content with
+ * "[Cron delivery: <job name>]\n". Paired with `observed` provenance the
+ * sentinel identifies the row as a delivery — the UI lifts it into a divider
+ * and shows only the payload. */
+const CRON_DELIVERY_SENTINEL_RE = /^\s*\[Cron delivery:\s*([^\]]*)\]\s*/
 
 export type GatewayEventPayload = {
   text?: string
@@ -948,8 +959,9 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     // sentinel prevents a human-authored lookalike from spoofing agent output.
     const isObserved = message.observed === true || message.observed === 1
 
-    const isObservedCronDelivery =
-      message.role === 'user' && isObserved && contentText.trimStart().startsWith('[Cron delivery:')
+    const deliveryMatch = isObserved ? CRON_DELIVERY_SENTINEL_RE.exec(contentText) : null
+
+    const isObservedCronDelivery = message.role === 'user' && deliveryMatch !== null
 
     const durableDisplayRole: SessionMessage['role'] =
       message.display_kind === 'model_switch' ||
@@ -962,6 +974,8 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       ? 'assistant'
       : durableDisplayRole
 
+    const delivery =
+      deliveryMatch && displayRole === 'assistant' ? { label: deliveryMatch[1].trim() || 'cron' } : undefined
     const rawDisplayContent = transcriptContent(
       message.display_kind,
       timelineDisplayContent(message, displayContentForMessage(displayRole, content))
@@ -971,7 +985,9 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     // the text (see tui_gateway/server.py's persist-time rewrite). Pull those
     // refs into the same attachment shape used by optimistic composer turns.
     const imageRefExtraction = displayRole === 'user' && rawDisplayContent ? extractImageRefs(rawDisplayContent) : null
-    const displayContent = imageRefExtraction ? imageRefExtraction.cleanedText : rawDisplayContent
+    const sentinelFreeContent =
+      delivery && rawDisplayContent ? rawDisplayContent.replace(CRON_DELIVERY_SENTINEL_RE, '') : rawDisplayContent
+    const displayContent = imageRefExtraction ? imageRefExtraction.cleanedText : sentinelFreeContent
     const extractedAttachmentRefs = imageRefExtraction?.refs.length ? imageRefExtraction.refs : undefined
 
     const parts: ChatMessagePart[] = []
@@ -1029,7 +1045,9 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       const currentHasToolCall = parts.some(part => part.type === 'tool-call')
       const activeHasToolCall = Boolean(activeAssistant?.parts.some(part => part.type === 'tool-call'))
 
-      if (activeAssistant && (currentHasToolCall || activeHasToolCall)) {
+      // Deliveries are out-of-band drops: never fold one into the turn that
+      // happens to precede it.
+      if (activeAssistant && !delivery && (currentHasToolCall || activeHasToolCall)) {
         activeAssistant.parts = [...activeAssistant.parts, ...parts]
         activeAssistant.timestamp = message.timestamp ?? activeAssistant.timestamp
 
@@ -1044,10 +1062,12 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       role: displayRole,
       parts,
       timestamp: message.timestamp,
-      ...(extractedAttachmentRefs ? { attachmentRefs: extractedAttachmentRefs } : {})
+      ...(extractedAttachmentRefs ? { attachmentRefs: extractedAttachmentRefs } : {}),
+      ...(delivery ? { delivery } : {})
     })
 
-    activeAssistantIndex = displayRole === 'assistant' ? result.length - 1 : null
+    // A delivery bubble is closed on arrival — later rows must not merge in.
+    activeAssistantIndex = displayRole === 'assistant' && !delivery ? result.length - 1 : null
   })
   flushPendingTools(messages.length)
 

@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest'
 
 import type { ComposerAttachment } from '@/store/composer'
 
+import { assistantTextPart } from './chat-messages'
 import {
   attachmentDisplayText,
   coerceThinkingText,
   optimisticAttachmentRef,
   parseCommandDispatch,
-  parseSlashCommand
+  parseSlashCommand,
+  toRuntimeMessage
 } from './chat-runtime'
 
 const DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANS'
@@ -148,5 +150,30 @@ describe('parseSlashCommand', () => {
 
   it('does not treat text after horizontal whitespace as a command name (CLI parity)', () => {
     expect(parseSlashCommand('/ some words')).toEqual({ arg: '', name: '' })
+  })
+})
+
+describe('toRuntimeMessage', () => {
+  it('carries delivery provenance into assistant metadata.custom', () => {
+    const runtimeMessage = toRuntimeMessage({
+      id: 'delivery-1',
+      role: 'assistant',
+      parts: [assistantTextPart('Build finished.')],
+      timestamp: 1,
+      delivery: { label: 'watcher' }
+    })
+
+    expect(runtimeMessage.metadata?.custom).toMatchObject({ delivery: { label: 'watcher' } })
+  })
+
+  it('leaves metadata.custom empty for ordinary assistant turns', () => {
+    const runtimeMessage = toRuntimeMessage({
+      id: 'turn-1',
+      role: 'assistant',
+      parts: [assistantTextPart('Hello.')],
+      timestamp: 1
+    })
+
+    expect(runtimeMessage.metadata?.custom).toEqual({})
   })
 })

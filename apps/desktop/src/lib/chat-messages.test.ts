@@ -170,9 +170,8 @@ describe('toChatMessages', () => {
     ])
 
     expect(message.role).toBe('assistant')
-    expect(chatMessageText(message)).toBe(
-      '[Cron delivery: asset callback]\nDone.\n\n[Image: proof.png](#media:%2Ftmp%2Fproof.png)'
-    )
+    expect(message.delivery).toEqual({ label: 'asset callback' })
+    expect(chatMessageText(message)).toBe('Done.\n\n[Image: proof.png](#media:%2Ftmp%2Fproof.png)')
   })
 
   it('renders SQLite numeric observed provenance as assistant output', () => {
@@ -186,6 +185,43 @@ describe('toChatMessages', () => {
     ])
 
     expect(message.role).toBe('assistant')
+    expect(message.delivery).toEqual({ label: 'callback' })
+  })
+
+  it('lifts the sentinel of an assistant-role delivery into delivery metadata', () => {
+    const [message] = toChatMessages([
+      {
+        content: '[Cron delivery: Beal roadmap progression]\nHead advanced to fbfde973.',
+        observed: true,
+        role: 'assistant',
+        timestamp: 1
+      }
+    ])
+
+    expect(message.role).toBe('assistant')
+    expect(message.delivery).toEqual({ label: 'Beal roadmap progression' })
+    expect(chatMessageText(message)).toBe('Head advanced to fbfde973.')
+  })
+
+  it('keeps a delivery out of the preceding tool-bearing assistant turn', () => {
+    const messages = toChatMessages([
+      {
+        role: 'assistant',
+        content: 'Checking.',
+        timestamp: 1,
+        tool_calls: [{ id: 'tc', function: { name: 'terminal', arguments: '{}' } }]
+      },
+      {
+        content: '[Cron delivery: watcher]\nBuild finished.',
+        observed: true,
+        role: 'assistant',
+        timestamp: 2
+      }
+    ])
+
+    expect(messages).toHaveLength(2)
+    expect(messages[1].delivery).toEqual({ label: 'watcher' })
+    expect(chatMessageText(messages[1])).toBe('Build finished.')
   })
 
   it('keeps a human-authored cron lookalike as a user message', () => {

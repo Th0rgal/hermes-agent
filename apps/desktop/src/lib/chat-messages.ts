@@ -911,16 +911,29 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     }
 
     const content = message.content || message.text || message.context || message.name
+    const contentText = textFromUnknown(content)
 
-    const displayContent = transcriptContent(
-      message.display_kind,
-      timelineDisplayContent(message, displayContentForMessage(message.role, content))
-    )
+    // Preserve compatibility with cron rows written before delivery switched
+    // to the assistant role. Requiring both provenance and the scheduler
+    // sentinel prevents a human-authored lookalike from spoofing agent output.
+    const isObserved = message.observed === true || message.observed === 1
 
-    const displayRole =
+    const isObservedCronDelivery =
+      message.role === 'user' && isObserved && contentText.trimStart().startsWith('[Cron delivery:')
+
+    const durableDisplayRole: SessionMessage['role'] =
       message.display_kind === 'model_switch' || message.display_kind === 'async_delegation_complete'
         ? 'system'
         : message.role
+
+    const displayRole: SessionMessage['role'] = isObservedCronDelivery
+      ? 'assistant'
+      : durableDisplayRole
+
+    const displayContent = transcriptContent(
+      message.display_kind,
+      timelineDisplayContent(message, displayContentForMessage(displayRole, content))
+    )
 
     const parts: ChatMessagePart[] = []
 
@@ -929,7 +942,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       message.reasoning_content ||
       (typeof message.reasoning_details === 'string' ? message.reasoning_details : '')
 
-    if (reasoning && message.role === 'assistant') {
+    if (reasoning && displayRole === 'assistant') {
       parts.push(reasoningPart(reasoning))
     }
 
@@ -937,12 +950,12 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       parts.push(displayRole === 'assistant' ? assistantTextPart(displayContent) : textPart(displayContent))
     }
 
-    if (message.role === 'assistant' && Array.isArray(message.tool_calls)) {
+    if (displayRole === 'assistant' && Array.isArray(message.tool_calls)) {
       parts.push(...message.tool_calls.map((call, callIndex) => toolPartFromStoredCall(call, callIndex)))
     }
 
     if (!parts.length) {
-      if (message.role !== 'assistant') {
+      if (displayRole !== 'assistant') {
         flushPendingTools(index)
         activeAssistantIndex = null
       }
@@ -951,7 +964,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     }
 
     const isToolOnlyAssistant =
-      message.role === 'assistant' && parts.length > 0 && parts.every(part => part.type === 'tool-call')
+      displayRole === 'assistant' && parts.length > 0 && parts.every(part => part.type === 'tool-call')
 
     if (isToolOnlyAssistant) {
       pendingToolParts = [...pendingToolParts, ...parts]
@@ -960,7 +973,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       return
     }
 
-    if (message.role === 'assistant') {
+    if (displayRole === 'assistant') {
       if (pendingToolParts.length) {
         if (!appendPartsToActiveAssistant(pendingToolParts, message.timestamp ?? pendingToolTimestamp)) {
           parts.unshift(...pendingToolParts)
@@ -994,7 +1007,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       timestamp: message.timestamp
     })
 
-    activeAssistantIndex = message.role === 'assistant' ? result.length - 1 : null
+    activeAssistantIndex = displayRole === 'assistant' ? result.length - 1 : null
   })
   flushPendingTools(messages.length)
 

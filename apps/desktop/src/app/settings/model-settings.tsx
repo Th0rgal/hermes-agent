@@ -136,11 +136,28 @@ export const withActive = (models: readonly string[], active: string): readonly 
 // passes through an incomplete state while the user picks the new model.
 export const moaSlotComplete = (slot: MoaModelSlot): boolean => !!(slot.provider.trim() && slot.model.trim())
 
-// True when every slot in every preset is fully specified — the only state
-// that is safe to persist. The backend rejects configs with half-filled slots
-// (HTTP 422) instead of silently swapping the preset for hardcoded defaults
-// (#64156), so the autosave must simply wait for the edit to finish rather
-// than trying to "repair" the payload.
+// A disabled, half-edited reference is no longer part of the active ensemble.
+// Drop only those incomplete disabled rows before persistence. Complete
+// disabled rows remain saved so users can turn them back on without rebuilding
+// their selection.
+export const moaConfigForSave = (config: MoaConfigResponse): MoaConfigResponse => ({
+  ...config,
+  presets: Object.fromEntries(
+    Object.entries(config.presets).map(([name, preset]) => [
+      name,
+      {
+        ...preset,
+        reference_models: preset.reference_models.filter(slot => slot.enabled !== false || moaSlotComplete(slot))
+      }
+    ])
+  )
+})
+
+// True when every persisted slot in every preset is fully specified — the only
+// state that is safe to send. The backend rejects half-filled slots (HTTP 422)
+// instead of silently swapping the preset for hardcoded defaults (#64156), so
+// autosave waits for active edits but can discard an incomplete row once the
+// user explicitly disables it.
 export const moaConfigComplete = (config: MoaConfigResponse): boolean =>
   Object.values(config.presets).every(
     preset =>
@@ -390,12 +407,14 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
     const generation = moaSaveGeneration.current + 1
     moaSaveGeneration.current = generation
 
-    if (!moaConfigComplete(next)) {
+    const persistable = moaConfigForSave(next)
+
+    if (!moaConfigComplete(persistable)) {
       return
     }
 
     moaSaveTimer.current = window.setTimeout(() => {
-      void saveMoaModels(next)
+      void saveMoaModels(persistable)
         .then(saved => {
           if (moaSaveGeneration.current === generation) {
             setMoa(saved)

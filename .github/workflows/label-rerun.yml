@@ -38,7 +38,7 @@ jobs:
           set -uo pipefail
 
           # Find the latest CI run for this PR's head SHA.
-          RUN_ID=$(gh run list \
+          RUN_META=$(gh run list \
             --repo "$REPO" \
             --commit "$HEAD_SHA" \
             --workflow ci.yml \
@@ -46,14 +46,14 @@ jobs:
             --json databaseId,status \
             --jq '.[0] | "\(.databaseId) \(.status)"' 2>/dev/null || true)
 
-          if [ -z "$RUN_ID" ]; then
+          if [ -z "$RUN_META" ]; then
             echo "No CI run found for this PR — nothing to rerun."
             exit 0
           fi
 
           # Split "RUN_ID STATUS" into two vars.
-          RUN_ID="${RUN_ID%% *}"
-          STATUS="${RUN_ID##* }"
+          RUN_ID="${RUN_META%% *}"
+          STATUS="${RUN_META#* }"
 
           echo "Latest CI run: $RUN_ID (status: $STATUS)"
 
@@ -74,6 +74,19 @@ jobs:
               echo "Run is still $STATUS after wait — giving up."
               exit 0
             fi
+          fi
+
+          # A push may have advanced the PR while this job waited. Rerunning a
+          # stale run would enter the same CI concurrency group and cancel the
+          # validation for the new head, so fail closed unless the labeled SHA
+          # is still current.
+          CURRENT_HEAD=$(gh pr view "${{ github.event.pull_request.number }}" \
+            --repo "$REPO" \
+            --json headRefOid \
+            --jq '.headRefOid' 2>/dev/null || true)
+          if [ "$CURRENT_HEAD" != "$HEAD_SHA" ]; then
+            echo "PR head advanced from $HEAD_SHA to ${CURRENT_HEAD:-unknown}; skipping stale rerun."
+            exit 0
           fi
 
           echo "Run completed. Rerunning all failed jobs..."

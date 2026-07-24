@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { ComposerAttachment } from '@/store/composer'
 
+import { assistantTextPart } from './chat-messages'
 import {
   attachmentDisplayText,
   attachmentId,
@@ -9,7 +10,8 @@ import {
   messageCreatedAt,
   optimisticAttachmentRef,
   parseCommandDispatch,
-  parseSlashCommand
+  parseSlashCommand,
+  toRuntimeMessage
 } from './chat-runtime'
 
 const DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANS'
@@ -198,5 +200,30 @@ describe('messageCreatedAt', () => {
   it('treats a zero / non-finite timestamp as absent', () => {
     expect(messageCreatedAt({ timestamp: 0 }, NOW).getTime()).toBe(NOW)
     expect(messageCreatedAt({ timestamp: Number.NaN }, NOW).getTime()).toBe(NOW)
+  })
+})
+
+describe('toRuntimeMessage', () => {
+  it('carries delivery provenance into assistant metadata.custom', () => {
+    const runtimeMessage = toRuntimeMessage({
+      id: 'delivery-1',
+      role: 'assistant',
+      parts: [assistantTextPart('Build finished.')],
+      timestamp: 1,
+      delivery: { label: 'watcher' }
+    })
+
+    expect(runtimeMessage.metadata?.custom).toMatchObject({ delivery: { label: 'watcher' } })
+  })
+
+  it('leaves metadata.custom empty for ordinary assistant turns', () => {
+    const runtimeMessage = toRuntimeMessage({
+      id: 'turn-1',
+      role: 'assistant',
+      parts: [assistantTextPart('Hello.')],
+      timestamp: 1
+    })
+
+    expect(runtimeMessage.metadata?.custom).toEqual({})
   })
 })

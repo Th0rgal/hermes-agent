@@ -26,7 +26,7 @@ import { Codicon } from '@/components/ui/codicon'
 import { CopyButton } from '@/components/ui/copy-button'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
-import { AudioLines, GitForkIcon, Loader2Icon, RefreshCwIcon, SmilePlusIcon, VolumeXIcon, XIcon } from '@/lib/icons'
+import { AudioLines, Clock, GitForkIcon, Loader2Icon, RefreshCwIcon, SmilePlusIcon, VolumeXIcon, XIcon } from '@/lib/icons'
 import { extractPreviewTargets } from '@/lib/preview-targets'
 import { formatAgo } from '@/lib/time'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
@@ -70,6 +70,16 @@ export const AssistantMessage: FC<{
   // tool-heavy turn doesn't grow a copy/refresh bar per paragraph (see
   // ChatMessage.interim).
   const isInterim = useAuiState(s => s.message.metadata?.custom?.interim === true)
+
+  // Durable cron/callback deliveries carry a provenance label in metadata
+  // (ChatMessage.delivery). Rendered as a divider pill so the drop reads as
+  // out-of-band, not as a mid-conversation reply. String selector keeps the
+  // subscription referentially stable across streaming flushes.
+  const deliveryLabel = useAuiState(s => {
+    const delivery = s.message.metadata?.custom?.delivery as { label?: string } | undefined
+
+    return typeof delivery?.label === 'string' ? delivery.label : null
+  })
 
   // Preview targets only materialize once the turn completes — while running
   // the selector returns '' (stable), so per-token flushes skip the regex
@@ -118,6 +128,16 @@ export const AssistantMessage: FC<{
       onDoubleClick={onDoubleClick}
       ref={enterRef}
     >
+      {deliveryLabel !== null && (
+        <div className="mb-1.5 mt-1 flex w-full items-center gap-3" data-slot="aui_assistant-delivery-divider">
+          <div className="h-px flex-1 bg-(--ui-stroke-tertiary)" />
+          <span className="flex min-w-0 max-w-[75%] items-center gap-1.5 rounded-full border border-(--ui-stroke-tertiary) px-2.5 py-0.5 text-[0.72rem] leading-5 text-(--ui-text-secondary)">
+            <Clock aria-hidden className="size-3 shrink-0" />
+            <span className="truncate">{deliveryLabel}</span>
+          </span>
+          <div className="h-px flex-1 bg-(--ui-stroke-tertiary)" />
+        </div>
+      )}
       <div
         className="wrap-anywhere min-w-0 max-w-full overflow-hidden text-pretty text-[length:var(--conversation-text-font-size)] leading-(--dt-line-height) text-foreground"
         data-slot="aui_assistant-message-content"

@@ -4395,7 +4395,7 @@ class TestDeliverApiServerOrigin:
         db = SessionDB()
         messages = db.get_messages("api-session-1")
         db.close()
-        assert messages[-1]["role"] == "user"
+        assert messages[-1]["role"] == "assistant"
         assert messages[-1]["observed"] == 1
         assert messages[-1]["content"] == (
             "[Cron delivery: Desktop build watcher]\n"
@@ -4671,11 +4671,8 @@ class TestCronDeliveryMirror:
         assert "Task #2" in args[2]
         assert kwargs.get("source_label") == "cron"
 
-    def test_mirror_writes_user_role_with_label_not_assistant(self):
-        """Regression for #2221 / #2313: the cron brief must mirror as a USER
-        turn (with a [Cron delivery: ...] label), NOT assistant — an
-        assistant-role mirror lands as assistant->assistant after the agent's
-        last turn and breaks strict alternation on non-Anthropic providers."""
+    def test_mirror_writes_assistant_role_with_label(self):
+        """Cron callbacks are agent responses, not user-authored messages."""
         from cron.scheduler import _maybe_mirror_cron_delivery
 
         with patch("gateway.mirror.mirror_to_session", return_value=True) as m:
@@ -4685,7 +4682,7 @@ class TestCronDeliveryMirror:
             )
         m.assert_called_once()
         args, kwargs = m.call_args
-        assert kwargs.get("role") == "user", "cron mirror must be a user turn, not assistant"
+        assert kwargs.get("role") == "assistant"
         # The brief text is prefixed with a human-readable cron-delivery label
         # so replay (where the mirror metadata is dropped at the SQLite
         # boundary) still distinguishes it from a genuine user message.
@@ -5668,7 +5665,7 @@ class TestWebuiDeliveryDispatch:
 class TestDeliverToLocalSession:
     """Unit tests for the SessionDB-backed local delivery helper."""
 
-    def test_appends_labelled_observed_user_message(self):
+    def test_appends_labelled_observed_assistant_message(self):
         from cron.scheduler import _deliver_to_local_session
 
         mock_db = MagicMock()
@@ -5685,7 +5682,7 @@ class TestDeliverToLocalSession:
         assert result is None
         mock_db.append_message.assert_called_once_with(
             "sess-1",
-            "user",
+            "assistant",
             "[Cron delivery: daily-report]\nHere is the report.",
             observed=True,
             delivery_id=ANY,

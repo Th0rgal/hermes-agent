@@ -109,7 +109,7 @@ def test_spool_preserves_observed_delivery_provenance(tmp_path, monkeypatch):
     spool_session_delivery(
         "cron:desktop:desktop-1:j:r1",
         "desktop-1",
-        "user",
+        "assistant",
         "[Cron delivery: j]\nDone.",
         observed=True,
     )
@@ -118,7 +118,7 @@ def test_spool_preserves_observed_delivery_provenance(tmp_path, monkeypatch):
     verify = SessionDB(path)
     try:
         [message] = verify.get_messages_as_conversation("desktop-1")
-        assert message["role"] == "user"
+        assert message["role"] == "assistant"
         assert message["observed"] is True
     finally:
         verify.close()

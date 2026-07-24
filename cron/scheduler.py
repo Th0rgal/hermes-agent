@@ -731,14 +731,11 @@ def _maybe_mirror_cron_delivery(
     try:
         from gateway.mirror import mirror_to_session
 
-        # Mirror as a USER turn with a labelled prefix, NOT an assistant turn.
-        # The brief is not the agent speaking; an assistant-role mirror lands as
-        # assistant→assistant after the agent's last turn and breaks strict
-        # alternation (issue #2221, the exact failure #2313 removed). A
-        # user-role turn collapses safely via repair_message_sequence's
-        # consecutive-user merge on every provider, and the prefix preserves the
-        # "this came from cron" context that the dropped SQLite mirror metadata
-        # would otherwise lose on replay.
+        # The delivered text is the cron agent's completed response, not user
+        # input. Persist it as ASSISTANT so UIs render the callback on Hermes's
+        # side of the conversation. Adjacent assistant turns are normalized by
+        # repair_message_sequence before provider replay; the labelled prefix
+        # preserves callback provenance when SQLite drops mirror metadata.
         ok = mirror_to_session(
             platform_name,
             str(chat_id),
@@ -746,7 +743,7 @@ def _maybe_mirror_cron_delivery(
             source_label="cron",
             thread_id=thread_id,
             user_id=user_id,
-            role="user",
+            role="assistant",
         )
         if ok:
             logger.info(
@@ -775,11 +772,10 @@ def _deliver_to_local_session(
     """Persist a cron delivery into a local WebUI/Desktop session.
 
     Local GUI surfaces have no messaging adapter to push through — the
-    ``SessionDB`` row *is* their durable delivery surface. Appends a labelled USER-role
-    message (same alternation rationale as ``_maybe_mirror_cron_delivery``: a
-    cron delivery is not the agent speaking, and a user-role turn merges
-    safely on every provider instead of landing assistant→assistant). The
-    client picks it up on its transcript poll or next reload.
+    ``SessionDB`` row *is* their durable delivery surface. Appends a labelled
+    ASSISTANT-role message: the callback is the cron agent's completed response,
+    not user input. The client picks it up on its transcript poll or next
+    reload.
 
     A target may name a compression parent — the session that existed before
     context compression forked a continuation child (see
@@ -826,7 +822,7 @@ def _deliver_to_local_session(
                 )
             db.append_message(
                 sid,
-                "user",
+                "assistant",
                 delivery_content,
                 observed=True,
                 delivery_id=delivery_id,
@@ -846,7 +842,7 @@ def _deliver_to_local_session(
                 spool_path = spool_session_delivery(
                     delivery_id=delivery_id,
                     session_id=str(resolved_session_id),
-                    role="user",
+                    role="assistant",
                     content=delivery_content,
                     observed=True,
                 )

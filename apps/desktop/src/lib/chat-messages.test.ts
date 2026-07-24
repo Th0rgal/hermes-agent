@@ -11,7 +11,8 @@ import {
   reasoningPart,
   renderMediaTags,
   toChatMessages,
-  upsertToolPart
+  upsertToolPart,
+  userTurnIdentityText
 } from './chat-messages'
 
 describe('toChatMessages', () => {
@@ -1065,5 +1066,28 @@ describe('collectUnspokenTurnSpeech', () => {
     expect(collectUnspokenTurnSpeech([], null)).toBeNull()
     expect(collectUnspokenTurnSpeech([assistant('a1', 'Done.')], 'a1')).toBeNull()
     expect(collectUnspokenTurnSpeech([user('u1', 'hello'), assistant('a1', '')], null)).toBeNull()
+  })
+})
+
+describe('userTurnIdentityText', () => {
+  const typed = 'Master orchestration prompt: leanVM-b scalar hardware core'
+
+  it('normalizes the three lifetime shapes of one attachment-bearing turn to the typed prompt', () => {
+    const stored = `${typed}\n\n--- Attached Context ---\n\n📎 @file:.hermes/desktop-attachments/handoff.zip (application/zip) — binary file.`
+    const projected = `@file:.hermes/desktop-attachments/handoff.zip\n\n${typed}`
+
+    expect(userTurnIdentityText(typed)).toBe(typed)
+    expect(userTurnIdentityText(stored)).toBe(typed)
+    expect(userTurnIdentityText(projected)).toBe(typed)
+  })
+
+  it('keeps a prompt that merely mentions a ref mid-text intact', () => {
+    const text = 'look at @file:src/a.ts and tell me what it does'
+
+    expect(userTurnIdentityText(text)).toBe(text)
+  })
+
+  it('strips context warnings alongside the attached context', () => {
+    expect(userTurnIdentityText(`${typed}\n\n--- Context Warnings ---\nsome warning`)).toBe(typed)
   })
 })

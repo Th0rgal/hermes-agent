@@ -1,5 +1,11 @@
 import { getSession } from '@/hermes'
-import { assistantTextPart, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
+import {
+  assistantTextPart,
+  type ChatMessage,
+  chatMessageText,
+  textPart,
+  userTurnIdentityText
+} from '@/lib/chat-messages'
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
 import { embeddedImageUrls, textWithoutEmbeddedImages } from '@/lib/embedded-images'
 import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
@@ -314,10 +320,14 @@ export function preserveLocalPendingTurnMessages(
       continue
     }
 
+    // Turn identity, not raw text: the authoritative row carries projected
+    // `@ref` lines / attached-context that the optimistic row keeps in
+    // metadata, so a raw compare resurrects attachment-bearing prompts.
     if (
       isOptimisticUser &&
       latestAuthoritativeUser &&
-      chatMessageText(latestAuthoritativeUser).trim() === chatMessageText(message).trim()
+      userTurnIdentityText(chatMessageText(latestAuthoritativeUser)) ===
+        userTurnIdentityText(chatMessageText(message))
     ) {
       continue
     }
@@ -329,7 +339,9 @@ export function preserveLocalPendingTurnMessages(
         continue
       }
 
-      if (chatMessageText(authoritative).trim() === chatMessageText(message).trim()) {
+      if (
+        userTurnIdentityText(chatMessageText(authoritative)) === userTurnIdentityText(chatMessageText(message))
+      ) {
         continue
       }
     }
@@ -370,7 +382,9 @@ export function appendLiveSessionProjection(
   // Only suppress the projection when the latest authoritative user row is the
   // same turn — older identical prompts must not hide a newly accepted repeat.
   const latestUser = [...messages].reverse().find(message => message.role === 'user')
-  const inflightUserAlreadyPersisted = latestUser && chatMessageText(latestUser).trim() === inflightUser
+
+  const inflightUserAlreadyPersisted =
+    latestUser && userTurnIdentityText(chatMessageText(latestUser)) === userTurnIdentityText(inflightUser)
 
   if (inflightUser && !inflightUserAlreadyPersisted) {
     projected.push({

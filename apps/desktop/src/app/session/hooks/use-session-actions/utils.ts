@@ -392,12 +392,11 @@ export function reconcileResumeMessages(nextMessages: ChatMessage[], previousMes
  * or lagging inflight shell must not discard a fuller local pending reply
  * (#75825).
  *
- * Gateway bookkeeping markers (the model-switch / personality notices written
- * by tui_gateway/server.py) are persisted as role=user but are not user turns.
- * They must not take part in ordinal pairing on either side: a stored marker
- * between two real user turns shifts every later user ordinal, so the optimistic
- * row misses its committed copy and is appended a second time at the end of the
- * transcript — the duplicated user bubble of #67603.
+ * Gateway bookkeeping markers and observed cron deliveries are display rows,
+ * not conversational turns. They must not take part in ordinal pairing on
+ * either side: a stored marker shifts every later turn ordinal, while a cron
+ * delivery projected as assistant can otherwise supersede the actual pending
+ * assistant stream.
  */
 const isGatewaySystemMarker = (message: ChatMessage): boolean =>
   message.role === 'user' && chatMessageText(message).trimStart().startsWith('[System:')
@@ -459,6 +458,11 @@ const withAuthoritativeTurnState = (local: ChatMessage, authoritative: ChatMessa
 
   return merged
 }
+const isObservedCronDisplayMessage = (message: ChatMessage): boolean =>
+  message.role === 'assistant' && chatMessageText(message).trimStart().startsWith('[Cron delivery:')
+
+const isNonTurnDisplayMessage = (message: ChatMessage): boolean =>
+  isGatewaySystemMarker(message) || isObservedCronDisplayMessage(message)
 
 export function preserveLocalPendingTurnMessages(
   nextMessages: ChatMessage[],
@@ -472,7 +476,7 @@ export function preserveLocalPendingTurnMessages(
   const nextRoleCounts = new Map<ChatMessage['role'], number>()
 
   for (const message of nextMessages) {
-    if (isGatewaySystemMarker(message)) {
+    if (isNonTurnDisplayMessage(message)) {
       continue
     }
 
@@ -515,7 +519,7 @@ export function preserveLocalPendingTurnMessages(
   const replacements = new Map<string, ChatMessage>()
 
   for (const message of previousMessages) {
-    if (isGatewaySystemMarker(message)) {
+    if (isNonTurnDisplayMessage(message)) {
       continue
     }
 

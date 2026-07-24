@@ -540,6 +540,8 @@ export interface SessionMessage {
   content: unknown
   context?: unknown
   name?: string
+  /** Persisted external delivery (cron/callback), not text typed by the human. */
+  observed?: boolean | number
   reasoning?: null | string
   reasoning_content?: null | string
   reasoning_details?: unknown
@@ -1172,6 +1174,8 @@ export interface MoaModelSlot {
   model: string
   /** Optional per-slot reasoning effort — round-tripped, not edited here. */
   reasoning_effort?: string
+  /** Optional per-advisor output cap — round-tripped, not edited here. */
+  max_tokens?: number | null
   enabled?: boolean
 }
 

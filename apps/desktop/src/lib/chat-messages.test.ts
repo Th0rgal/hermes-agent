@@ -233,6 +233,35 @@ describe('toChatMessages', () => {
     expect(chatMessageText(message)).toBe('summarize @file:`src/main.ts` for me')
   })
 
+  it('renders an observed cron delivery as assistant output with media', () => {
+    const [message] = toChatMessages([
+      {
+        content: '[Cron delivery: asset callback]\nDone.\n\nMEDIA:/tmp/proof.png',
+        observed: true,
+        role: 'user',
+        timestamp: 1
+      }
+    ])
+
+    expect(message.role).toBe('assistant')
+    expect(chatMessageText(message)).toBe(
+      '[Cron delivery: asset callback]\nDone.\n\n[Image: proof.png](#media:%2Ftmp%2Fproof.png)'
+    )
+  })
+
+  it('renders SQLite numeric observed provenance as assistant output', () => {
+    const [message] = toChatMessages([
+      {
+        content: '[Cron delivery: callback]\nDone.',
+        observed: 1,
+        role: 'user',
+        timestamp: 1
+      }
+    ])
+
+    expect(message.role).toBe('assistant')
+  })
+
   it('never paints redirect scaffolding as an assistant bubble', () => {
     // What the desktop actually receives after a mid-stream steer: the runtime
     // keeps the interrupt scaffolding in a server-only api_content sidecar

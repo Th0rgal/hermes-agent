@@ -1191,4 +1191,40 @@ describe('appendLiveSessionProjection', () => {
       pending: true
     })
   })
+  it('does not append committed optimistic prompts after observed cron deliveries shift history', () => {
+    const authoritative = toChatMessages([
+      { content: 'first question', role: 'user', timestamp: 1 },
+      { content: 'first answer', role: 'assistant', timestamp: 2 },
+      {
+        content: '[Cron delivery: callback]\nMission finished.',
+        observed: true,
+        role: 'user',
+        timestamp: 3
+      },
+      { content: 'second question', role: 'user', timestamp: 4 },
+      { content: 'second answer', role: 'assistant', timestamp: 5 },
+      { content: 'third question', role: 'user', timestamp: 6 },
+      { content: 'third answer', role: 'assistant', timestamp: 7 }
+    ])
+
+    const warmCache = [
+      msg('user-old-1', 'user', 'first question'),
+      msg('assistant-old-1', 'assistant', 'first answer'),
+      msg('user-old-2', 'user', 'second question'),
+      msg('assistant-old-2', 'assistant', 'second answer'),
+      msg('user-optimistic', 'user', 'third question')
+    ]
+
+    expect(preserveLocalPendingTurnMessages(authoritative, warmCache)).toBe(authoritative)
+    expect(authoritative.map(message => message.role)).toEqual([
+      'user',
+      'assistant',
+      'assistant',
+      'user',
+      'assistant',
+      'user',
+      'assistant'
+    ])
+  })
+
 })

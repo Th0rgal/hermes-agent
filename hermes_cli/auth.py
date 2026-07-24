@@ -1705,9 +1705,17 @@ def is_provider_explicitly_configured(provider_id: str) -> bool:
                 and (slot.get("provider") or "").strip().lower() == normalized
             )
 
+        def _reference_slots(value):
+            # The MoA config accepts both a list and a single mapping. Iterating
+            # the mapping directly yields its string keys and silently misses
+            # the provider selected by the user.
+            if isinstance(value, dict):
+                return (value,)
+            return value if isinstance(value, list) else ()
+
         moa_cfg = cfg.get("moa")
         if isinstance(moa_cfg, dict):
-            for slot in moa_cfg.get("reference_models") or []:
+            for slot in _reference_slots(moa_cfg.get("reference_models")):
                 if _slot_matches_provider(slot):
                     return True
             if _slot_matches_provider(moa_cfg.get("aggregator")):
@@ -1717,7 +1725,7 @@ def is_provider_explicitly_configured(provider_id: str) -> bool:
                 for preset in presets.values():
                     if not isinstance(preset, dict):
                         continue
-                    for slot in preset.get("reference_models") or []:
+                    for slot in _reference_slots(preset.get("reference_models")):
                         if _slot_matches_provider(slot):
                             return True
                     if _slot_matches_provider(preset.get("aggregator")):

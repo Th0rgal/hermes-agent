@@ -4538,24 +4538,74 @@ class TestFormatMessageTableIntegration:
         )
         assert first_fence_line == "```"
 
-# TestSlackUserAgent
+# TestSlackClientConstruction
 # ---------------------------------------------------------------------------
 
 
-class TestSlackUserAgent:
-    """Pin the User-Agent attribution wired in connect().
+class TestSlackClientConstruction:
+    """Pin privacy-safe client construction in ``connect()``."""
 
-    Slack platform partners (analytics, abuse-detection, etc.) attribute
-    outbound API traffic by ``User-Agent``. The Slack adapter sets
-    ``user_agent_prefix=_HERMES_SLACK_USER_AGENT_PREFIX`` on every
-    ``AsyncWebClient`` it builds and threads the primary client into
-    ``AsyncApp(client=...)`` so the prefix sticks on the app-owned client too.
-    Pin both behaviors at the actual call sites — a future refactor that
-    drops either kwarg would silently break attribution otherwise.
-    """
+    @pytest.mark.asyncio
+    async def test_async_web_client_uses_sdk_default_user_agent(self):
+        """Hermes must not add product attribution without an opt-in gate."""
+        # Multi-token config exercises both construction sites:
+        # the primary AsyncApp client AND the per-token loop.
+        config = PlatformConfig(
+            enabled=True, token="xoxb-fake-1,xoxb-fake-2"
+        )
+        adapter = SlackAdapter(config)
 
-    def test_hermes_slack_user_agent_prefix_format(self):
-        """Module constant matches the HermesAgent/<version> convention used
-        elsewhere in the codebase for platform-partner attribution."""
-        assert _slack_mod._HERMES_SLACK_USER_AGENT_PREFIX.startswith("HermesAgent/")
+        mock_app = MagicMock()
+        mock_app.event = lambda *a, **kw: (lambda fn: fn)
+        mock_app.command = lambda *a, **kw: (lambda fn: fn)
+        mock_app.client = AsyncMock()
 
+        mock_web_client = MagicMock()
+        mock_web_client.auth_test = AsyncMock(
+            return_value={
+                "user_id": "U_BOT",
+                "user": "testbot",
+                "team_id": "T_FAKE",
+                "team": "FakeTeam",
+            }
+        )
+
+        socket_mode_handler = MagicMock()
+        socket_mode_handler.start_async = AsyncMock(return_value=None)
+
+        with (
+            patch.object(_slack_mod, "AsyncApp", return_value=mock_app) as async_app_mock,
+            patch.object(
+                _slack_mod, "AsyncWebClient", return_value=mock_web_client
+            ) as web_client_mock,
+            patch.object(
+                _slack_mod,
+                "AsyncSocketModeHandler",
+                return_value=socket_mode_handler,
+            ),
+            patch.dict(os.environ, {"SLACK_APP_TOKEN": "xapp-fake"}),
+            patch(
+                "gateway.status.acquire_scoped_lock", return_value=(True, None)
+            ),
+            patch("asyncio.create_task", side_effect=_fake_create_task),
+        ):
+            await adapter.connect()
+
+        # AsyncWebClient must be constructed at least once (primary), but
+        # Hermes leaves User-Agent selection to the Slack SDK.
+        assert web_client_mock.call_count >= 1, (
+            "AsyncWebClient was never constructed during connect()"
+        )
+        for idx, call_args in enumerate(web_client_mock.call_args_list):
+            assert "user_agent_prefix" not in call_args.kwargs, (
+                f"AsyncWebClient call #{idx} added outbound attribution "
+                f"without opt-in: {call_args}"
+            )
+
+        # AsyncApp still receives the pre-built primary client so proxy and
+        # workspace client setup remain centralized.
+        async_app_kwargs = async_app_mock.call_args.kwargs
+        assert "client" in async_app_kwargs, (
+            "AsyncApp must receive the pre-built primary client; got "
+            f"kwargs={async_app_kwargs}"
+        )

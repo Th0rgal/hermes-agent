@@ -268,6 +268,35 @@ export function mergeFinalAssistantText(parts: ChatMessagePart[], finalText: str
 const ATTACHED_CONTEXT_MARKER_RE = /(?:^|\n)--- Attached Context ---\s*\n/
 const CONTEXT_WARNINGS_MARKER_RE = /(?:^|\n)--- Context Warnings ---[\s\S]*$/
 const CONTEXT_REF_RE = /@(file|folder|url|image|tool|terminal):(?:"[^"\n]+"|'[^'\n]+'|`[^`\n]+`|\S+)/g
+const LEADING_REF_LINE_RE = /^@(?:file|folder|url|image|tool|terminal):(?:"[^"\n]+"|'[^'\n]+'|`[^`\n]+`|\S+)$/
+
+/** The typed prompt of a user turn, for turn-identity comparisons.
+ *
+ * The same turn takes three text shapes across its lifetime: the local
+ * optimistic row keeps just the typed prompt (refs live in `attachmentRefs`
+ * metadata), the stored row appends an "--- Attached Context ---" block, and
+ * the transcript projection prepends the extracted `@ref` lines
+ * (displayContentForMessage). Comparing any two of those raw strings never
+ * matches for an attachment-bearing prompt, which resurrected the optimistic
+ * copy as a duplicate transcript tail. Normalize all three shapes down to
+ * the prompt the user actually typed. */
+export function userTurnIdentityText(text: string): string {
+  const marker = text.match(ATTACHED_CONTEXT_MARKER_RE)
+
+  const body = (marker && marker.index !== undefined ? text.slice(0, marker.index) : text).replace(
+    CONTEXT_WARNINGS_MARKER_RE,
+    ''
+  )
+
+  const lines = body.split('\n')
+  let index = 0
+
+  while (index < lines.length && lines[index].trim() && LEADING_REF_LINE_RE.test(lines[index].trim())) {
+    index += 1
+  }
+
+  return lines.slice(index).join('\n').trim()
+}
 
 function textFromUnknown(value: unknown, depth = 0): string {
   if (typeof value === 'string') {

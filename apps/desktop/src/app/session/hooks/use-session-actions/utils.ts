@@ -1,7 +1,13 @@
 import { getSession } from '@/hermes'
-import { assistantTextPart, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
+import {
+  assistantTextPart,
+  type ChatMessage,
+  chatMessageText,
+  textPart,
+  userTurnIdentityText
+} from '@/lib/chat-messages'
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
-import { embeddedImageUrls, textWithoutEmbeddedImages, textWithoutImageRefs } from '@/lib/embedded-images'
+import { embeddedImageUrls, textWithoutEmbeddedImages } from '@/lib/embedded-images'
 import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
 import { requestDesktopOnboardingForCredentialWarning } from '@/store/onboarding'
 import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/profile'
@@ -318,10 +324,14 @@ export function preserveLocalPendingTurnMessages(
       continue
     }
 
+    // Turn identity, not raw text: the authoritative row carries projected
+    // `@ref` lines / attached-context that the optimistic row keeps in
+    // metadata, so a raw compare resurrects attachment-bearing prompts.
     if (
       isOptimisticUser &&
       latestAuthoritativeUser &&
-      textWithoutImageRefs(chatMessageText(latestAuthoritativeUser)) === textWithoutImageRefs(chatMessageText(message))
+      userTurnIdentityText(chatMessageText(latestAuthoritativeUser)) ===
+        userTurnIdentityText(chatMessageText(message))
     ) {
       continue
     }
@@ -333,7 +343,9 @@ export function preserveLocalPendingTurnMessages(
         continue
       }
 
-      if (textWithoutImageRefs(chatMessageText(authoritative)) === textWithoutImageRefs(chatMessageText(message))) {
+      if (
+        userTurnIdentityText(chatMessageText(authoritative)) === userTurnIdentityText(chatMessageText(message))
+      ) {
         continue
       }
     }
@@ -380,7 +392,7 @@ export function appendLiveSessionProjection(
   const latestUser = [...messages].reverse().find(message => message.role === 'user')
 
   const inflightUserAlreadyPersisted =
-    latestUser && textWithoutImageRefs(chatMessageText(latestUser)) === textWithoutImageRefs(inflightUser)
+    latestUser && userTurnIdentityText(chatMessageText(latestUser)) === userTurnIdentityText(inflightUser)
 
   if (inflightUser && !inflightUserAlreadyPersisted) {
     projected.push({

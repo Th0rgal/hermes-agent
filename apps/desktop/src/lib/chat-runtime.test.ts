@@ -182,7 +182,6 @@ describe('attachmentId', () => {
 })
 
 describe('toRuntimeMessage', () => {
-describe('toRuntimeMessage', () => {
   it('carries delivery provenance into assistant metadata.custom', () => {
     const runtimeMessage = toRuntimeMessage({
       id: 'delivery-1',

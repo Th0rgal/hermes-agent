@@ -163,7 +163,7 @@ def test_live_desktop_merges_missing_observed_delivery_once(monkeypatch):
     import contextlib
 
     observed = {
-        "role": "system",
+        "role": "assistant",
         "content": "[Cron delivery: overnight]\nAll checks passed.",
         "observed": True,
         "timestamp": 123.0,
@@ -1589,7 +1589,7 @@ def test_history_to_messages_preserves_observed_delivery_provenance():
         {"role": "user", "content": "run the check"},
         {"role": "assistant", "content": "scheduled"},
         {
-            "role": "system",
+            "role": "assistant",
             "content": "[Cron delivery: check]\nAll checks passed.",
             "observed": True,
         },
@@ -1599,7 +1599,7 @@ def test_history_to_messages_preserves_observed_delivery_provenance():
         {"role": "user", "text": "run the check"},
         {"role": "assistant", "text": "scheduled"},
         {
-            "role": "system",
+            "role": "assistant",
             "text": "[Cron delivery: check]\nAll checks passed.",
             "observed": True,
         },

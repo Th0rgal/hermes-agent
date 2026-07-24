@@ -40,10 +40,10 @@ def mirror_to_session(
     ``role`` defaults to ``"assistant"`` — correct for the interactive
     ``send_message`` mirror, where the mirrored text is the agent's own
     outgoing reply (a genuine assistant turn). Callers mirroring
-    platform-generated context — e.g. a cron brief delivered out-of-band —
-    should pass ``role="system"``. This keeps the event distinct from genuine
-    user input without creating an assistant→assistant pair when mirror
-    metadata is dropped at the SQLite boundary.
+    a completed agent response — e.g. a cron brief delivered out-of-band —
+    should retain ``role="assistant"``. Adjacent assistant turns are normalized
+    by ``repair_message_sequence`` before provider replay, while the role keeps
+    the event distinct from genuine user input in local UIs.
 
     Returns True if mirrored successfully, False if no matching session or error.
     All errors are caught -- this is never fatal.

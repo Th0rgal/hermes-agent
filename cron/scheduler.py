@@ -731,12 +731,11 @@ def _maybe_mirror_cron_delivery(
     try:
         from gateway.mirror import mirror_to_session
 
-        # A cron delivery is platform-generated context, not user input and not
-        # a model-authored reply. Persist it as SYSTEM so local UIs do not render
-        # callbacks as user bubbles and provider history does not acquire either
-        # a synthetic user turn or an assistant→assistant pair. The labelled
-        # prefix remains useful when mirror metadata is dropped at the SQLite
-        # boundary.
+        # The delivered text is the cron agent's completed response, not user
+        # input. Persist it as ASSISTANT so UIs render the callback on Hermes's
+        # side of the conversation. Adjacent assistant turns are normalized by
+        # repair_message_sequence before provider replay; the labelled prefix
+        # preserves callback provenance when SQLite drops mirror metadata.
         ok = mirror_to_session(
             platform_name,
             str(chat_id),
@@ -744,7 +743,7 @@ def _maybe_mirror_cron_delivery(
             source_label="cron",
             thread_id=thread_id,
             user_id=user_id,
-            role="system",
+            role="assistant",
         )
         if ok:
             logger.info(
@@ -774,9 +773,9 @@ def _deliver_to_local_session(
 
     Local GUI surfaces have no messaging adapter to push through — the
     ``SessionDB`` row *is* their durable delivery surface. Appends a labelled
-    SYSTEM-role message: a cron callback is platform-generated context, not
-    user input or a model-authored reply. The client picks it up on its
-    transcript poll or next reload.
+    ASSISTANT-role message: the callback is the cron agent's completed response,
+    not user input. The client picks it up on its transcript poll or next
+    reload.
 
     A target may name a compression parent — the session that existed before
     context compression forked a continuation child (see
@@ -823,7 +822,7 @@ def _deliver_to_local_session(
                 )
             db.append_message(
                 sid,
-                "system",
+                "assistant",
                 delivery_content,
                 observed=True,
                 delivery_id=delivery_id,
@@ -843,7 +842,7 @@ def _deliver_to_local_session(
                 spool_path = spool_session_delivery(
                     delivery_id=delivery_id,
                     session_id=str(resolved_session_id),
-                    role="system",
+                    role="assistant",
                     content=delivery_content,
                     observed=True,
                 )

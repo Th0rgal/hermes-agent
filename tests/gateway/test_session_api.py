@@ -194,7 +194,7 @@ async def test_session_messages_preserve_observed_callback_provenance(adapter, s
     session_id = session_db.create_session("callback-session", "api_server")
     session_db.append_message(
         session_id,
-        "user",
+        "system",
         "[Cron delivery: watcher]\nBuild finished.",
         observed=True,
     )
@@ -205,7 +205,7 @@ async def test_session_messages_preserve_observed_callback_provenance(adapter, s
         assert response.status == 200
         payload = await response.json()
 
-    assert payload["data"][0]["role"] == "user"
+    assert payload["data"][0]["role"] == "system"
     assert payload["data"][0]["observed"] == 1
 
 

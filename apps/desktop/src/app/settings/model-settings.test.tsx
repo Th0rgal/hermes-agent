@@ -564,4 +564,28 @@ describe('ModelSettings MoA preset editor', () => {
       vi.useRealTimers()
     }
   })
+
+  it('drops a disabled half-edited reference and saves the remaining complete ensemble', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+
+    try {
+      await openReferenceEditor()
+
+      fireEvent.click(slotSelects().ref1Provider)
+      fireEvent.click(await screen.findByRole('option', { name: 'OpenRouter' }))
+      await vi.advanceTimersByTimeAsync(700)
+      expect(saveMoaModels).not.toHaveBeenCalled()
+
+      fireEvent.click(screen.getByRole('switch', { name: 'Disable reference 1' }))
+      await vi.advanceTimersByTimeAsync(700)
+
+      expect(saveMoaModels).toHaveBeenCalledTimes(1)
+      const sent = saveMoaModels.mock.calls[0][0] as ReturnType<typeof moaConfig>
+      expect(sent.presets.default.reference_models).toEqual([
+        { provider: 'openrouter', model: 'deepseek/deepseek-v4-pro' }
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

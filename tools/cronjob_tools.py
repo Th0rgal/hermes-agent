@@ -650,12 +650,23 @@ def _execute_job_now(job: Dict[str, Any]) -> Dict[str, Any]:
         # run_one_job records last_run_at/last_status via mark_job_run (which
         # also clears the fire claim) and returns True iff it processed the job.
         processed = run_one_job(job)
-        refreshed = get_job(job_id) or {}
-        ok = refreshed.get("last_status") == "ok"
+        refreshed = get_job(job_id)
+        if refreshed is not None:
+            ok = refreshed.get("last_status") == "ok"
+            run_error = refreshed.get("last_error")
+        else:
+            # Finite jobs are deleted by mark_job_run as soon as their repeat
+            # limit is reached.  The durable execution row outlives the job and
+            # is therefore the authoritative result for a direct final run.
+            from cron.executions import latest_execution
+
+            execution = latest_execution(job_id) or {}
+            ok = execution.get("status") == "completed"
+            run_error = execution.get("error")
         return {
             "claimed": True,
             "success": bool(processed and ok),
-            "error": refreshed.get("last_error"),
+            "error": run_error,
         }
 
     except Exception as e:

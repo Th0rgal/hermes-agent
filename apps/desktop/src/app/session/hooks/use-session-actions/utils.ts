@@ -1,5 +1,11 @@
 import { getSession } from '@/hermes'
-import { assistantTextPart, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
+import {
+  assistantTextPart,
+  type ChatMessage,
+  chatMessageText,
+  textPart,
+  userTurnIdentityText
+} from '@/lib/chat-messages'
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
 import { embeddedImageUrls, textWithoutEmbeddedImages, textWithoutImageRefs } from '@/lib/embedded-images'
 import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
@@ -411,10 +417,14 @@ export function preserveLocalPendingTurnMessages(
       continue
     }
 
+    // Turn identity, not raw text: the authoritative row carries projected
+    // `@ref` lines / attached-context that the optimistic row keeps in
+    // metadata, so a raw compare resurrects attachment-bearing prompts.
     if (
       isOptimisticUser &&
       latestAuthoritativeUser &&
-      textWithoutImageRefs(chatMessageText(latestAuthoritativeUser)) === textWithoutImageRefs(chatMessageText(message))
+      userTurnIdentityText(textWithoutImageRefs(chatMessageText(latestAuthoritativeUser))) ===
+        userTurnIdentityText(textWithoutImageRefs(chatMessageText(message)))
     ) {
       continue
     }
@@ -426,7 +436,10 @@ export function preserveLocalPendingTurnMessages(
         continue
       }
 
-      if (textWithoutImageRefs(chatMessageText(authoritative)) === textWithoutImageRefs(chatMessageText(message))) {
+      if (
+        userTurnIdentityText(textWithoutImageRefs(chatMessageText(authoritative))) ===
+          userTurnIdentityText(textWithoutImageRefs(chatMessageText(message)))
+      ) {
         continue
       }
     }
@@ -495,7 +508,11 @@ export function appendLiveSessionProjection(
   }
 
   const persistedInLatestRun = (text: string): boolean =>
-    latestUserRun.some(message => textWithoutImageRefs(chatMessageText(message)) === textWithoutImageRefs(text))
+    latestUserRun.some(
+      message =>
+        userTurnIdentityText(textWithoutImageRefs(chatMessageText(message))) ===
+        userTurnIdentityText(textWithoutImageRefs(text))
+    )
 
   const inflightUserAlreadyPersisted = Boolean(inflightUser) && persistedInLatestRun(inflightUser)
 

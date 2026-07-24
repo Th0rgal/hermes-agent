@@ -137,6 +137,17 @@ def test_dotenv_blob_helper_resolves_multiple_keys(tmp_path):
     assert set(listed) == {"CMDTEST_API_KEY", "CMDTEST_TOKEN"}
 
 
+def test_list_dotenv_blob_skips_blank_values(tmp_path):
+    helper = _write_helper(
+        tmp_path,
+        "printf 'CMDTEST_API_KEY=\"  \"\\nCMDTEST_TOKEN=usable\\n'",
+    )
+
+    listed = list_command_secrets(command=str(helper))
+
+    assert listed == {"CMDTEST_TOKEN": "usable"}
+
+
 def test_base64_padding_value_roundtrips_through_real_helper(tmp_path):
     helper = _write_helper(tmp_path, "printf 'dGVzdA=='")
     assert get_command_secret(command=str(helper), key="CMDTEST_API_KEY") == "dGVzdA=="
@@ -180,6 +191,31 @@ def test_timeout_kills_hung_helper_and_degrades_to_empty(tmp_path):
     elapsed = time.monotonic() - start
     assert value is None
     assert elapsed < 6.0, f"helper not killed within the bound (took {elapsed:.1f}s)"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "while :; do printf '0123456789abcdef'; done",
+        "while :; do printf '0123456789abcdef' >&2; done",
+    ],
+)
+def test_output_cap_kills_noisy_helper_before_buffering(tmp_path, capfd, body):
+    helper = _write_helper(tmp_path, body)
+    start = time.monotonic()
+    value = get_command_secret(
+        command=str(helper),
+        key="CMDTEST_API_KEY",
+        timeout_seconds=5.0,
+        max_output_bytes=4096,
+    )
+    elapsed = time.monotonic() - start
+
+    assert value is None
+    assert elapsed < 2.0, f"output cap did not stop helper promptly ({elapsed:.1f}s)"
+    combined = "".join(capfd.readouterr())
+    assert "4096-byte cap" in combined
+    assert "0123456789abcdef" not in combined
 
 
 def test_apply_timeout_degrades_to_empty_result(tmp_path):

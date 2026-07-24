@@ -924,6 +924,9 @@ _CATEGORY_MERGE: Dict[str, str] = {
     "prompt_caching": "agent",
     "goals": "agent",
     "updates": "general",
+    # SessionDB durability currently exposes one operator-facing setting. Keep
+    # it in the general tab until the category has enough fields of its own.
+    "session_db": "general",
     # `onboarding.profile_build` is the only schema-surfaced onboarding field
     # (`onboarding.seen` is an internal latch dict, not a user setting), so fold
     # it into the agent tab rather than spawning a one-field orphan category.
@@ -1361,6 +1364,10 @@ class MoaModelSlot(BaseModel):
     # Optional per-slot reasoning effort. Declared so a client round-tripping
     # the GET payload doesn't have it stripped at parse time and wiped on save.
     reasoning_effort: Optional[str] = None
+    # Optional output cap for this advisor. The runtime gives it precedence
+    # over the preset-level reference_max_tokens value, so the HTTP schema must
+    # round-trip it instead of silently erasing hand-edited caps.
+    max_tokens: Optional[int] = None
     enabled: bool = True
 
 
@@ -11446,6 +11453,56 @@ def _open_session_db_for_profile(profile: Optional[str]):
     return SessionDB(db_path=Path(home) / "state.db")
 
 
+def _project_session_messages_for_display(
+    messages: List[Dict[str, Any]],
+    profile: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Apply the active profile's transcript-only display policy.
+
+    Model replay continues to read the complete durable history directly from
+    SessionDB. This projection serves Desktop/Web polling, which must agree
+    with the live gateway stream after a turn settles.
+    """
+    token = None
+    try:
+        if profile:
+            from hermes_constants import (
+                reset_hermes_home_override,
+                set_hermes_home_override,
+            )
+
+            _name, home = _cron_profile_home(profile)
+            token = set_hermes_home_override(str(home))
+
+        from gateway.display_config import (
+            is_interim_assistant_history_message,
+            resolve_display_setting,
+        )
+
+        include_interims = bool(
+            resolve_display_setting(
+                load_config(),
+                "api_server",
+                "interim_assistant_messages",
+                True,
+            )
+        )
+    except Exception:
+        include_interims = True
+    finally:
+        if token is not None:
+            reset_hermes_home_override(token)
+
+    if include_interims:
+        return messages
+
+    return [
+        message
+        for message in messages
+        if not is_interim_assistant_history_message(message)
+    ]
+
+
 @app.get("/api/sessions/{session_id}")
 async def get_session_detail(session_id: str, profile: Optional[str] = None):
     db = _open_session_db_for_profile(profile)
@@ -11500,7 +11557,12 @@ async def get_session_messages(
             sid = db.resolve_resume_session_id(sid)
             # Clamp limit to prevent abuse (max 500 per page)
             _limit = min(limit, 500) if limit is not None else None
-            return sid, _limit, db.get_messages(sid, limit=_limit, offset=offset)
+            messages = db.get_messages(sid, limit=_limit, offset=offset)
+            return (
+                sid,
+                _limit,
+                _project_session_messages_for_display(messages, profile),
+            )
         finally:
             db.close()
 
@@ -12240,7 +12302,10 @@ def _resume_cron_job_sync(job_id: str, profile: Optional[str] = None):
     selected = profile or _find_cron_job_profile(job_id)
     if not selected:
         raise HTTPException(status_code=404, detail="Job not found")
-    job = _call_cron_for_profile(selected, "resume_job", job_id)
+    try:
+        job = _call_cron_for_profile(selected, "resume_job", job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
@@ -12255,7 +12320,10 @@ def _trigger_cron_job_sync(job_id: str, profile: Optional[str] = None):
     selected = profile or _find_cron_job_profile(job_id)
     if not selected:
         raise HTTPException(status_code=404, detail="Job not found")
-    job = _call_cron_for_profile(selected, "trigger_job", job_id)
+    try:
+        job = _call_cron_for_profile(selected, "trigger_job", job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job

@@ -533,6 +533,32 @@ describe('reconcileResumeMessages', () => {
 })
 
 describe('preserveLocalPendingTurnMessages', () => {
+  it('does not resurrect an attachment-bearing optimistic prompt over its persisted row', () => {
+    // The stored row carries an "--- Attached Context ---" block; the
+    // projection turns it into a leading `@ref` line. The optimistic row has
+    // only the typed prompt (refs live in attachmentRefs metadata). Same
+    // turn, three text shapes — no duplicate tail (session 20260724_220134).
+    const next = toChatMessages([
+      {
+        role: 'user',
+        content:
+          'Master orchestration prompt: leanVM-b scalar hardware core\n\n' +
+          '--- Attached Context ---\n\n' +
+          '📎 @file:.hermes/desktop-attachments/leanvm-b-agent-handoff.zip (application/zip, 79.6 KB) — binary file, not inlined as text.',
+        timestamp: 1
+      },
+      { role: 'assistant', content: 'C’est lancé.', timestamp: 2 }
+    ])
+
+    const previous = [
+      msg('user-optimistic', 'user', 'Master orchestration prompt: leanVM-b scalar hardware core', {
+        attachmentRefs: ['@file:leanvm-b-agent-handoff.zip']
+      })
+    ]
+
+    expect(preserveLocalPendingTurnMessages(next, previous)).toEqual(next)
+  })
+
   it('keeps an optimistic user turn and pending assistant when the server projection is behind', () => {
     const next = [msg('1-user', 'user', 'first'), msg('2-assistant', 'assistant', 'first answer')]
 
@@ -1065,6 +1091,25 @@ describe('appendLiveSessionProjection', () => {
     const userText = userRows[0].parts.map(part => ('text' in part ? part.text : '')).join('')
 
     expect(userText).toBe('current running prompt')
+  })
+
+  it('suppresses the inflight echo of an attachment-bearing persisted prompt', () => {
+    const stored = toChatMessages([
+      {
+        role: 'user',
+        content:
+          'Analyze the handoff\n\n--- Attached Context ---\n\n📎 @file:.hermes/desktop-attachments/handoff.zip (application/zip) — binary file.',
+        timestamp: 1
+      }
+    ])
+
+    const result = appendLiveSessionProjection(stored, {
+      session_id: 's1',
+      inflight: { user: 'Analyze the handoff' },
+      queued: undefined
+    })
+
+    expect(result).toEqual(stored)
   })
 
   it('restores the running turn and accepted queued prompt after a renderer restart', () => {

@@ -41,6 +41,7 @@ _cron_profile_home = late("_cron_profile_home")
 _import_sessions_for_profile = late("_import_sessions_for_profile")
 _maybe_auto_archive_for_profile = late("_maybe_auto_archive_for_profile")
 _open_session_db_for_profile = late("_open_session_db_for_profile")
+_project_session_messages_for_display = late("_project_session_messages_for_display")
 _prune_sessions = late("_prune_sessions")
 _read_session_import_body = late("_read_session_import_body")
 _session_latest_descendant = late("_session_latest_descendant")
@@ -611,7 +612,13 @@ async def get_session_messages(
             sid = db.resolve_resume_session_id(sid)
             # Clamp limit to prevent abuse (max 500 per page)
             _limit = min(limit, 500) if limit is not None else None
-            return sid, _limit, db.get_messages(sid, limit=_limit, offset=offset)
+            return (
+                sid,
+                _limit,
+                _project_session_messages_for_display(
+                    db.get_messages(sid, limit=_limit, offset=offset), profile
+                ),
+            )
         finally:
             db.close()
 

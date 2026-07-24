@@ -3067,10 +3067,19 @@ def _set_session_context(
                         getattr(sess.get("agent"), "session_id", None) or session_key
                     )
                     break
+        # Local GUI surfaces use the durable conversation id as their return
+        # address. Unlike a messaging chat, there is no external channel id:
+        # the SessionDB row itself is the delivery surface. TUI stays local-only
+        # because it has no transcript poll/live GUI to surface an unattended
+        # result. ``session_id`` is still populated for every surface so tools
+        # never lose the durable identity behind an explicitly-empty ContextVar.
+        local_session_origin = source in {"desktop", "webui"}
         return set_session_vars(
+            platform=source if local_session_origin else "",
             session_key=session_key,
-            session_id=session_id,
+            session_id=session_key,
             source=source,
+            chat_id=session_key if local_session_origin else "",
             cwd=resolved,
             ui_session_id=ui_session_id,
             cron_session="",
@@ -3088,6 +3097,79 @@ def _clear_session_context(tokens: list) -> None:
         clear_session_vars(tokens)
     except Exception:
         pass
+
+
+def _merge_observed_session_messages(session: dict) -> int:
+    """Merge externally persisted local-session deliveries into live history.
+
+    A cron scheduler may run in a sibling process and append an ``observed``
+    delivery directly to the Desktop/WebUI session row. The renderer can poll
+    that row, but the long-lived TUI gateway keeps its own in-memory history.
+    Without this pre-turn merge, the next prompt would omit the cron result and
+    could overwrite it when the agent flushes its stale transcript.
+
+    Only observed rows are imported, and only when missing by occurrence. This
+    makes the merge additive and fail-closed: ordinary DB edits or a divergent
+    transcript can never clobber live state.
+    """
+    if _session_source(session) not in {"desktop", "webui"}:
+        return 0
+    session_key = str(session.get("session_key") or "")
+    if not session_key:
+        return 0
+
+    try:
+        with _session_db(session) as db:
+            if db is None or not db.get_session(session_key):
+                return 0
+            stored = db.get_messages_as_conversation(session_key)
+    except Exception:
+        logger.debug(
+            "failed to load observed local-session messages for %s",
+            session_key,
+            exc_info=True,
+        )
+        return 0
+
+    def identity(message: dict) -> tuple[str, str, str]:
+        try:
+            content = json.dumps(
+                message.get("content"),
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+        except Exception:
+            content = str(message.get("content"))
+        return (
+            str(message.get("role") or ""),
+            content,
+            str(message.get("timestamp") or ""),
+        )
+
+    with session["history_lock"]:
+        known = [identity(message) for message in session.get("history", []) if message.get("observed")]
+        missing = []
+        for message in stored:
+            if not message.get("observed"):
+                continue
+            marker = identity(message)
+            if marker in known:
+                known.remove(marker)
+                continue
+            missing.append(dict(message))
+        if not missing:
+            return 0
+        session["history"].extend(missing)
+        session["history_version"] = int(session.get("history_version", 0)) + 1
+
+    logger.info(
+        "Merged %d observed delivery message(s) into live %s session %s",
+        len(missing),
+        _session_source(session),
+        session_key,
+    )
+    return len(missing)
 
 
 def _enable_gateway_prompts() -> None:
@@ -6922,7 +7004,16 @@ def _legacy_display_kind(role: str, text: str) -> str | None:
     return None
 
 
-def _history_to_messages(history: list[dict]) -> list[dict]:
+def _history_to_messages(
+    history: list[dict],
+    *,
+    include_interim_assistant_messages: bool | None = None,
+) -> list[dict]:
+    from gateway.display_config import is_interim_assistant_history_message
+
+    if include_interim_assistant_messages is None:
+        include_interim_assistant_messages = _load_interim_assistant_messages()
+
     messages = []
     tool_call_args = {}
 
@@ -6952,6 +7043,17 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
                     except (json.JSONDecodeError, TypeError):
                         args = {}
                     tool_call_args[tc_id] = (fn["name"], args)
+            # Assistant narration attached to a tool-call turn is durable
+            # model history, but it is an interim display segment. When the
+            # display gate is off, the live stream replaces that text with the
+            # terminal answer; a later session.history poll must apply the
+            # same projection or the hidden narration reappears after the
+            # message.complete event settled.
+            if (
+                not include_interim_assistant_messages
+                and is_interim_assistant_history_message(m)
+            ):
+                continue
             if not content_text.strip():
                 continue
         if role == "tool":
@@ -6997,6 +7099,13 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
                 # turn by ordinal, so no client needs it.
                 msg["text"] = invocation
                 msg["display_kind"] = "skill_invocation"
+        # Cron/local-session deliveries are persisted as role=user to preserve
+        # provider alternation, but ``observed`` is the durable provenance that
+        # tells GUI clients this was injected by Hermes rather than typed by the
+        # human. Keep it in the display projection so Desktop can render the
+        # delivery as agent output without changing model-facing history.
+        if m.get("observed"):
+            msg["observed"] = True
         if role == "assistant":
             for key in reasoning_keys:
                 if key in m and m.get(key) is not None:
@@ -8647,6 +8756,136 @@ def _read_spawn_tree_index(session_dir) -> list[dict]:
 
 
 # ── Methods: prompt ──────────────────────────────────────────────────
+
+
+@method("prompt.submit")
+def _(rid, params: dict) -> dict:
+    from hermes_cli.input_sanitize import sanitize_user_prompt_text
+
+    sid = params.get("session_id", "")
+    raw_text = params.get("text", "")
+    text = sanitize_user_prompt_text(raw_text) if isinstance(raw_text, str) else raw_text
+    truncate_user_ordinal = params.get("truncate_before_user_ordinal")
+    if params.get("interrupted"):
+        # Client-side barge-in (desktop VAD / typing over playback) — latch it
+        # so this turn's model message carries the interruption note.
+        from tools.tts_streaming import mark_speech_interrupted
+
+        mark_speech_interrupted()
+    session, err = _sess_nowait(params, rid)
+    if err:
+        return err
+    isolation_cfg = _load_dashboard_process_isolation_config()
+    turn_isolation = _session_uses_compute_host(session, isolation_cfg)
+    # Re-bind to the current client transport for this request. This keeps
+    # streaming events on the active websocket even if an earlier disconnect
+    # or fallback moved the session transport to stdio.
+    if (t := current_transport()) is not None:
+        session["transport"] = t
+    while True:
+        busy_transport = None
+        with session["history_lock"]:
+            if session.get("running"):
+                # Don't reject a mid-turn prompt — queue it (and, by default,
+                # interrupt the live turn) so it runs as the next turn. The
+                # provider interrupt itself must happen after this lock is
+                # released: a non-interruptible tool may keep it waiting.
+                busy_transport = t or session.get("transport")
+            else:
+                break
+        busy_response = _handle_busy_submit(rid, sid, session, text, busy_transport)
+        if busy_response is not None:
+            return busy_response
+        # The old turn finished between the two lock acquisitions. Retry the
+        # claim so this prompt starts normally instead of being stranded in a
+        # queue whose drain already ran.
+
+    # Cron/local-session delivery is persisted outside this live gateway
+    # record. Import any new observed rows before snapshotting history for the
+    # next turn, so the agent sees exactly what Desktop/WebUI just displayed.
+    _merge_observed_session_messages(session)
+
+    with session["history_lock"]:
+        # A watch session's run lives in the PARENT turn, so its own running
+        # flag is False — without this, typing mid-run builds a second agent
+        # racing the in-flight child on the same stored session (interleaved
+        # transcript, stale fork). After the run completes, submitting is fine:
+        # the upgrade resumes the child's transcript as a normal conversation.
+        if session.get("lazy") and _child_run_active(str(session.get("session_key") or "")):
+            return _err(rid, 4009, "subagent still running — wait for it to finish")
+        if truncate_user_ordinal is not None:
+            try:
+                ordinal = int(truncate_user_ordinal)
+            except (TypeError, ValueError):
+                return _err(rid, 4004, "truncate_before_user_ordinal must be an integer")
+            history = session.get("history", [])
+            user_indices = [i for i, m in enumerate(history) if m.get("role") == "user"]
+            # Reject out-of-range ordinals on BOTH ends. A negative value would
+            # otherwise sail past the upper-bound check and hit Python's negative
+            # indexing below (user_indices[-1] -> the LAST user turn), silently
+            # truncating history to everything before it and persisting that loss
+            # via replace_messages — an unrecoverable overwrite of the session DB.
+            if ordinal < 0 or ordinal >= len(user_indices):
+                return _err(rid, 4018, "target user message is no longer in session history")
+            truncated = history[: user_indices[ordinal]]
+            session["history"] = truncated
+            session["history_version"] = int(session.get("history_version", 0)) + 1
+            if (db := _get_db()) is not None:
+                try:
+                    db.replace_messages(session["session_key"], truncated)
+                except Exception as exc:
+                    print(f"[tui_gateway] prompt.submit: replace_messages failed: {exc}", file=sys.stderr)
+        session["running"] = True
+        session["_turn_cancel_requested"] = False
+        session["last_active"] = time.time()
+        _start_inflight_turn(session, text)
+
+    if turn_isolation:
+        isolated_response = _submit_prompt_to_compute_host(rid, sid, session, text)
+        if not isolated_response.get("error"):
+            return isolated_response
+        logger.warning(
+            "compute-host dispatch failed for session %s; falling back inline: %s",
+            sid,
+            isolated_response["error"].get("message", "unknown error"),
+        )
+
+    # Persist the DB row lazily, now that the user has actually sent a message.
+    _ensure_session_db_row(session)
+    # A branch becomes real here: copy its parent's transcript into the row so it
+    # resumes with full context (the agent won't persist the seed itself).
+    _persist_branch_seed(session)
+    _start_agent_build(sid, session)
+
+    def run_after_agent_ready() -> None:
+        err = _wait_agent(session, rid)
+        if err:
+            _emit(
+                "error",
+                sid,
+                {
+                    "message": (err.get("error") or {}).get(
+                        "message", "agent initialization failed"
+                    )
+                },
+            )
+            with session["history_lock"]:
+                session["running"] = False
+                _clear_inflight_turn(session)
+            return
+        with session["history_lock"]:
+            if session.get("_turn_cancel_requested") or not session.get("running"):
+                session["running"] = False
+                _clear_inflight_turn(session)
+                return
+        _run_prompt_submit(rid, sid, session, text)
+
+    run_thread = threading.Thread(target=run_after_agent_ready, daemon=True)
+    # Keep a handle so session.interrupt can tell a live turn from a stuck
+    # `running` flag (a turn that died without clearing it) and recover the latter.
+    session["_run_thread"] = run_thread
+    run_thread.start()
+    return _ok(rid, {"status": "streaming"})
 
 
 def _notification_event_belongs_elsewhere(sid: str, session: dict, evt: dict) -> bool:

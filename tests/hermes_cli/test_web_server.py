@@ -736,6 +736,202 @@ class TestWebServerEndpoints:
 
 
 
+        resp = self.client.get("/api/memory")
+        assert resp.status_code == 200
+        providers = {row["name"]: row for row in resp.json()["providers"]}
+        assert providers["not-installed"]["status"] == "missing"
+        assert providers["not-installed"]["available"] is False
+
+        config = load_config()
+        config.setdefault("memory", {})["provider"] = "builtin"
+        save_config(config)
+
+        resp = self.client.get("/api/memory")
+        assert resp.status_code == 200
+        assert resp.json()["active"] == ""
+        assert "builtin" not in {row["name"] for row in resp.json()["providers"]}
+
+    def test_set_memory_provider_rejects_unready_and_clears_builtin(self):
+        from hermes_cli.config import load_config
+
+        resp = self.client.put("/api/memory/provider", json={"provider": "supermemory"})
+        assert resp.status_code == 400
+
+        resp = self.client.put("/api/memory/provider", json={"provider": "built-in"})
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "active": ""}
+        assert load_config()["memory"]["provider"] == ""
+
+    def test_dashboard_plugin_providers_rejects_unready_memory_provider(self):
+        resp = self.client.put(
+            "/api/dashboard/plugin-providers",
+            json={"memory_provider": "supermemory"},
+        )
+
+        assert resp.status_code == 400
+
+    def test_dashboard_plugin_providers_accepts_builtin_alias(self):
+        from hermes_cli.config import load_config
+
+        resp = self.client.put(
+            "/api/dashboard/plugin-providers",
+            json={"memory_provider": "built-in"},
+        )
+
+        assert resp.status_code == 200
+        assert load_config()["memory"]["provider"] == ""
+
+    def test_get_moa_models_returns_provider_model_slots(self):
+        resp = self.client.get("/api/model/moa")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["reference_models"]
+        # Reference slots carry provider/model plus the per-advisor enabled
+        # flag (optional keys like reasoning_effort/max_tokens appear only
+        # when configured).
+        for slot in data["reference_models"]:
+            assert {"provider", "model"} <= set(slot)
+            assert isinstance(slot.get("enabled", True), bool)
+        assert {"provider", "model"} <= set(data["aggregator"])
+
+    def test_put_moa_models_persists_provider_model_slots(self):
+        from hermes_cli.config import load_config
+
+        payload = {
+            "reference_models": [
+                {"provider": "openai-codex", "model": "gpt-5.5", "max_tokens": 768},
+                {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"},
+            ],
+            "aggregator": {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
+            "reference_temperature": 0.6,
+            "aggregator_temperature": 0.4,
+            "reference_timeout": 44.5,
+            "degraded_reference_policy": "silent",
+            "max_tokens": 4096,
+            "enabled": True,
+        }
+
+        resp = self.client.put("/api/model/moa", json=payload)
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        cfg = load_config()
+        saved_refs = cfg["moa"]["reference_models"]
+        # Slots normalize with enabled=True defaulted in; provider/model must
+        # round-trip exactly.
+        assert [
+            {"provider": s["provider"], "model": s["model"]} for s in saved_refs
+        ] == [
+            {"provider": s["provider"], "model": s["model"]}
+            for s in payload["reference_models"]
+        ]
+        assert saved_refs[0]["max_tokens"] == 768
+        assert "max_tokens" not in saved_refs[1]
+        assert all(s.get("enabled", True) is True for s in saved_refs)
+        agg = cfg["moa"]["aggregator"]
+        assert {"provider": agg["provider"], "model": agg["model"]} == payload["aggregator"]
+        assert cfg["moa"]["reference_timeout"] == 44.5
+        assert cfg["moa"]["degraded_reference_policy"] == "silent"
+        returned = self.client.get("/api/model/moa").json()
+        assert returned["reference_models"][0]["max_tokens"] == 768
+        assert "max_tokens" not in returned["reference_models"][1]
+        assert returned["reference_timeout"] == 44.5
+        assert returned["degraded_reference_policy"] == "silent"
+
+    def test_put_moa_models_persists_reference_failure_controls_per_preset(self):
+        from hermes_cli.config import load_config
+
+        payload = {
+            "default_preset": "review",
+            "presets": {
+                "review": {
+                    "reference_models": [
+                        {"provider": "openai-codex", "model": "gpt-5.5"}
+                    ],
+                    "aggregator": {
+                        "provider": "openrouter",
+                        "model": "anthropic/claude-opus-4.8",
+                    },
+                    "reference_timeout": 87.5,
+                    "degraded_reference_policy": "silent",
+                }
+            },
+        }
+
+        resp = self.client.put("/api/model/moa", json=payload)
+
+        assert resp.status_code == 200
+        saved = load_config()["moa"]["presets"]["review"]
+        assert saved["reference_timeout"] == 87.5
+        assert saved["degraded_reference_policy"] == "silent"
+        returned = self.client.get("/api/model/moa").json()["presets"]["review"]
+        assert returned["reference_timeout"] == 87.5
+        assert returned["degraded_reference_policy"] == "silent"
+
+    def test_put_moa_models_rejects_half_filled_slot_with_422(self):
+        """#64156: a mid-edit autosave (provider picked, model empty) used to be
+        silently normalized into the hardcoded default preset — the user's
+        config was replaced without any error. The write path must reject it."""
+        from hermes_cli.config import load_config
+
+        original = load_config().get("moa")
+
+        payload = {
+            "presets": {
+                "default": {
+                    "reference_models": [{"provider": "kilo", "model": ""}],
+                    "aggregator": {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
+                }
+            }
+        }
+
+        resp = self.client.put("/api/model/moa", json=payload)
+        assert resp.status_code == 422
+        assert "model is required" in resp.json()["detail"]
+        # Config untouched — not swapped for defaults.
+        assert load_config().get("moa") == original
+
+    def test_put_moa_models_rejects_half_filled_aggregator_with_422(self):
+        payload = {
+            "presets": {
+                "default": {
+                    "reference_models": [{"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"}],
+                    "aggregator": {"provider": "openrouter", "model": ""},
+                }
+            }
+        }
+
+        resp = self.client.put("/api/model/moa", json=payload)
+        assert resp.status_code == 422
+        assert "aggregator" in resp.json()["detail"]
+
+    def test_put_moa_models_round_trips_fanout_and_reference_max_tokens(self):
+        """GET → PUT round-trip must not erase newer per-preset knobs. The old
+        Pydantic payload didn't declare fanout / reference_max_tokens, so any
+        client save silently wiped hand-set values back to defaults."""
+        from hermes_cli.config import load_config
+
+        payload = {
+            "presets": {
+                "default": {
+                    "reference_models": [{"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"}],
+                    "aggregator": {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
+                    "fanout": "user_turn",
+                    "reference_max_tokens": 600,
+                }
+            }
+        }
+
+        resp = self.client.put("/api/model/moa", json=payload)
+        assert resp.status_code == 200
+
+        saved = load_config()["moa"]["presets"]["default"]
+        assert saved["fanout"] == "user_turn"
+        assert saved["reference_max_tokens"] == 600
+
+        # And the GET view carries them back to the client.
+        fetched = self.client.get("/api/model/moa").json()
+        assert fetched["presets"]["default"]["fanout"] == "user_turn"
+        assert fetched["presets"]["default"]["reference_max_tokens"] == 600
     # ── Memory provider config (Honcho host-block backend) ──────────────
 
     @pytest.fixture(autouse=True)
@@ -966,6 +1162,318 @@ class TestWebServerEndpoints:
 
 
 
+    def test_search_dedupes_compression_lineage_to_tip(self):
+        """A conversation that auto-compresses leaves the matched term in both
+        the root segment and the continuation. Search must collapse them to a
+        single result keyed by the lineage root and pointing at the live tip,
+        so the sidebar stops showing the same chat several times."""
+        import time as _time
+
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="search-root", source="cli")
+            db.append_message(session_id="search-root", role="user", content="distinctneedle in the root")
+            db.end_session("search-root", "compression")
+            now = _time.time()
+            db._conn.execute(
+                "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = ?",
+                (now - 100, now - 90, "search-root"),
+            )
+            db.create_session(session_id="search-tip", source="cli", parent_session_id="search-root")
+            db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (now - 90, "search-tip"))
+            db.append_message(session_id="search-tip", role="user", content="distinctneedle again in the tip")
+            db._conn.commit()
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/sessions/search?q=distinctneedle")
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+
+        lineage_hits = [r for r in results if r.get("lineage_root") == "search-root"]
+        # One conversation -> exactly one result despite two FTS hits.
+        assert len(lineage_hits) == 1
+        hit = lineage_hits[0]
+        # Surfaced under the live tip so clicking resumes the current session.
+        assert hit["session_id"] == "search-tip"
+        assert hit["lineage_root"] == "search-root"
+
+    def test_search_keeps_branch_specific_hits_on_branch(self):
+        """Branch sessions share parent_session_id, but they are not compression
+        continuations. A query that only exists in the branch must open the
+        branch instead of being collapsed back to the parent/root."""
+        import time as _time
+
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            now = _time.time()
+            db.create_session(session_id="branch-parent", source="cli")
+            db.append_message(session_id="branch-parent", role="user", content="ancestor context")
+            db.end_session("branch-parent", "branched")
+            db._conn.execute(
+                "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = ?",
+                (now - 100, now - 90, "branch-parent"),
+            )
+            db.create_session(session_id="branch-child", source="cli", parent_session_id="branch-parent")
+            db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (now - 80, "branch-child"))
+            db.append_message(session_id="branch-child", role="user", content="branchspecificneedle only here")
+            db._conn.commit()
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/sessions/search?q=branchspecificneedle")
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+
+        assert any(
+            r["session_id"] == "branch-child" and r.get("lineage_root") == "branch-child"
+            for r in results
+        )
+
+    def test_get_session_messages_follows_compression_tip(self):
+        """Reading a compressed session by its old id should hydrate from the
+        live continuation, matching /resume behavior."""
+        import time as _time
+
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="desktop-root", source="cli")
+            db.append_message(session_id="desktop-root", role="user", content="before compression")
+            db.end_session("desktop-root", "compression")
+            now = _time.time()
+            db._conn.execute(
+                "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = ?",
+                (now - 10, now - 5, "desktop-root"),
+            )
+            db.create_session(session_id="desktop-tip", source="cli", parent_session_id="desktop-root")
+            db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (now - 4, "desktop-tip"))
+            db.replace_messages("desktop-root", [])
+            db.append_message(session_id="desktop-tip", role="user", content="after compression")
+            db._conn.commit()
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/sessions/desktop-root/messages")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["session_id"] == "desktop-tip"
+        assert [m["content"] for m in payload["messages"]] == ["after compression"]
+
+    def test_get_session_messages_applies_interim_display_policy(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="display-policy", source="cli")
+            db.append_message("display-policy", role="user", content="inspect")
+            db.append_message(
+                "display-policy",
+                role="assistant",
+                content="Let me inspect that.",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": "{}"},
+                    }
+                ],
+            )
+            db.append_message(
+                "display-policy",
+                role="tool",
+                content="done",
+                tool_call_id="call-1",
+                tool_name="terminal",
+            )
+            db.append_message(
+                "display-policy",
+                role="assistant",
+                content="Final answer.",
+            )
+        finally:
+            db.close()
+
+        monkeypatch.setattr(
+            web_server,
+            "load_config",
+            lambda: {"display": {"interim_assistant_messages": False}},
+        )
+
+        response = self.client.get("/api/sessions/display-policy/messages")
+        assert response.status_code == 200
+        messages = response.json()["messages"]
+        assert [message["role"] for message in messages] == [
+            "user",
+            "tool",
+            "assistant",
+        ]
+        assert [message["content"] for message in messages] == [
+            "inspect",
+            "done",
+            "Final answer.",
+        ]
+
+    def test_get_sessions_archived_is_boolean(self):
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="bool-arch", source="cli")
+            db.append_message(session_id="bool-arch", role="user", content="hi")
+        finally:
+            db.close()
+
+        row = next(s for s in self.client.get("/api/sessions").json()["sessions"] if s["id"] == "bool-arch")
+        assert row["archived"] is False
+
+    def test_rename_response_omits_archived_when_not_set(self):
+        """Title-only PATCH keeps its legacy {ok, title} response shape."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="title-only", source="cli")
+        finally:
+            db.close()
+
+        resp = self.client.patch("/api/sessions/title-only", json={"title": "Hi"})
+        assert resp.status_code == 200
+        assert "archived" not in resp.json()
+
+    def test_audio_transcription_endpoint(self, monkeypatch):
+        import tools.transcription_tools as transcription_tools
+
+        captured = {}
+
+        def fake_transcribe_audio(path, model=None):
+            captured["path"] = path
+            return {
+                "success": True,
+                "transcript": "hello from voice mode",
+                "provider": "test",
+            }
+
+        monkeypatch.setattr(transcription_tools, "transcribe_audio", fake_transcribe_audio)
+
+        resp = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,aGVsbG8=",
+                "mime_type": "audio/webm",
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "ok": True,
+            "transcript": "hello from voice mode",
+            "provider": "test",
+        }
+        assert captured["path"].endswith(".webm")
+        assert not Path(captured["path"]).exists()
+
+    def test_audio_transcription_no_speech_is_not_an_error(self, monkeypatch):
+        """A provider hearing silence (empty transcript) must return 200/"" —
+        the live voice loop treats it as a quiet turn and re-listens, instead
+        of surfacing a 400 toast on every pause (the ElevenLabs empty-
+        transcript spam)."""
+        import tools.transcription_tools as transcription_tools
+
+        monkeypatch.setattr(
+            transcription_tools,
+            "transcribe_audio",
+            lambda path, model=None: {
+                "success": False,
+                "transcript": "",
+                "error": "ElevenLabs STT returned empty transcript",
+                "no_speech": True,
+            },
+        )
+
+        resp = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,aGVsbG8=",
+                "mime_type": "audio/webm",
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert resp.json()["transcript"] == ""
+
+    def test_audio_transcription_rejects_invalid_base64(self):
+        resp = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,not base64",
+                "mime_type": "audio/webm",
+            },
+        )
+
+        assert resp.status_code == 400
+        assert "base64" in resp.json()["detail"]
+
+    def test_desktop_audio_routes_registered(self):
+        """All three desktop voice endpoints must exist.
+
+        The renderer (apps/desktop) calls /api/audio/transcribe, /speak, and
+        /elevenlabs/voices. /speak + /voices were silently dropped in a merge
+        once; this guards the contract so a future merge can't lose them
+        without failing CI.
+        """
+        from hermes_cli.web_server import app
+
+        paths = {getattr(r, "path", None) for r in app.routes}
+        assert "/api/audio/transcribe" in paths
+        assert "/api/audio/speak" in paths
+        assert "/api/audio/elevenlabs/voices" in paths
+
+    def test_elevenlabs_voices_unavailable_without_key(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(web_server, "load_env", lambda: {})
+        monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+
+        resp = self.client.get("/api/audio/elevenlabs/voices")
+        assert resp.status_code == 200
+        assert resp.json() == {"available": False, "voices": []}
+
+    def test_speak_text_returns_base64_data_url(self, monkeypatch, tmp_path):
+        import tools.tts_tool as tts_tool
+
+        audio_file = tmp_path / "speech.mp3"
+        audio_file.write_bytes(b"ID3fake-audio-bytes")
+
+        def fake_tts(text):
+            return json.dumps({
+                "success": True,
+                "file_path": str(audio_file),
+                "provider": "test",
+            })
+
+        monkeypatch.setattr(tts_tool, "text_to_speech_tool", fake_tts)
+
+        resp = self.client.post("/api/audio/speak", json={"text": "hello there"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["mime_type"] == "audio/mpeg"
+        assert body["data_url"].startswith("data:audio/mpeg;base64,")
+        assert body["provider"] == "test"
+        # The handler streams the bytes back and removes the temp file.
+        assert not audio_file.exists()
+
+    def test_speak_text_requires_nonempty_text(self):
+        resp = self.client.post("/api/audio/speak", json={"text": "   "})
+        assert resp.status_code == 400
 
     def test_update_hermes_returns_docker_guidance_without_spawning(self, monkeypatch):
         import hermes_cli.web_server as web_server
@@ -1880,6 +2388,24 @@ class TestNewEndpoints:
         self.client = TestClient(app)
         self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
 
+
+    @pytest.mark.parametrize("action", ["resume", "trigger"])
+    def test_cron_enable_actions_surface_script_validation_as_400(
+        self, monkeypatch, action
+    ):
+        from hermes_cli import web_server
+
+        monkeypatch.setattr(web_server, "_find_cron_job_profile", lambda _job_id: "default")
+
+        def reject_missing_script(_profile, operation, _job_id):
+            assert operation == f"{action}_job"
+            raise ValueError("Cannot enable no-agent job before its script exists")
+
+        monkeypatch.setattr(web_server, "_call_cron_for_profile", reject_missing_script)
+
+        resp = self.client.post(f"/api/cron/jobs/broken/{action}")
+        assert resp.status_code == 400
+        assert "before its script exists" in resp.json()["detail"]
 
     # --- Automation Blueprints ---
 

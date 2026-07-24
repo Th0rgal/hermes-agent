@@ -138,6 +138,69 @@ def _compression_lock_holder_process_is_dead(holder: str) -> bool:
     return False
 
 
+def _delivery_spool_dir() -> Path:
+    return Path(get_hermes_home()) / "delivery-spool"
+
+
+def spool_session_delivery(
+    delivery_id: str,
+    session_id: str,
+    role: str,
+    content: str,
+    observed: bool = False,
+) -> Path:
+    """Atomically spool a transcript delivery after SessionDB retries expire."""
+    spool_dir = _delivery_spool_dir()
+    spool_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    digest = hashlib.sha256(delivery_id.encode("utf-8")).hexdigest()
+    destination = spool_dir / f"{digest}.json"
+    temporary = spool_dir / f".{digest}.{os.getpid()}.{threading.get_ident()}.tmp"
+    payload = {
+        "delivery_id": delivery_id,
+        "session_id": session_id,
+        "role": role,
+        "content": content,
+        "observed": bool(observed),
+        "created_at": time.time(),
+    }
+    with temporary.open("x", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, destination)
+    return destination
+
+
+def replay_session_delivery_spool(
+    db_path: Optional[Path] = None,
+) -> Dict[str, int]:
+    """Replay durable deliveries, deleting files only after a committed append."""
+    spool_dir = _delivery_spool_dir()
+    result = {"replayed": 0, "failed": 0}
+    if not spool_dir.exists():
+        return result
+    db = SessionDB(db_path=db_path)
+    try:
+        for path in sorted(spool_dir.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                db.append_message(
+                    session_id=str(payload["session_id"]),
+                    role=str(payload.get("role") or "assistant"),
+                    content=payload.get("content"),
+                    observed=bool(payload.get("observed")),
+                    delivery_id=str(payload["delivery_id"]),
+                )
+                path.unlink()
+                result["replayed"] += 1
+            except Exception:
+                result["failed"] += 1
+                logger.exception("Failed to replay SessionDB delivery spool entry %s", path)
+    finally:
+        db.close()
+    return result
+
+
 def _scrub_surrogates(value: Any) -> Any:
     """Replace lone surrogates when *value* is text; pass anything else through.
 
@@ -1518,6 +1581,321 @@ def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> Dict[str, A
         )
     return report
 
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    user_id TEXT,
+    session_key TEXT,
+    chat_id TEXT,
+    chat_type TEXT,
+    thread_id TEXT,
+    display_name TEXT,
+    origin_json TEXT,
+    expiry_finalized INTEGER DEFAULT 0,
+    model TEXT,
+    model_config TEXT,
+    system_prompt TEXT,
+    parent_session_id TEXT,
+    started_at REAL NOT NULL,
+    ended_at REAL,
+    end_reason TEXT,
+    message_count INTEGER DEFAULT 0,
+    tool_call_count INTEGER DEFAULT 0,
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    cache_read_tokens INTEGER DEFAULT 0,
+    cache_write_tokens INTEGER DEFAULT 0,
+    reasoning_tokens INTEGER DEFAULT 0,
+    cwd TEXT,
+    git_branch TEXT,
+    git_repo_root TEXT,
+    billing_provider TEXT,
+    billing_base_url TEXT,
+    billing_mode TEXT,
+    estimated_cost_usd REAL,
+    actual_cost_usd REAL,
+    cost_status TEXT,
+    cost_source TEXT,
+    pricing_version TEXT,
+    title TEXT,
+    api_call_count INTEGER DEFAULT 0,
+    handoff_state TEXT,
+    handoff_platform TEXT,
+    handoff_error TEXT,
+    compression_failure_cooldown_until REAL,
+    compression_failure_error TEXT,
+    compression_fallback_streak INTEGER NOT NULL DEFAULT 0,
+    compression_ineffective_count INTEGER NOT NULL DEFAULT 0,
+    profile_name TEXT,
+    rewind_count INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    role TEXT NOT NULL,
+    content TEXT,
+    tool_call_id TEXT,
+    tool_calls TEXT,
+    tool_name TEXT,
+    effect_disposition TEXT,
+    timestamp REAL NOT NULL,
+    token_count INTEGER,
+    finish_reason TEXT,
+    reasoning TEXT,
+    reasoning_content TEXT,
+    reasoning_details TEXT,
+    codex_reasoning_items TEXT,
+    codex_message_items TEXT,
+    platform_message_id TEXT,
+    observed INTEGER DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 1,
+    compacted INTEGER NOT NULL DEFAULT 0,
+    api_content TEXT,
+    display_kind TEXT,
+    display_metadata TEXT
+);
+
+CREATE TABLE IF NOT EXISTS delivery_receipts (
+    delivery_id TEXT PRIMARY KEY,
+    message_id INTEGER,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS session_model_usage (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    billing_provider TEXT NOT NULL DEFAULT '',
+    billing_base_url TEXT NOT NULL DEFAULT '',
+    billing_mode TEXT NOT NULL DEFAULT '',
+    task TEXT NOT NULL DEFAULT '',
+    api_call_count INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+    estimated_cost_usd REAL NOT NULL DEFAULT 0,
+    actual_cost_usd REAL NOT NULL DEFAULT 0,
+    cost_status TEXT,
+    cost_source TEXT,
+    first_seen REAL,
+    last_seen REAL,
+    PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task)
+);
+
+CREATE TABLE IF NOT EXISTS state_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS gateway_routing (
+    scope TEXT NOT NULL DEFAULT '',
+    session_key TEXT NOT NULL,
+    entry_json TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (scope, session_key)
+);
+
+CREATE TABLE IF NOT EXISTS compression_locks (
+    session_id TEXT PRIMARY KEY,
+    holder TEXT NOT NULL,
+    acquired_at REAL NOT NULL,
+    expires_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS async_delegations (
+    delegation_id TEXT PRIMARY KEY,
+    origin_session TEXT NOT NULL,
+    origin_ui_session_id TEXT NOT NULL DEFAULT '',
+    parent_session_id TEXT,
+    state TEXT NOT NULL,
+    dispatched_at REAL NOT NULL,
+    completed_at REAL,
+    updated_at REAL NOT NULL,
+    event_json TEXT,
+    result_json TEXT,
+    delivery_state TEXT NOT NULL DEFAULT 'pending',
+    delivery_attempts INTEGER NOT NULL DEFAULT 0,
+    delivered_at REAL,
+    owner_pid INTEGER,
+    owner_started_at INTEGER,
+    task_json TEXT,
+    delivery_claim TEXT,
+    delivery_claimed_at REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
+CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source, id);
+CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_compression_locks_expires ON compression_locks(expires_at);
+CREATE INDEX IF NOT EXISTS idx_session_model_usage_session ON session_model_usage(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_model_usage_model ON session_model_usage(model);
+CREATE INDEX IF NOT EXISTS idx_async_delegations_delivery
+    ON async_delegations(delivery_state, completed_at);
+"""
+
+# Indexes that reference columns added in later schema versions must be
+# created AFTER _reconcile_columns() has had a chance to ADD them on
+# existing databases. SCHEMA_SQL above is run by sqlite executescript
+# which would otherwise fail on legacy DBs ("no such column: active").
+DEFERRED_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_messages_session_active
+    ON messages(session_id, active, timestamp);
+CREATE INDEX IF NOT EXISTS idx_messages_active_null
+    ON messages(active) WHERE active IS NULL;
+CREATE INDEX IF NOT EXISTS idx_sessions_session_key
+    ON sessions(session_key, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_gateway_peer
+    ON sessions(source, user_id, chat_id, chat_type, thread_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_handoff_state
+    ON sessions(handoff_state, started_at);
+"""
+
+# ── Deferred FTS rebuild bookkeeping (schema v23) ──
+# While a background index rebuild is pending, two state_meta keys define
+# which message rows are currently IN the FTS indexes:
+#
+#   fts_rebuild_high_water  H — MAX(messages.id) at the moment the old
+#                                indexes were dropped
+#   fts_rebuild_progress    P — highest id the chunked backfill has indexed
+#
+# A row is indexed iff  id <= P  (backfilled)  OR  id > H  (inserted after
+# the drop; ids are AUTOINCREMENT so new rows are always > H and the insert
+# triggers index them live).  Rows in (P, H] are not yet indexed.
+#
+# Every trigger below gates on that same predicate: firing an FTS5
+# external-content 'delete' for a row that is NOT in the index corrupts the
+# index, and skipping it for a row that IS indexed leaves a stale entry.
+# When no rebuild is pending both keys are absent and COALESCE turns the
+# predicate into a tautology (id > -1 OR id <= -1), i.e. normal operation.
+# The two state_meta PK probes per write are negligible next to the FTS
+# insert itself.
+FTS_SQL = """
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    content,
+    tool_name,
+    tool_calls,
+    content='messages',
+    content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages
+WHEN (new.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                         WHERE key = 'fts_rebuild_high_water'), -1)
+   OR new.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                          WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts(rowid, content, tool_name, tool_calls)
+    VALUES (new.id, new.content, new.tool_name, new.tool_calls);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages
+WHEN (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                         WHERE key = 'fts_rebuild_high_water'), -1)
+   OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                          WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, tool_calls)
+    VALUES ('delete', old.id, old.content, old.tool_name, old.tool_calls);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages
+WHEN (old.content IS NOT new.content
+    OR old.tool_name IS NOT new.tool_name
+    OR old.tool_calls IS NOT new.tool_calls)
+   AND (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                           WHERE key = 'fts_rebuild_high_water'), -1)
+     OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                            WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, tool_calls)
+    VALUES ('delete', old.id, old.content, old.tool_name, old.tool_calls);
+    INSERT INTO messages_fts(rowid, content, tool_name, tool_calls)
+    VALUES (new.id, new.content, new.tool_name, new.tool_calls);
+END;
+"""
+
+# Trigram FTS5 table for CJK substring search.  The default unicode61
+# tokenizer splits CJK characters into individual tokens, breaking phrase
+# matching.  The trigram tokenizer creates overlapping 3-byte sequences so
+# substring queries work natively for any script (CJK, Thai, etc.).
+#
+# The trigram index is the most expensive index in state.db (~2.6x the size
+# of the text it covers), and ``role='tool'`` rows are ~90% of message bytes
+# while being almost entirely machine noise (base64 payloads, file dumps,
+# delegation transcripts).  The index therefore reads through
+# ``messages_fts_trigram_src``, a view that excludes tool rows — they stay
+# fully stored in ``messages`` and fully searchable via the standard
+# ``messages_fts`` index; they just don't get trigram (CJK substring)
+# treatment.  ``search_messages`` routes CJK queries that filter on
+# ``role='tool'`` to the LIKE fallback for the same reason.
+FTS_TRIGRAM_SQL = """
+CREATE VIEW IF NOT EXISTS messages_fts_trigram_src AS
+    SELECT id, role, content, tool_name, tool_calls
+    FROM messages
+    WHERE role <> 'tool';
+
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_trigram USING fts5(
+    content,
+    tool_name,
+    tool_calls,
+    content='messages_fts_trigram_src',
+    content_rowid='id',
+    tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_insert AFTER INSERT ON messages
+WHEN new.role <> 'tool'
+   AND (new.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                           WHERE key = 'fts_rebuild_high_water'), -1)
+     OR new.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                            WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts_trigram(rowid, content, tool_name, tool_calls)
+    VALUES (new.id, new.content, new.tool_name, new.tool_calls);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_delete AFTER DELETE ON messages
+WHEN old.role <> 'tool'
+   AND (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                           WHERE key = 'fts_rebuild_high_water'), -1)
+     OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                            WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts_trigram(messages_fts_trigram, rowid, content, tool_name, tool_calls)
+    VALUES ('delete', old.id, old.content, old.tool_name, old.tool_calls);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_update AFTER UPDATE ON messages
+WHEN (old.content IS NOT new.content
+    OR old.tool_name IS NOT new.tool_name
+    OR old.tool_calls IS NOT new.tool_calls
+    OR old.role IS NOT new.role)
+   AND (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                           WHERE key = 'fts_rebuild_high_water'), -1)
+     OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                            WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts_trigram(messages_fts_trigram, rowid, content, tool_name, tool_calls)
+    SELECT 'delete', old.id, old.content, old.tool_name, old.tool_calls
+    WHERE old.role <> 'tool';
+    INSERT INTO messages_fts_trigram(rowid, content, tool_name, tool_calls)
+    SELECT new.id, new.content, new.tool_name, new.tool_calls
+    WHERE new.role <> 'tool';
+END;
+"""
 
 # ── CJK-bigram FTS index (replaces the trigram index when available) ────
 #
@@ -2907,6 +3285,756 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             "AND name LIKE ? ESCAPE '\\' LIMIT 1",
             (self._FTS_TRASH_PREFIX.replace("_", "\\_") + "%",),
         ).fetchone())
+
+    def _demote_legacy_fts_to_trash(self) -> int:
+        """Demote the legacy inline FTS vtables and stage their shadow tables
+        for chunked teardown. Returns MAX(messages.id) as the rebuild high
+        water. O(1) schema surgery — the heavy delete is deferred to the
+        chunked teardown, exactly as the validated auto path did."""
+        def _do(conn):
+            self._drop_fts_triggers(conn)
+            conn.execute("DROP VIEW IF EXISTS messages_fts_trigram_src")
+            had = bool(conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name IN ('messages_fts', 'messages_fts_trigram') "
+                "AND sql LIKE 'CREATE VIRTUAL TABLE%' LIMIT 1"
+            ).fetchone())
+            if had:
+                conn.execute("PRAGMA writable_schema=ON")
+                conn.execute(
+                    "DELETE FROM sqlite_master WHERE type = 'table' "
+                    "AND name IN ('messages_fts', 'messages_fts_trigram') "
+                    "AND sql LIKE 'CREATE VIRTUAL TABLE%'"
+                )
+                conn.execute("PRAGMA writable_schema=RESET")
+                shadows = [
+                    r[0] for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' "
+                        "AND (name LIKE 'messages_fts_%' ESCAPE '\\' "
+                        "OR name LIKE 'messages_fts_trigram_%' ESCAPE '\\')"
+                    ).fetchall()
+                ]
+                for sh in shadows:
+                    conn.execute(f"ALTER TABLE {sh} RENAME TO fts_v22_trash_{sh}")
+            # Create the new v23 empty schema + set the backfill markers.
+            self._ensure_fts_schema(conn, "messages_fts", FTS_SQL)
+            self._ensure_fts_schema(conn, "messages_fts_trigram", FTS_TRIGRAM_SQL)
+            hw = conn.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0]
+            for k, v in (
+                ("fts_rebuild_high_water", str(hw)),
+                ("fts_rebuild_progress", "0"),
+            ):
+                conn.execute(
+                    "INSERT INTO state_meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (k, v),
+                )
+            conn.execute("DELETE FROM state_meta WHERE key = 'fts_optimize_available'")
+            return hw
+        return int(self._execute_write(_do))
+
+    def optimize_fts_storage(
+        self,
+        *,
+        progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
+        vacuum: bool = True,
+    ) -> Dict[str, Any]:
+        """Migrate a legacy v22 inline-FTS DB to the v23 external-content
+        schema, foreground and to completion. Safe to re-run: if a previous
+        attempt was interrupted it resumes from the progress marker.
+
+        ``progress_cb`` receives {"phase", "percent", "indexed", "total"}
+        dicts for a CLI progress bar. Returns a summary dict.
+
+        The trigram tokenizer being unavailable is not fatal — the base index
+        is still rebuilt (CJK falls back to LIKE), mirroring normal startup.
+        """
+        if not self._fts_enabled:
+            return {"ok": False, "reason": "fts5_unavailable"}
+        if self.read_only:
+            return {"ok": False, "reason": "read_only"}
+
+        # Only demote if we're actually still on the legacy shape. If a prior
+        # run already demoted (markers/trash present), skip straight to
+        # finishing the backfill + teardown — this is what makes re-running
+        # after an interruption safe.
+        with self._lock:
+            legacy = self._db_has_legacy_inline_fts(self._conn)
+        pending = self.get_meta("fts_rebuild_high_water") is not None
+        if legacy and not pending:
+            self._demote_legacy_fts_to_trash()
+
+        # A stale CJK index (triggers dropped by a tokenizer-less process)
+        # can only be recovered from scratch — reset it now so the cjk
+        # backfill phase below rebuilds it. No-op without the tokenizer.
+        self._fts_cjk_reset_if_stale()
+        # An optimized v23 DB gaining the cjk index for the first time (no
+        # legacy work left, tokenizer newly installed): ensure the table +
+        # markers exist so the backfill phase has work to claim.
+        if self._fts_cjk_loaded:
+            with self._lock:
+                self._ensure_fts_cjk_schema(self._conn)
+                self._conn.commit()
+
+        def _emit(phase: str) -> None:
+            if progress_cb is None:
+                return
+            st = self.fts_rebuild_status()
+            if st is None:
+                st = self.fts_cjk_rebuild_status()
+            progress_cb({
+                "phase": phase,
+                "percent": st["percent"] if st else 100,
+                "indexed": st["indexed"] if st else 0,
+                "total": st["total"] if st else 0,
+            })
+
+        def _pause(chunk_seconds: float) -> None:
+            """Inter-chunk throttle (see the chunk-engine note above).
+
+            The chunk methods themselves never sleep, so this loop is the
+            single place the duty cycle is enforced: without it, back-to-back
+            BEGIN IMMEDIATE chunks starve any live gateway/CLI process
+            sharing the DB out of its lock retries (the measured ~85%
+            write-lock ownership that froze concurrent sessions).
+            """
+            time.sleep(max(
+                self._FTS_REBUILD_MIN_PAUSE,
+                chunk_seconds * self._FTS_REBUILD_DUTY_FACTOR,
+            ))
+
+        # Phase 1: backfill (foreground, throttled between chunks so a live
+        # gateway sharing the DB stays responsive).
+        _emit("backfill")
+        while True:
+            _t0 = time.monotonic()
+            if not self.fts_rebuild_step():
+                break
+            _emit("backfill")
+            _pause(time.monotonic() - _t0)
+        _emit("backfill")
+
+        # Phase 1b: backfill the CJK-bigram index (its own marker pair; a
+        # no-op when the tokenizer isn't loadable or nothing is pending).
+        while True:
+            _t0 = time.monotonic()
+            if not self.fts_cjk_rebuild_step():
+                break
+            _emit("backfill")
+            _pause(time.monotonic() - _t0)
+
+        # Phase 2: tear down the demoted legacy shadow tables in chunks.
+        _emit("teardown")
+        while True:
+            _t0 = time.monotonic()
+            if not self._fts_teardown_trash_step():
+                break
+            _emit("teardown")
+            _pause(time.monotonic() - _t0)
+
+        # Phase 3: reclaim freed pages to the OS.
+        vacuum_ok = None
+        if vacuum:
+            _emit("vacuum")
+            try:
+                with self._lock:
+                    self._conn.execute("VACUUM")
+                vacuum_ok = True
+            except sqlite3.OperationalError as exc:
+                # Most common cause: not enough free disk for VACUUM's temp
+                # copy. The optimization still succeeded; space just isn't
+                # reclaimed until a later VACUUM. Non-fatal.
+                logger.warning("VACUUM after FTS optimize failed: %s", exc)
+                vacuum_ok = False
+
+        # Phase 4: stamp the FTS storage layout as current, clear the "available"
+        # flag, and advance schema_version if it was somehow still behind (the
+        # main version normally advances on open now, but bump defensively so a
+        # DB opened only by pre-decoupling code still settles). The FTS-layout
+        # marker is the source of truth for "is this DB optimized".
+        def _settle(conn):
+            conn.execute(
+                "INSERT INTO state_meta (key, value) VALUES ('fts_storage_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(FTS_STORAGE_VERSION),),
+            )
+            conn.execute("DELETE FROM state_meta WHERE key = 'fts_optimize_available'")
+            conn.execute(
+                "UPDATE schema_version SET version = ? WHERE version < ?",
+                (SCHEMA_VERSION, SCHEMA_VERSION),
+            )
+        self._execute_write(_settle)
+        _emit("done")
+        logger.info(
+            "FTS storage optimization complete (layout v%d).", FTS_STORAGE_VERSION
+        )
+        return {"ok": True, "vacuumed": vacuum_ok}
+
+    @staticmethod
+    def _parse_schema_columns(schema_sql: str) -> Dict[str, Dict[str, str]]:
+        """Extract expected columns per table from SCHEMA_SQL.
+
+        Uses an in-memory SQLite database to parse the SQL — SQLite itself
+        handles all syntax (DEFAULT expressions with commas, inline
+        REFERENCES, CHECK constraints, etc.) so there are zero regex
+        edge cases.  The in-memory DB is opened, the schema DDL is
+        executed, and PRAGMA table_info extracts the column metadata.
+
+        Adding a column to SCHEMA_SQL is all that's needed; the
+        reconciliation loop picks it up automatically.
+        """
+        ref = sqlite3.connect(":memory:")
+        try:
+            ref.executescript(schema_sql)
+            table_columns: Dict[str, Dict[str, str]] = {}
+            for (tbl,) in ref.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall():
+                cols: Dict[str, str] = {}
+                for row in ref.execute(
+                    f'PRAGMA table_info("{tbl}")'
+                ).fetchall():
+                    # row: (cid, name, type, notnull, dflt_value, pk)
+                    col_name = row[1]
+                    col_type = row[2] or ""
+                    notnull = row[3]
+                    default = row[4]
+                    pk = row[5]
+                    # Reconstruct the type expression for ALTER TABLE ADD COLUMN
+                    parts = [col_type] if col_type else []
+                    if notnull and not pk:
+                        parts.append("NOT NULL")
+                    if default is not None:
+                        parts.append(f"DEFAULT {default}")
+                    cols[col_name] = " ".join(parts)
+                table_columns[tbl] = cols
+            return table_columns
+        finally:
+            ref.close()
+
+    def _reconcile_columns(self, cursor: sqlite3.Cursor) -> None:
+        """Ensure live tables have every column declared in SCHEMA_SQL.
+
+        Follows the Beets/sqlite-utils pattern: the CREATE TABLE definition
+        in SCHEMA_SQL is the single source of truth for the desired schema.
+        On every startup this method diffs the live columns (via PRAGMA
+        table_info) against the declared columns, and ADDs any that are
+        missing.
+
+        This makes column additions a declarative operation — just add
+        the column to SCHEMA_SQL and it appears on the next startup.
+        Version-gated migration blocks are no longer needed for ADD COLUMN.
+        """
+        expected = self._parse_schema_columns(SCHEMA_SQL)
+        for table_name, declared_cols in expected.items():
+            # Get current columns from the live table
+            try:
+                rows = cursor.execute(
+                    f'PRAGMA table_info("{table_name}")'
+                ).fetchall()
+            except sqlite3.OperationalError:
+                continue  # Table doesn't exist yet (shouldn't happen after executescript)
+            live_cols = set()
+            for row in rows:
+                # PRAGMA table_info returns (cid, name, type, notnull, dflt_value, pk)
+                name = row[1] if isinstance(row, (tuple, list)) else row["name"]
+                live_cols.add(name)
+
+            for col_name, col_type in declared_cols.items():
+                if col_name not in live_cols:
+                    safe_name = col_name.replace('"', '""')
+                    try:
+                        cursor.execute(
+                            f'ALTER TABLE "{table_name}" ADD COLUMN "{safe_name}" {col_type}'
+                        )
+                    except sqlite3.OperationalError as exc:
+                        # Expected: "duplicate column name" from a race or
+                        # re-run.  Unexpected: "Cannot add a NOT NULL column
+                        # with default value NULL" from a schema mistake.
+                        # Log at DEBUG so it's visible in agent.log.
+                        logger.debug(
+                            "reconcile %s.%s: %s", table_name, col_name, exc,
+                        )
+
+    @staticmethod
+    def _ensure_delivery_receipts_cascade(cursor: sqlite3.Cursor) -> None:
+        """Upgrade the delivery receipt FK without losing persisted receipts."""
+        foreign_keys = cursor.execute(
+            "PRAGMA foreign_key_list('delivery_receipts')"
+        ).fetchall()
+        if any(
+            row[2] == "messages" and str(row[6]).upper() == "CASCADE"
+            for row in foreign_keys
+        ):
+            return
+
+        # SQLite cannot ALTER a foreign-key action in place. Keep the rebuild
+        # in a savepoint so an interrupted startup leaves the old table and
+        # its idempotency receipts intact.
+        cursor.execute("SAVEPOINT delivery_receipts_cascade")
+        try:
+            cursor.execute(
+                "ALTER TABLE delivery_receipts RENAME TO delivery_receipts_v23"
+            )
+            cursor.execute(
+                """CREATE TABLE delivery_receipts (
+                       delivery_id TEXT PRIMARY KEY,
+                       message_id INTEGER,
+                       created_at REAL NOT NULL,
+                       FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+                   )"""
+            )
+            cursor.execute(
+                """INSERT INTO delivery_receipts (delivery_id, message_id, created_at)
+                   SELECT delivery_id, message_id, created_at
+                   FROM delivery_receipts_v23"""
+            )
+            cursor.execute("DROP TABLE delivery_receipts_v23")
+            cursor.execute("RELEASE delivery_receipts_cascade")
+        except BaseException:
+            cursor.execute("ROLLBACK TO delivery_receipts_cascade")
+            cursor.execute("RELEASE delivery_receipts_cascade")
+            raise
+
+    def _init_schema(self):
+        """Create tables and FTS if they don't exist, reconcile columns.
+
+        Schema management follows the declarative reconciliation pattern
+        (Beets, sqlite-utils): SCHEMA_SQL is the single source of truth.
+        On existing databases, _reconcile_columns() diffs live columns
+        against SCHEMA_SQL and ADDs any missing ones.  This eliminates
+        the version-gated migration chain for column additions, making
+        it impossible for reordered or inserted migrations to skip columns.
+
+        The schema_version table is retained for future data migrations
+        (transforming existing rows) which cannot be handled declaratively.
+        """
+        cursor = self._conn.cursor()
+
+        cursor.executescript(SCHEMA_SQL)
+
+        # ── Declarative column reconciliation ──────────────────────────
+        # Diff live tables against SCHEMA_SQL and ADD any missing columns.
+        # This is idempotent and self-healing: even if a version-gated
+        # migration was skipped (e.g. due to version renumbering), the
+        # column gets created here.
+        self._reconcile_columns(cursor)
+
+        # v24: delivery receipts follow their message. Earlier builds used
+        # SQLite's default RESTRICT action, which made clear/delete/prune fail
+        # for any session containing a durably delivered cron message.
+        self._ensure_delivery_receipts_cascade(cursor)
+
+        # Indexes that reference reconciler-added columns must be created
+        # AFTER _reconcile_columns runs — declaring them in SCHEMA_SQL
+        # makes the initial executescript fail on legacy DBs (the index's
+        # WHERE clause references a column that doesn't exist yet).
+        try:
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_platform_msg_id "
+                "ON messages(session_id, platform_message_id) "
+                "WHERE platform_message_id IS NOT NULL"
+            )
+        except sqlite3.OperationalError as exc:
+            logger.debug("idx_messages_platform_msg_id create skipped: %s", exc)
+
+        # Deferred indexes that reference the reconciler-added ``active``
+        # column (idx_messages_session_active) — same ordering constraint.
+        cursor.executescript(DEFERRED_INDEX_SQL)
+
+        # Heal NULL ``active`` rows unconditionally on every startup.
+        # On real-world DBs the reconciler-added ``active`` column can lack
+        # its NOT NULL DEFAULT 1 (older reconciler builds reconstructed the
+        # type without the default — see #51646: PRAGMA shows
+        # (17,'active','INTEGER',0,None,0) in the wild), so INSERTs that
+        # omitted the column wrote NULL and the ``WHERE active = 1``
+        # transcript loaders hid the whole history.  The INSERTs now set
+        # active=1 explicitly; this idempotent repair un-hides rows written
+        # before the fix.  It was previously gated at ``current_version <
+        # 12`` which never re-ran for already-v12+ databases.
+        try:
+            cursor.execute(
+                "UPDATE messages SET active = 1 WHERE active IS NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+        fts5_available = self._sqlite_supports_fts5(cursor)
+        fts_migrations_complete = True
+        if not fts5_available:
+            # Existing FTS triggers can still fire on messages INSERT/UPDATE
+            # even though the current sqlite runtime cannot read the virtual
+            # tables they target. Drop only the triggers so core persistence
+            # continues; if a future runtime has FTS5, _ensure_fts_schema()
+            # recreates them.
+            self._drop_fts_triggers(cursor)
+
+        # ── Schema version bookkeeping ─────────────────────────────────
+        # Bump to current so future data migrations (if any) can gate on
+        # version.  No version-gated column additions remain.
+        cursor.execute("SELECT version FROM schema_version LIMIT 1")
+        row = cursor.fetchone()
+        if row is None:
+            cursor.execute(
+                "INSERT INTO schema_version (version) VALUES (?)",
+                (SCHEMA_VERSION,),
+            )
+        else:
+            current_version = row["version"] if isinstance(row, sqlite3.Row) else row[0]
+            # Data migrations that can't be expressed declaratively (row
+            # backfills, index changes tied to a specific version step) stay
+            # in a version-gated chain. Column additions are handled by
+            # _reconcile_columns() above and no longer need entries here.
+            if current_version < 10 and SCHEMA_VERSION == 10:
+                # v10: trigram FTS5 table for CJK/substring search. The
+                # virtual table + triggers are created unconditionally via
+                # FTS_TRIGRAM_SQL below, but existing rows need a one-time
+                # backfill into the FTS index.
+                #
+                # Only run this when v10 itself is the target schema. Current
+                # v11+ code drops and rebuilds both FTS tables below, so doing
+                # the v10-only trigram backfill first only burns startup time
+                # and WAL space before v11 throws the work away.
+                if fts5_available:
+                    _fts_trigram_exists = self._fts_table_probe(
+                        cursor, "messages_fts_trigram"
+                    )
+                    if _fts_trigram_exists is False:
+                        if self._ensure_fts_schema(
+                            cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
+                        ):
+                            cursor.execute(
+                                "INSERT INTO messages_fts_trigram(rowid, content) "
+                                "SELECT id, content FROM messages WHERE content IS NOT NULL"
+                            )
+                        else:
+                            fts_migrations_complete = False
+                    elif _fts_trigram_exists is None:
+                        fts_migrations_complete = False
+                else:
+                    fts_migrations_complete = False
+            if current_version < 11 and SCHEMA_VERSION < 23:
+                # v11 (SUPERSEDED by v23): re-index FTS5 tables to cover
+                # tool_name + tool_calls in inline mode (#16751). v23 drops
+                # and rebuilds both FTS tables in external-content form, so
+                # running the v11 inline backfill first would only burn
+                # startup time and WAL space before v23 throws the work
+                # away — and its inline INSERT shape no longer matches the
+                # current external-content FTS_SQL anyway. Kept only for
+                # source archaeology; unreachable while SCHEMA_VERSION >= 23.
+                pass
+            if current_version < 16:
+                # v16: tag delegate subagent rows so pickers stay clean after
+                # parent deletes that used to orphan them (parent_session_id → NULL).
+                try:
+                    cursor.execute(
+                        "UPDATE sessions SET model_config = json_set("
+                        "COALESCE(model_config, '{}'), '$._delegate_from', parent_session_id) "
+                        f"WHERE parent_session_id IS NOT NULL "
+                        "AND json_extract(COALESCE(model_config, '{}'), '$._delegate_from') IS NULL "
+                        f"AND {_ephemeral_child_sql('sessions')}"
+                    )
+                    cursor.execute(
+                        "UPDATE sessions SET model_config = json_set("
+                        "COALESCE(model_config, '{}'), '$._delegate_from', '__orphaned__') "
+                        "WHERE parent_session_id IS NULL "
+                        "AND json_extract(COALESCE(model_config, '{}'), '$._delegate_from') IS NULL "
+                        "AND json_extract(COALESCE(model_config, '{}'), '$._branched_from') IS NULL "
+                        "AND title IS NULL "
+                        "AND message_count <= 25 "
+                        "AND EXISTS (SELECT 1 FROM messages m "
+                        "            WHERE m.session_id = sessions.id AND m.role = 'tool') "
+                        "AND NOT EXISTS (SELECT 1 FROM sessions ch "
+                        "                WHERE ch.parent_session_id = sessions.id)"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+            if current_version < 18:
+                # v18: gateway metadata consolidation (#9006). Backfill
+                # display_name / origin_json / expiry_finalized from
+                # sessions.json so pre-migration gateway sessions are
+                # discoverable from state.db without the JSON index.
+                try:
+                    self._backfill_gateway_metadata_from_sessions_json(cursor)
+                except Exception as exc:
+                    # Backfill is best-effort: sessions.json may be absent,
+                    # corrupted, or partially stale. Missing metadata simply
+                    # means consumers fall back to sessions.json for those
+                    # rows until the gateway rewrites them.
+                    logger.debug("v18 gateway metadata backfill skipped: %s", exc)
+            if current_version < 20:
+                # v20: per-model usage attribution (issue #51607). Going
+                # forward update_token_counts() records each API call into
+                # session_model_usage keyed by the live model, but existing
+                # sessions only have their aggregate totals on the sessions
+                # row. Seed one usage row per historical session from those
+                # aggregates so insights reads uniformly from the new table.
+                # INSERT OR IGNORE keeps it idempotent: if newer code already
+                # wrote a (session_id, model, provider) row for a session, the
+                # PK conflict skips the stale aggregate rather than doubling it.
+                try:
+                    cursor.execute(
+                        """INSERT OR IGNORE INTO session_model_usage (
+                               session_id, model, billing_provider,
+                               billing_base_url, billing_mode,
+                               api_call_count, input_tokens,
+                               output_tokens, cache_read_tokens,
+                               cache_write_tokens, reasoning_tokens,
+                               estimated_cost_usd, actual_cost_usd,
+                               cost_status, cost_source, first_seen, last_seen
+                           )
+                           SELECT id, COALESCE(model, 'unknown'),
+                                  COALESCE(billing_provider, ''),
+                                  COALESCE(billing_base_url, ''),
+                                  COALESCE(billing_mode, ''),
+                                  COALESCE(api_call_count, 0),
+                                  COALESCE(input_tokens, 0),
+                                  COALESCE(output_tokens, 0),
+                                  COALESCE(cache_read_tokens, 0),
+                                  COALESCE(cache_write_tokens, 0),
+                                  COALESCE(reasoning_tokens, 0),
+                                  COALESCE(estimated_cost_usd, 0),
+                                  COALESCE(actual_cost_usd, 0),
+                                  cost_status, cost_source,
+                                  started_at, COALESCE(ended_at, started_at)
+                           FROM sessions
+                           WHERE COALESCE(input_tokens, 0)
+                                 + COALESCE(output_tokens, 0)
+                                 + COALESCE(cache_read_tokens, 0)
+                                 + COALESCE(cache_write_tokens, 0)
+                                 + COALESCE(reasoning_tokens, 0) > 0"""
+                    )
+                except sqlite3.OperationalError:
+                    pass
+            if current_version < 22:
+                # v22: task-dimension usage attribution (issue #23270).
+                # session_model_usage gains a ``task`` column ('' = main agent
+                # loop; 'vision'/'compression'/'title_generation'/... =
+                # auxiliary calls) so aux model spend is visible in analytics.
+                # The column participates in the PRIMARY KEY and SQLite cannot
+                # ALTER a PK, so rebuild the table. The reconciler will have
+                # already ADDed the plain column on legacy DBs (harmless);
+                # the rebuild bakes it into the PK properly. Existing rows are
+                # main-loop accounting by definition → task=''.
+                try:
+                    legacy_pk = cursor.execute(
+                        "SELECT COUNT(*) FROM pragma_table_info('session_model_usage') "
+                        "WHERE name = 'task' AND pk > 0"
+                    ).fetchone()[0]
+                    if not legacy_pk:
+                        cursor.execute("ALTER TABLE session_model_usage RENAME TO session_model_usage_v21")
+                        cursor.execute(
+                            """CREATE TABLE session_model_usage (
+                                   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                                   model TEXT NOT NULL,
+                                   billing_provider TEXT NOT NULL DEFAULT '',
+                                   billing_base_url TEXT NOT NULL DEFAULT '',
+                                   billing_mode TEXT NOT NULL DEFAULT '',
+                                   task TEXT NOT NULL DEFAULT '',
+                                   api_call_count INTEGER NOT NULL DEFAULT 0,
+                                   input_tokens INTEGER NOT NULL DEFAULT 0,
+                                   output_tokens INTEGER NOT NULL DEFAULT 0,
+                                   cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                                   cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                                   reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                                   estimated_cost_usd REAL NOT NULL DEFAULT 0,
+                                   actual_cost_usd REAL NOT NULL DEFAULT 0,
+                                   cost_status TEXT,
+                                   cost_source TEXT,
+                                   first_seen REAL,
+                                   last_seen REAL,
+                                   PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task)
+                               )"""
+                        )
+                        cursor.execute(
+                            """INSERT INTO session_model_usage (
+                                   session_id, model, billing_provider, billing_base_url,
+                                   billing_mode, task, api_call_count, input_tokens,
+                                   output_tokens, cache_read_tokens, cache_write_tokens,
+                                   reasoning_tokens, estimated_cost_usd, actual_cost_usd,
+                                   cost_status, cost_source, first_seen, last_seen
+                               )
+                               SELECT session_id, model, billing_provider, billing_base_url,
+                                      billing_mode, '', api_call_count, input_tokens,
+                                      output_tokens, cache_read_tokens, cache_write_tokens,
+                                      reasoning_tokens, estimated_cost_usd, actual_cost_usd,
+                                      cost_status, cost_source, first_seen, last_seen
+                               FROM session_model_usage_v21"""
+                        )
+                        cursor.execute("DROP TABLE session_model_usage_v21")
+                        cursor.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_session_model_usage_session "
+                            "ON session_model_usage(session_id)"
+                        )
+                        cursor.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_session_model_usage_model "
+                            "ON session_model_usage(model)"
+                        )
+                except sqlite3.OperationalError as exc:
+                    logger.debug("v22 session_model_usage rebuild skipped: %s", exc)
+            if current_version < 23:
+                # v23: FTS storage redesign (issues #22478, #43690, #55233).
+                # The v11 inline-mode FTS tables each store a full private
+                # copy of every message (content || tool_name || tool_calls),
+                # and the trigram index additionally covers role='tool' rows
+                # (~90% of message bytes: base64 payloads, file dumps) at
+                # ~2.6x amplification — together ~75% of state.db on heavy
+                # installs (observed: 18.9 GB of a 25 GB DB).
+                #
+                # OPT-IN, NOT AUTOMATIC. The transition (demote old vtables →
+                # new external-content schema → backfill → teardown → VACUUM)
+                # is disk-heavy (transient ~2x file size to fully reclaim via
+                # VACUUM) and long (~1-2h background on a 25 GB DB). Doing it
+                # silently on every big user's next open — with a completeness
+                # guarantee that depends on the process staying alive long
+                # enough — is the wrong default. So on an EXISTING install we
+                # touch nothing here: the v22 inline FTS keeps working exactly
+                # as before, and we only record a flag advertising that the
+                # optimization is available. `hermes sessions optimize-storage`
+                # performs the whole transition as one deliberate, disk-checked,
+                # progress-reported foreground operation.
+                #
+                # DECOUPLED VERSIONING. Crucially, this does NOT hold back the
+                # main schema_version. The FTS storage LAYOUT is tracked by an
+                # independent `fts_storage_version` marker (see
+                # _fts_storage_version / SETTLE below), so schema_version
+                # advances to SCHEMA_VERSION here like every other migration —
+                # future v24+ migrations land automatically for legacy-FTS
+                # users too. Only the FTS *layout* waits for opt-in.
+                if fts5_available and self._db_has_legacy_inline_fts(cursor):
+                    self.set_meta("fts_optimize_available", "1", cursor=cursor)
+
+            # The FTS storage layout is versioned independently of the main
+            # schema (see the v23 note above). Stamp the current layout so the
+            # main version can always advance: a fresh/optimized DB is at
+            # FTS_STORAGE_VERSION; a legacy DB is left at whatever it had
+            # (absent/0) until `optimize-storage` runs. An INTERRUPTED
+            # optimize (legacy vtables already demoted, but rebuild markers
+            # or demoted trash tables still present) is NOT stamped either —
+            # the marker is the source of truth for "fully optimized", and
+            # `fts_optimize_available()` keeps offering the resume until the
+            # transition actually completes.
+            if (
+                fts5_available
+                and not self._db_has_legacy_inline_fts(cursor)
+                and cursor.execute(
+                    "SELECT 1 FROM state_meta "
+                    "WHERE key = 'fts_rebuild_high_water' LIMIT 1"
+                ).fetchone() is None
+                and not self._has_fts_trash(cursor)
+            ):
+                self.set_meta(
+                    "fts_storage_version", str(FTS_STORAGE_VERSION), cursor=cursor
+                )
+
+            # Advance schema_version to current for ALL non-FTS-layout
+            # migrations. This is deliberately NOT gated on the FTS opt-in —
+            # holding the whole version back would block every future schema
+            # migration for a user who never optimizes. FTS5 being unavailable
+            # is the one case we skip (we can't have created the current FTS
+            # objects, so claiming the current schema would be a lie).
+            if (
+                current_version < SCHEMA_VERSION
+                and fts_migrations_complete
+                and fts5_available
+            ):
+                cursor.execute(
+                    "UPDATE schema_version SET version = ?",
+                    (SCHEMA_VERSION,),
+                )
+
+        # Unique title index — always ensure it exists. Older databases may
+        # contain duplicate aliases from before the constraint was enforced;
+        # preserve every session while letting the newest one retain the alias.
+        title_index_sql = (
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_title_unique "
+            "ON sessions(title) WHERE title IS NOT NULL"
+        )
+        try:
+            cursor.execute(title_index_sql)
+        except sqlite3.IntegrityError:
+            # The index is an optimization — its creation must never abort
+            # opening the database, so the repair itself is also guarded.
+            try:
+                cursor.execute(
+                    """UPDATE sessions AS older
+                       SET title = NULL
+                       WHERE title IS NOT NULL
+                         AND EXISTS (
+                             SELECT 1 FROM sessions AS newer
+                             WHERE newer.title = older.title
+                               AND newer.rowid > older.rowid
+                         )"""
+                )
+                logger.warning(
+                    "Cleared %d duplicate session title(s) while restoring the unique index",
+                    cursor.rowcount,
+                )
+                cursor.execute(title_index_sql)
+            except sqlite3.Error:
+                logger.exception(
+                    "Could not repair duplicate session titles; "
+                    "unique title index not created"
+                )
+        except sqlite3.OperationalError:
+            pass  # Index already exists
+
+        if fts5_available:
+            # FTS5 setup. Run the DDL even when the virtual table exists so
+            # CREATE TRIGGER IF NOT EXISTS repairs trigger-only degradation from
+            # an earlier no-FTS5 runtime.
+            #
+            # OPT-IN v23 boundary: a legacy v22 install (inline-content FTS,
+            # not yet opted into `hermes db optimize`) must keep its EXISTING
+            # inline schema + triggers. Running the v23 external-content DDL
+            # here would create the trigram source VIEW and leave the DB in a
+            # mixed inline/external state. So for a legacy DB we only ensure
+            # its inline triggers exist (via the legacy DDL), and skip the
+            # v23 view/external tables entirely. Fresh installs and opted-in
+            # DBs have no legacy inline FTS, so they get the v23 DDL.
+            if self._db_has_legacy_inline_fts(cursor):
+                triggers_need_repair = (
+                    self._fts_trigger_count(cursor) < len(_FTS_TRIGGERS)
+                )
+                self._fts_enabled = self._ensure_fts_schema(
+                    cursor, "messages_fts", LEGACY_FTS_SQL
+                )
+                if self._fts_enabled:
+                    trigram_enabled = self._ensure_fts_schema(
+                        cursor, "messages_fts_trigram", LEGACY_FTS_TRIGRAM_SQL
+                    )
+                    self._trigram_available = trigram_enabled
+                    if triggers_need_repair:
+                        self._rebuild_legacy_fts_indexes(
+                            cursor, include_trigram=trigram_enabled
+                        )
+            else:
+                triggers_need_repair = (
+                    self._fts_trigger_count(cursor) < len(_FTS_TRIGGERS)
+                )
+                self._fts_enabled = self._ensure_fts_schema(
+                    cursor, "messages_fts", FTS_SQL
+                )
+
+                # Trigram FTS5 for CJK/substring search. This is optional
+                # relative to the main FTS table; if it cannot be created,
+                # CJK search falls back to LIKE.
+                if self._fts_enabled:
+                    trigram_enabled = self._ensure_fts_schema(
+                        cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
+                    )
+                    self._trigram_available = trigram_enabled
+                    if triggers_need_repair:
+                        self._rebuild_fts_indexes(
+                            cursor,
+                            include_trigram=trigram_enabled,
+                        )
+                    # CJK-bigram index (cjk_unicode61). Strictly additive to
+                    # the surfaces above and gated on the loadable tokenizer:
+                    self._ensure_fts_cjk_schema(cursor)
+
+        self._conn.commit()
 
     # =========================================================================
     # Session lifecycle
@@ -6160,6 +7288,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         effect_disposition: Optional[str] = None,
         timestamp: Any = None,
         api_content: Optional[str] = None,
+        delivery_id: Optional[str] = None,
         display_kind: Optional[str] = None,
         display_metadata: Optional[Dict[str, Any]] = None,
         compression_lock_holder: Optional[str] = None,
@@ -6229,9 +7358,23 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
 
         def _do(conn):
+            # Upstream extracted the compression-lock / ended-session guards
+            # into this helper; only the delivery-receipt claim below is
+            # fork-local.
             self._check_transcript_write_guards(
                 conn, session_id, compression_lock_holder
             )
+            if delivery_id:
+                claimed = conn.execute(
+                    "INSERT OR IGNORE INTO delivery_receipts (delivery_id, message_id, created_at) VALUES (?, NULL, ?)",
+                    (delivery_id, time.time()),
+                )
+                if claimed.rowcount == 0:
+                    prior = conn.execute(
+                        "SELECT message_id FROM delivery_receipts WHERE delivery_id = ?",
+                        (delivery_id,),
+                    ).fetchone()
+                    return prior[0] if prior and prior[0] is not None else 0
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, effect_disposition, timestamp, token_count, finish_reason,
@@ -6275,6 +7418,11 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 conn.execute(
                     "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
                     (session_id,),
+                )
+            if delivery_id:
+                conn.execute(
+                    "UPDATE delivery_receipts SET message_id = ? WHERE delivery_id = ?",
+                    (msg_id, delivery_id),
                 )
             return msg_id
 

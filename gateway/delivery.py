@@ -355,7 +355,10 @@ class DeliveryRouter:
         )
 
         active_batcher = batcher or ControllerEventBatcher()
-        accepted = [e for e in events if active_batcher.add(e)]
+        # Keep delivery batches local to this call. The batcher is shared only
+        # for its dedupe window; sharing its pending queue would let a
+        # concurrent caller flush these events to a different target.
+        accepted = active_batcher.accept_many(events)
         results: Dict[str, Any] = {
             "accepted": len(accepted),
             "deduped": len(events) - len(accepted),
@@ -363,10 +366,8 @@ class DeliveryRouter:
             "deliveries": [],
         }
 
-        while True:
-            batch = active_batcher.flush()
-            if not batch:
-                break
+        for offset in range(0, len(accepted), active_batcher.max_batch):
+            batch = accepted[offset : offset + active_batcher.max_batch]
             deliverable, suppressed = partition_suppressed(batch)
 
             if suppressed:
@@ -635,7 +636,6 @@ class DeliveryRouter:
             if _send_result_failed(result):
                 raise RuntimeError(_send_result_error(result) or f"{target.platform.value} delivery failed")
         return result
-
 
 
 

@@ -192,6 +192,25 @@ async def test_shared_batcher_dedupes_across_concurrent_calls(router):
 
 
 @pytest.mark.asyncio
+async def test_shared_batcher_does_not_flush_another_call_pending_queue(router):
+    """The shared object carries dedupe memory, never delivery ownership."""
+    batcher = ControllerEventBatcher(window_seconds=300)
+    queued_elsewhere = UserNotification(text="belongs to another route")
+    batcher.add(queued_elsewhere)
+
+    await router.deliver_events(
+        [UserNotification(text="this route only")],
+        TELEGRAM,
+        job_id="j1",
+        batcher=batcher,
+    )
+
+    assert len(router._test_adapter.calls) == 1
+    assert router._test_adapter.calls[0]["content"] == "this route only"
+    assert batcher.flush() == [queued_elsewhere]
+
+
+@pytest.mark.asyncio
 async def test_empty_event_list_is_a_noop(router):
     result = await router.deliver_events([], TELEGRAM, job_id="j1")
     assert result["accepted"] == 0

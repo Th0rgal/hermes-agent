@@ -182,10 +182,23 @@ function handleTransition(previous: ClientSessionState | null, next: ClientSessi
   }
 }
 
+/** Same emerald cue as a finished background turn — shared by the settle
+ *  transition, the silent-growth diff below, and the `session.delivery`
+ *  websocket event. */
+export function markSessionUnread(storedId: string): void {
+  const cur = $unreadFinishedSessionIds.get()
+
+  if (!cur.includes(storedId)) {
+    $unreadFinishedSessionIds.set([...cur, storedId])
+  }
+}
+
 /** Cron/callback deliveries are appended to a stored session by the scheduler
  *  process — there is no runtime session and no busy→settled transition, so
- *  the unread marker in handleTransition never fires for them. The session
- *  list poll calls this with the previous and freshly fetched rows: a row
+ *  the unread marker in handleTransition never fires for them. The
+ *  `session.delivery` websocket event is the primary announcement; this diff,
+ *  called by the session list refresh with the previous and freshly fetched
+ *  rows, is the fallback for deliveries that landed while disconnected: a row
  *  whose message_count grew while the session sat idle and unopened gets the
  *  same unread cue as a finished background turn. */
 export function markSilentSessionActivity(

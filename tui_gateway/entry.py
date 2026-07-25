@@ -454,6 +454,8 @@ def main():
 
     # Live-apply skins Hermes activates mid-conversation.
     server._ensure_skin_watcher()
+    # Announce scheduler-appended deliveries (session.delivery).
+    server._ensure_delivery_watcher()
 
     # Warm the /model picker's provider-models cache off-thread during this
     # idle window (gateway.ready sent, user about to type). Mirrors the classic

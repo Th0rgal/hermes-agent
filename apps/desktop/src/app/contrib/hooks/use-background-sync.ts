@@ -5,7 +5,13 @@ import { createClientSessionState } from '@/lib/chat-runtime'
 import { $changeEventsAvailable, $cronChangeTick, $sessionsChangeTick } from '@/store/live-sync'
 import { $onBattery, batteryPollInterval } from '@/store/power'
 import { refreshActiveProfile } from '@/store/profile'
-import { $activeSessionId, $currentCwd, setCurrentCwd } from '@/store/session'
+import {
+  $activeSessionId,
+  $currentCwd,
+  $lastDeliveryPing,
+  $selectedStoredSessionId,
+  setCurrentCwd
+} from '@/store/session'
 import {
   $sessionStates,
   publishSessionState,
@@ -388,6 +394,31 @@ export function useBackgroundSync({
   // Messaging session lists against an older backend: no sessions.changed, so
   // keep the legacy visible poll. (Event-capable backends fold this into the
   // trailing sessions.changed refresh above.)
+
+  // Instant follow-up on a websocket-announced delivery (session.delivery):
+  // re-sort the sidebar now, and re-fetch the open transcript when it is the
+  // delivered-to session — no waiting for the next visibility poll. listen()
+  // (not subscribe()) so re-mounting never replays the last ping.
+  useEffect(() => {
+    if (gatewayState !== 'open') {
+      return
+    }
+
+    return $lastDeliveryPing.listen(ping => {
+      if (!ping) {
+        return
+      }
+
+      void refreshSessions()
+
+      if (ping.sessionId === $selectedStoredSessionId.get()) {
+        void refreshActiveStoredTranscript()
+      }
+    })
+  }, [gatewayState, refreshActiveStoredTranscript, refreshSessions])
+
+  // Keep the messaging-platform session lists live (inbound turns are written
+  // by the gateway, not the desktop websocket).
   useEffect(() => {
     if (gatewayState !== 'open' || changeEventsAvailable) {
       return

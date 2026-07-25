@@ -8055,6 +8055,42 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             result.append(msg)
         return result
 
+    def latest_message_id(self) -> int:
+        """Current messages-table highwater mark. Baseline for
+        :meth:`list_observed_deliveries_since`, so a watcher starts at "now"
+        instead of replaying history."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM messages"
+            ).fetchone()
+        return int(row[0] or 0)
+
+    def list_observed_deliveries_since(
+        self, min_message_id: int, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Observed assistant rows appended after ``min_message_id``.
+
+        Durable deliveries are written by the cron scheduler — usually another
+        process — as ``observed`` assistant rows whose content carries the
+        "[Cron delivery: …]" sentinel (see cron/scheduler.py). The dashboard's
+        delivery watcher polls this to announce them over the websocket; no
+        in-process signal exists. The sentinel check stays with the caller
+        because content is stored encoded.
+        """
+        sql = (
+            "SELECT id, session_id, timestamp, content FROM messages "
+            "WHERE id > ? AND observed = 1 AND role = 'assistant' "
+            "AND active = 1 ORDER BY id LIMIT ?"
+        )
+        with self._lock:
+            rows = self._conn.execute(sql, (min_message_id, limit)).fetchall()
+        result = []
+        for row in rows:
+            msg = dict(row)
+            msg["content"] = self._decode_content(msg.get("content"))
+            result.append(msg)
+        return result
+
     def get_messages_around(
         self,
         session_id: str,

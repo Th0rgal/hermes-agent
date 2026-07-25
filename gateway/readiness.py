@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import shutil
-import sqlite3
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,9 @@ from typing import Any
 import yaml
 
 from hermes_constants import get_hermes_home
+
+# state.db probes go through the selected WAL-safe driver (hermes_sqlite_compat).
+from hermes_sqlite_compat import sqlite3
 
 
 _DISK_DEGRADED_PERCENT = 90.0

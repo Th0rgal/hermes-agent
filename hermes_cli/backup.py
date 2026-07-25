@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import shutil
-import sqlite3
 import sys
 import tempfile
 import time
@@ -22,6 +21,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from hermes_constants import get_default_hermes_root, get_hermes_home, display_hermes_home
+# state.db readers must use the selected WAL-safe driver too — a vulnerable
+# stdlib reader on a WAL database is exposed to the same reset race.
+from hermes_sqlite_compat import sqlite3
 
 logger = logging.getLogger(__name__)
 

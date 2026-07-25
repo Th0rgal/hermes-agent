@@ -131,6 +131,86 @@ def project_switch(project: str, task_id: Optional[str] = None) -> str:
     return json.dumps({"success": True, "id": proj.id, "slug": proj.slug, "name": proj.name, "primary_path": primary})
 
 
+def _caller_durable_session_id() -> str:
+    """The caller's durable SessionDB id, or "" when there is none.
+
+    Explicit context only (ContextVar set by the gateway, or the
+    HERMES_SESSION_ID the agent subprocess inherits). Deliberately does NOT
+    scan SessionDB for the newest Desktop session — a route bind must name a
+    real, intentional target, never "whatever window is open".
+    """
+    sid = ""
+    try:
+        from gateway.session_context import get_session_env
+
+        sid = get_session_env("HERMES_SESSION_ID", "")
+    except Exception:
+        sid = ""
+    return (sid or os.environ.get("HERMES_SESSION_ID", "")).strip()
+
+
+def project_route_set(project: str, session_id: Optional[str] = None, task_id: Optional[str] = None) -> str:
+    from hermes_cli import project_routes as routes
+    from hermes_cli import projects_db as pdb
+
+    sid = (session_id or "").strip() or _caller_durable_session_id()
+    if not sid:
+        return json.dumps({
+            "success": False,
+            "error": (
+                "no session_id given and no durable session in context — "
+                "explicit routes are never inferred from the current desktop"
+            ),
+        })
+    try:
+        with pdb.connect_closing() as conn:
+            proj = _resolve(conn, project)
+            if proj is None:
+                return json.dumps({"success": False, "error": f"no project matching '{project}'"})
+            route = routes.bind_route(conn, proj.id, sid)
+    except (LookupError, ValueError) as exc:
+        return json.dumps({"success": False, "error": str(exc)})
+    return json.dumps({
+        "success": True,
+        "project": proj.slug,
+        "session_id": route.session_id,
+    })
+
+
+def project_route_get(project: str, task_id: Optional[str] = None) -> str:
+    from hermes_cli import project_routes as routes
+    from hermes_cli import projects_db as pdb
+
+    with pdb.connect_closing() as conn:
+        proj = _resolve(conn, project)
+        if proj is None:
+            return json.dumps({"success": False, "error": f"no project matching '{project}'"})
+        route = routes.get_route(conn, proj.id)
+    if route is None:
+        return json.dumps({
+            "success": True,
+            "project": proj.slug,
+            "route": None,
+        })
+    return json.dumps({
+        "success": True,
+        "project": proj.slug,
+        "route": route.to_dict(),
+    })
+
+
+def project_route_clear(project: str, task_id: Optional[str] = None) -> str:
+    from hermes_cli import project_routes as routes
+    from hermes_cli import projects_db as pdb
+
+    with pdb.connect_closing() as conn:
+        proj = _resolve(conn, project)
+        if proj is None:
+            return json.dumps({"success": False, "error": f"no project matching '{project}'"})
+        removed = routes.unbind_route(conn, proj.id)
+    return json.dumps({"success": True, "project": proj.slug, "removed": removed})
+
+
 registry.register(
     name="project_list",
     toolset="project",
@@ -186,4 +266,70 @@ registry.register(
         },
     },
     handler=lambda args, **kw: project_switch(project=args.get("project", ""), task_id=kw.get("task_id")),
+)
+
+registry.register(
+    name="project_route_set",
+    toolset="project",
+    schema={
+        "name": "project_route_set",
+        "description": (
+            "Explicitly bind a Project to a durable session so cron deliveries "
+            "(deliver=project:<slug>) and notifications land in that exact "
+            "conversation. Defaults to THIS session when session_id is omitted. "
+            "Routes are explicit-or-nothing: without one, project-targeted "
+            "deliveries fail instead of guessing the current desktop window."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project name, slug, or id"},
+                "session_id": {"type": "string", "description": "Durable session id (defaults to the calling session)"},
+            },
+            "required": ["project"],
+        },
+    },
+    handler=lambda args, **kw: project_route_set(
+        project=args.get("project", ""),
+        session_id=args.get("session_id"),
+        task_id=kw.get("task_id"),
+    ),
+)
+
+registry.register(
+    name="project_route_get",
+    toolset="project",
+    schema={
+        "name": "project_route_get",
+        "description": "Show the explicit session route bound to a Project (or null when unbound).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project name, slug, or id"},
+            },
+            "required": ["project"],
+        },
+    },
+    handler=lambda args, **kw: project_route_get(project=args.get("project", ""), task_id=kw.get("task_id")),
+)
+
+registry.register(
+    name="project_route_clear",
+    toolset="project",
+    schema={
+        "name": "project_route_clear",
+        "description": (
+            "Remove a Project's explicit session route. Project-targeted "
+            "deliveries will fail until a new route is bound — they never fall "
+            "back to the current desktop session."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project name, slug, or id"},
+            },
+            "required": ["project"],
+        },
+    },
+    handler=lambda args, **kw: project_route_clear(project=args.get("project", ""), task_id=kw.get("task_id")),
 )

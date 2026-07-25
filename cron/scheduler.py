@@ -1261,6 +1261,59 @@ def _local_session_delivery_target(
     }
 
 
+def _resolve_project_route_target(job: dict, project_token: str) -> Optional[dict]:
+    """Resolve ``deliver=project:<id|slug>`` via the durable explicit route store.
+
+    Explicit-or-nothing (see ``hermes_cli/project_routes.py``): when the
+    project has no bound session — or the bound session is gone — the target
+    is dropped and the delivery reports an error. It must NEVER fall back to
+    the currently open Desktop session, the active project, or a platform
+    home channel: that fallback is exactly the misrouting this store exists
+    to prevent. Compression/continuation is handled inside
+    ``resolve_route_target``, which atomically migrates the stored route to
+    the live continuation tip before returning it.
+    """
+    token = (project_token or "").strip()
+    if not token:
+        return None
+    try:
+        from hermes_cli import project_routes as _routes
+        from hermes_cli import projects_db as _pdb
+
+        with _pdb.connect_closing() as conn:
+            target = _routes.resolve_route_target(conn, token)
+    except LookupError as e:
+        logger.warning(
+            "Job '%s': project route unresolved: %s — dropping target "
+            "(explicit routes never fall back to the current Desktop session)",
+            job.get("id", "?"), e,
+        )
+        return None
+    except Exception as e:
+        logger.warning(
+            "Job '%s': project route resolution failed for '%s': %s",
+            job.get("id", "?"), token, e,
+        )
+        return None
+
+    if target.source in _LOCAL_SESSION_PLATFORMS:
+        return _local_session_delivery_target(target.source, target.session_id)
+    if target.source == "api_server":
+        # _deliver_result routes api_server targets through the same durable
+        # local-session append; it just isn't tagged as a local platform.
+        return {
+            "platform": "api_server",
+            "chat_id": target.session_id,
+            "thread_id": None,
+        }
+    logger.warning(
+        "Job '%s': project '%s' routes to session %s with unsupported "
+        "source '%s' — dropping target",
+        job.get("id", "?"), token, target.session_id, target.source,
+    )
+    return None
+
+
 def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[dict]:
     """Resolve one concrete auto-delivery target for a cron job."""
 
@@ -1278,6 +1331,8 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
             if session_id
             else None
         )
+    if separator and explicit_platform == "project":
+        return _resolve_project_route_target(job, explicit_session_id)
 
     if deliver_value == "origin":
         local_platform = _local_session_platform(origin)

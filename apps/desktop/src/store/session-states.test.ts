@@ -2,14 +2,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ClientSessionState } from '@/app/types'
 import { findGroupOfPane, group, split } from '@/components/pane-shell/tree/model'
+import { createClientSessionState } from '@/lib/chat-runtime'
 import { $layoutTree } from '@/components/pane-shell/tree/store'
-import { $selectedStoredSessionId } from '@/store/session'
+import { $selectedStoredSessionId, setSelectedStoredSessionId } from '@/store/session'
 import type { SessionTile } from '@/store/session-states'
 import {
   blankDraftTile,
   focusedSessionNeedsRoute,
   markSelectionRestore,
   orderTilesByTree,
+  $unreadFinishedSessionIds,
+  clearAllSessionStates,
+  markSilentSessionActivity,
+  publishSessionState,
   selectionHomesToWorkspace
 } from '@/store/session-states'
 
@@ -225,5 +230,49 @@ describe('reopenLastClosedTile focuses the restored tab', () => {
     expect(states.$sessionTiles.get().some(t => t.storedSessionId === 'closed')).toBe(true)
     expect(findGroupOfPane(tree.$layoutTree.get()!, tilePane('closed'))?.active).toBe(tilePane('closed'))
     expect(tree.$activeTreeGroup.get()).toBe('grp-main')
+  })
+})
+
+describe('markSilentSessionActivity', () => {
+  beforeEach(() => {
+    clearAllSessionStates()
+    $unreadFinishedSessionIds.set([])
+    setSelectedStoredSessionId(null)
+  })
+
+  const row = (id: string, message_count: number) => ({ id, message_count })
+
+  it('marks a session unread when its transcript grew without a turn (delivery)', () => {
+    markSilentSessionActivity([row('s1', 10), row('s2', 4)], [row('s1', 12), row('s2', 4)])
+
+    expect($unreadFinishedSessionIds.get()).toEqual(['s1'])
+  })
+
+  it('skips the selected session — the user is already looking at it', () => {
+    setSelectedStoredSessionId('s1')
+    markSilentSessionActivity([row('s1', 10)], [row('s1', 12)])
+
+    expect($unreadFinishedSessionIds.get()).toEqual([])
+  })
+
+  it('skips a working session — its settle transition owns the unread cue', () => {
+    publishSessionState('rt-1', { ...createClientSessionState('s1'), busy: true })
+    markSilentSessionActivity([row('s1', 10)], [row('s1', 12)])
+
+    expect($unreadFinishedSessionIds.get()).toEqual([])
+  })
+
+  it('needs a baseline — a first fetch or a brand-new row marks nothing', () => {
+    markSilentSessionActivity([], [row('s1', 12)])
+    markSilentSessionActivity([row('s2', 1)], [row('s1', 12), row('s2', 1)])
+
+    expect($unreadFinishedSessionIds.get()).toEqual([])
+  })
+
+  it('does not duplicate an already-unread session', () => {
+    $unreadFinishedSessionIds.set(['s1'])
+    markSilentSessionActivity([row('s1', 10)], [row('s1', 12)])
+
+    expect($unreadFinishedSessionIds.get()).toEqual(['s1'])
   })
 })

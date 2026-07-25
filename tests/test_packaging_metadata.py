@@ -1,6 +1,10 @@
 import ast
+import os
 import re
+import subprocess
+import sys
 import tomllib
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -342,3 +346,82 @@ def test_security_pins_present_in_mirrored_lazy_features():
         "pyproject extras — the lazy install path would not enforce the "
         "CVE-patched floor:\n  " + "\n  ".join(problems)
     )
+
+
+def _py_modules() -> list[str]:
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    return data["tool"]["setuptools"]["py-modules"]
+
+
+def test_hermes_sqlite_compat_declared_as_py_module():
+    """Regression: hermes_sqlite_compat is a top-level single-file module
+    imported at import time by hermes_state, gateway/delivery_ledger,
+    gateway/readiness, hermes_cli/backup, hermes_cli/doctor and
+    tools/async_delegation. setuptools only ships top-level modules that are
+    listed in ``py-modules``, so omitting it made every one of those imports
+    fail in the Nix/uv2nix sealed venv (the only supported wheel channel)
+    while source checkouts kept working.
+    """
+    assert "hermes_sqlite_compat" in _py_modules()
+
+
+def test_wheel_ships_and_imports_hermes_sqlite_compat(tmp_path):
+    """Build the real wheel (via the one sanctioned path: HERMES_NIX_BUILD=1,
+    mirroring the uv2nix derivation — see setup.py) and prove the distributed
+    artifact both contains hermes_sqlite_compat.py and can import it without
+    the source checkout on sys.path. This is the behavior the py-modules
+    listing exists to guarantee; a metadata-only assert would not catch e.g.
+    a build-backend change that stops honoring the field.
+    """
+    env = os.environ.copy()
+    env["HERMES_NIX_BUILD"] = "1"
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    extra_cfg = tmp_path / "dist-extra.cfg"
+    extra_cfg.write_text(
+        f"[build]\nbuild_base = {scratch / 'build'}\n\n[egg_info]\negg_base = {scratch}\n",
+        encoding="utf-8",
+    )
+    env["DIST_EXTRA_CONFIG"] = str(extra_cfg)
+    build = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"from setuptools.build_meta import build_wheel; build_wheel(r'{tmp_path}')",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert build.returncode == 0, build.stderr
+
+    (wheel,) = tmp_path.glob("hermes_agent-*.whl")
+    with zipfile.ZipFile(wheel) as zf:
+        names = zf.namelist()
+        assert "hermes_sqlite_compat.py" in names, (
+            "hermes_sqlite_compat.py missing from the wheel — is it listed in "
+            "pyproject.toml [tool.setuptools] py-modules?"
+        )
+        site = tmp_path / "site"
+        zf.extractall(site)
+
+    # -I (isolated) keeps the source checkout off sys.path, so the import can
+    # only be satisfied by the extracted wheel contents.
+    check = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import sys; sys.path.insert(0, sys.argv[1]); "
+            "import hermes_sqlite_compat as m; "
+            "assert m.sqlite3 is not None and callable(m.compat_info)",
+            str(site),
+        ],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert check.returncode == 0, check.stderr

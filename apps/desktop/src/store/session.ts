@@ -393,6 +393,14 @@ export const setActiveSessionStoredIdRotation = (next: Updater<ActiveSessionStor
 // Written by session-states.ts (handleTransition), cleared here on session open.
 export const $unreadFinishedSessionIds = atom<string[]>([])
 
+// Last websocket-announced delivery (`session.delivery`). useBackgroundSync
+// listens: instant transcript refresh when it targets the open chat, sidebar
+// re-sort otherwise — instead of waiting for the next visibility poll.
+export const $lastDeliveryPing = atom<{ at: number; sessionId: string } | null>(null)
+
+export const pingSessionDelivery = (sessionId: string) =>
+  $lastDeliveryPing.set({ at: Date.now(), sessionId })
+
 export const setSelectedStoredSessionId = (next: Updater<string | null>) => {
   updateAtom($selectedStoredSessionId, next)
   // Opening a session clears its unread state — the user is now looking at it.

@@ -1185,11 +1185,52 @@ export function preserveLocalAssistantErrors(
     return mergedNextMessages
   }
 
-  const preserved = currentMessages
-    .filter(message => preserveIds.has(message.id))
-    .map(message => ({ ...message, pending: false }))
+  // Re-insert each preserved message right after the nearest preceding message
+  // it shares with the hydrated list, not at the tail. Every completed turn
+  // re-hydrates, so a tail append would re-graft an old failed turn below each
+  // newer turn forever — the "error block from the past pinned at the bottom"
+  // bug. Preserved messages with no shared predecessor (a failed FIRST turn
+  // whose optimistic ids never match stored ids) still go to the tail, which
+  // is their true position in that case.
+  const preservedByAnchor = new Map<string, ChatMessage[]>()
+  const unanchored: ChatMessage[] = []
+  let lastSharedId: null | string = null
 
-  return [...mergedNextMessages, ...preserved]
+  for (const message of currentMessages) {
+    if (existingIds.has(message.id)) {
+      lastSharedId = message.id
+
+      continue
+    }
+
+    if (!preserveIds.has(message.id)) {
+      continue
+    }
+
+    const preservedMessage = { ...message, pending: false }
+
+    if (lastSharedId === null) {
+      unanchored.push(preservedMessage)
+    } else {
+      const bucket = preservedByAnchor.get(lastSharedId) ?? []
+      bucket.push(preservedMessage)
+      preservedByAnchor.set(lastSharedId, bucket)
+    }
+  }
+
+  const anchored: ChatMessage[] = []
+
+  for (const message of mergedNextMessages) {
+    anchored.push(message)
+
+    const bucket = preservedByAnchor.get(message.id)
+
+    if (bucket) {
+      anchored.push(...bucket)
+    }
+  }
+
+  return [...anchored, ...unanchored]
 }
 
 export function branchGroupForUser(userMessage: ChatMessage): string {

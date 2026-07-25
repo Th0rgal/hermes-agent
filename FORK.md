@@ -39,6 +39,11 @@ commit per functional change with a `[fork-delta]` line in the message.
 If the change is upstreamable, open the upstream PR too and note it in the
 commit message; drop the local commit on the sync after it merges.
 
+Merge PRs with **"Rebase and merge"** (repo settings disallow merge
+commits): the series must stay linear or the upstream rebase turns into
+merge-commit archaeology. If a merge commit slips in anyway, flatten with
+`git rebase --force-rebase <base>` (tree-identical) and force-push.
+
 ## Deploying
 
 Production (`agent-core:/usr/local/lib/hermes-agent`) tracks

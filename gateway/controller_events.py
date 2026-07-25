@@ -296,6 +296,30 @@ class ControllerEventBatcher:
             self._pending.append(event)
             return True
 
+    def accept_many(
+        self,
+        events: List[ControllerEvent],
+        now: Optional[float] = None,
+    ) -> List[ControllerEvent]:
+        """Atomically deduplicate a call-local group without queueing it.
+
+        ``DeliveryRouter.deliver_events`` uses this path so two concurrent
+        callers can share the dedupe window without sharing pending delivery
+        state. Otherwise one caller could flush another caller's event and
+        send it to the wrong targets.
+        """
+        ts = time.time() if now is None else float(now)
+        accepted: List[ControllerEvent] = []
+        with self._lock:
+            self._evict(ts)
+            for event in events:
+                key = dedupe_key(event)
+                if key in self._seen:
+                    continue
+                self._seen[key] = ts
+                accepted.append(event)
+        return accepted
+
     def flush(self, now: Optional[float] = None) -> List[ControllerEvent]:
         with self._lock:
             batch = self._pending[: self.max_batch]

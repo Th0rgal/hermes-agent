@@ -393,6 +393,35 @@ describe('preserveLocalPendingTurnMessages', () => {
     expect(preserveLocalPendingTurnMessages(next, previous)).toEqual(next)
   })
 
+  it('does not resurrect an optimistic prompt when the backend reflowed its whitespace', () => {
+    // The backend collapsed the typed newlines to spaces when persisting
+    // (relayed "I was reported:" turn, session 20260724_180921); the optimistic
+    // row still holds the newlines. Whitespace-insensitive identity keeps them
+    // the same turn — no clamped duplicate at the transcript tail.
+    const next = toChatMessages([
+      {
+        role: 'user',
+        content:
+          'I was reported: Run this shadow campaign on the DGX Download the complete shadow hotfix v3\n\n' +
+          '--- Attached Context ---\n\n' +
+          '📎 @file:.hermes/desktop-attachments/collatz_shadow_hotfix_v3.tar.gz (application/x-tar, 20.8 KB) — binary file.',
+        timestamp: 1
+      },
+      { role: 'assistant', content: 'La campagne shadow v3 est installée.', timestamp: 2 }
+    ])
+
+    const previous = [
+      msg(
+        'user-optimistic',
+        'user',
+        'I was reported:\nRun this shadow campaign on the DGX\nDownload the complete shadow hotfix v3',
+        { attachmentRefs: ['@file:collatz_shadow_hotfix_v3.tar.gz'] }
+      )
+    ]
+
+    expect(preserveLocalPendingTurnMessages(next, previous)).toEqual(next)
+  })
+
   it('keeps an optimistic user turn and pending assistant when the server projection is behind', () => {
     const next = [msg('1-user', 'user', 'first'), msg('2-assistant', 'assistant', 'first answer')]
 

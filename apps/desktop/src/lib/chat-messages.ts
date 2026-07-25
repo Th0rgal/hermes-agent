@@ -293,7 +293,13 @@ const LEADING_REF_LINE_RE = /^@(?:file|folder|url|image|tool|terminal):(?:"[^"\n
  * (displayContentForMessage). Comparing any two of those raw strings never
  * matches for an attachment-bearing prompt, which resurrected the optimistic
  * copy as a duplicate transcript tail. Normalize all three shapes down to
- * the prompt the user actually typed. */
+ * the prompt the user actually typed.
+ *
+ * Whitespace is also collapsed: the backend can reflow a persisted prompt
+ * (newlines → spaces, e.g. relayed "I was reported: …" turns), so the stored
+ * row and the newline-preserving optimistic row must still compare equal.
+ * Same intent as preserveLocalAssistantErrors' `\s+`→space normalization —
+ * two prompts differing only in whitespace are the same turn. */
 export function userTurnIdentityText(text: string): string {
   const marker = text.match(ATTACHED_CONTEXT_MARKER_RE)
 
@@ -309,7 +315,7 @@ export function userTurnIdentityText(text: string): string {
     index += 1
   }
 
-  return lines.slice(index).join('\n').trim()
+  return lines.slice(index).join('\n').replace(/\s+/g, ' ').trim()
 }
 
 function textFromUnknown(value: unknown, depth = 0): string {

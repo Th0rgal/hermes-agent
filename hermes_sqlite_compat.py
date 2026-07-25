@@ -11,18 +11,13 @@ This module restores WAL safely by selecting, once per process, the first
 sqlite3-compatible driver whose *linked* SQLite library contains the fix
 (3.51.3+, or the 3.50.7 / 3.44.6 backports):
 
-1. ``HERMES_SQLITE_MODULE=<import.path>`` — operator override, e.g. a
-   pysqlite3 built from source against a fixed system libsqlite3.  The
-   override is validated like any candidate: a still-vulnerable or
-   non-conformant module is refused with a warning, never trusted.
-   ``HERMES_SQLITE_MODULE=sqlite3`` forces the stdlib driver.
-2. stdlib ``sqlite3`` when its linked SQLite is already fixed.
-3. Known drop-in replacements that bundle their own SQLite amalgamation:
+1. stdlib ``sqlite3`` when its linked SQLite is already fixed.
+2. Known drop-in replacements that bundle their own SQLite amalgamation:
    ``pysqlite3`` (pysqlite3-binary) and ``sqlean`` (sqlean.py).  As of
    2026-07 both still bundle vulnerable versions (3.51.1 / 3.50.4) and are
    therefore refused; once upstream ships 3.51.3+ they are picked up
    automatically on the next process start.
-4. stdlib ``sqlite3`` regardless — the WAL-reset gate in ``hermes_state``
+3. stdlib ``sqlite3`` regardless — the WAL-reset gate in ``hermes_state``
    then keeps databases on ``journal_mode=DELETE``: safe, just slower.
 
 Every Hermes connection to ``state.db`` must be created through the
@@ -37,14 +32,11 @@ from __future__ import annotations
 
 import importlib
 import logging
-import os
 import re
 import sqlite3 as _stdlib_sqlite3
 from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
-
-ENV_OVERRIDE = "HERMES_SQLITE_MODULE"
 
 # Drop-in replacements probed after stdlib, in preference order.
 DEFAULT_CANDIDATES: Tuple[str, ...] = ("pysqlite3.dbapi2", "pysqlite3", "sqlean")
@@ -152,7 +144,6 @@ def probe_sqlite_module(module: Any) -> Optional[Dict[str, Any]]:
 
 def select_sqlite_module(
     *,
-    env: Optional[Dict[str, str]] = None,
     candidates: Optional[Tuple[str, ...]] = None,
     stdlib_module: Any = _stdlib_sqlite3,
     importer=importlib.import_module,
@@ -162,58 +153,12 @@ def select_sqlite_module(
     Pure given its keyword arguments (all injectable for tests); the
     module-level selection below calls it once per process.
     """
-    environ = os.environ if env is None else env
     stdlib_info = _module_version_info(stdlib_module) or (0, 0, 0)
     stdlib_version = ".".join(str(part) for part in stdlib_info)
     info: Dict[str, Any] = {
         "stdlib_sqlite_version": stdlib_version,
-        "override": False,
         "wal_safe": False,
     }
-
-    override = (environ.get(ENV_OVERRIDE) or "").strip()
-    if override:
-        if override == "sqlite3":
-            info.update(
-                module="sqlite3",
-                sqlite_version=stdlib_version,
-                override=True,
-                wal_safe=not is_sqlite_wal_reset_vulnerable(stdlib_info),
-            )
-            return stdlib_module, info
-        try:
-            module = importer(override)
-        except Exception as exc:
-            logger.warning(
-                "%s=%s could not be imported (%s) — falling back to "
-                "automatic SQLite driver selection.",
-                ENV_OVERRIDE,
-                override,
-                exc,
-            )
-        else:
-            probed = probe_sqlite_module(module)
-            if probed is not None:
-                probed.update(
-                    stdlib_sqlite_version=stdlib_version,
-                    override=True,
-                    wal_safe=True,
-                )
-                logger.info(
-                    "Using SQLite driver %s (SQLite %s) from %s.",
-                    probed["module"],
-                    probed["sqlite_version"],
-                    ENV_OVERRIDE,
-                )
-                return module, probed
-            logger.warning(
-                "%s=%s was refused: it is missing DB-API surface or its "
-                "linked SQLite still has the WAL-reset bug "
-                "(https://sqlite.org/wal.html#walresetbug) — falling back "
-                "to automatic selection.",
-                ENV_OVERRIDE,
-                override,
-            )
 
     if not is_sqlite_wal_reset_vulnerable(stdlib_info):
         info.update(module="sqlite3", sqlite_version=stdlib_version, wal_safe=True)
@@ -227,7 +172,7 @@ def select_sqlite_module(
         probed = probe_sqlite_module(module)
         if probed is None:
             continue
-        probed.update(stdlib_sqlite_version=stdlib_version, override=False, wal_safe=True)
+        probed.update(stdlib_sqlite_version=stdlib_version, wal_safe=True)
         logger.info(
             "stdlib SQLite %s has the WAL-reset bug — using drop-in driver "
             "%s (SQLite %s) instead.",

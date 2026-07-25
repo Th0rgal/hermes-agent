@@ -839,8 +839,8 @@ def run_doctor(args):
                 f"SQLite {_sqlite_ver} (WAL-reset bug)",
                 "(new shared DBs use DELETE; prefer 3.51.3+ / 3.50.7 / 3.44.6, "
                 "or install a drop-in driver bundling a fixed SQLite — e.g. "
-                "pysqlite3-binary / sqlean.py once they ship 3.51.3+, or "
-                "HERMES_SQLITE_MODULE=<module> — auto-detected on restart; "
+                "pysqlite3-binary / sqlean.py once they ship 3.51.3+ — "
+                "auto-detected on restart; "
                 "see https://sqlite.org/wal.html#walresetbug)",
             )
         else:

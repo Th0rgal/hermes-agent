@@ -711,8 +711,8 @@ def _log_wal_reset_bug_once(
         "Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); "
         "`hermes update` alone may not change python-build-standalone's "
         "embedded SQLite, but installing a fixed drop-in driver (e.g. a "
-        "pysqlite3 or sqlean.py build bundling SQLite 3.51.3+, or "
-        "HERMES_SQLITE_MODULE=<module>) is auto-detected on the next "
+        "pysqlite3 or sqlean.py build bundling SQLite 3.51.3+) is "
+        "auto-detected on the next "
         "start. See `hermes doctor`. This warning fires once per process "
         "per database.",
         db_label,

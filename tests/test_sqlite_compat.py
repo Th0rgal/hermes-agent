@@ -4,8 +4,7 @@ Production runs python-build-standalone whose embedded SQLite (3.50.4)
 carries the WAL-reset corruption bug, so hermes_state degrades state
 databases to journal_mode=DELETE.  The compat module restores WAL by
 selecting a fixed driver when one is available — and must never trust a
-candidate (including the HERMES_SQLITE_MODULE override) without verifying
-the *linked* library version.  All fixtures here are synthetic modules
+candidate without verifying the *linked* library version. All fixtures here are synthetic modules
 wrapping in-memory databases; no production data is touched.
 """
 
@@ -123,7 +122,7 @@ class TestSelection:
     def test_fixed_stdlib_is_preferred(self):
         stdlib = make_stdlib_stub(FIXED)
         module, info = compat.select_sqlite_module(
-            env={}, stdlib_module=stdlib, importer=_importer_for({})
+            stdlib_module=stdlib, importer=_importer_for({})
         )
         assert module is stdlib
         assert info["module"] == "sqlite3"
@@ -133,7 +132,6 @@ class TestSelection:
         stdlib = make_stdlib_stub(VULNERABLE)
         dropin = make_fake_module(FIXED, name="pysqlite3.dbapi2")
         module, info = compat.select_sqlite_module(
-            env={},
             stdlib_module=stdlib,
             importer=_importer_for({"pysqlite3.dbapi2": dropin}),
         )
@@ -146,7 +144,6 @@ class TestSelection:
         stdlib = make_stdlib_stub(VULNERABLE)
         dropin = make_fake_module((3, 51, 1), name="pysqlite3.dbapi2")
         module, info = compat.select_sqlite_module(
-            env={},
             stdlib_module=stdlib,
             importer=_importer_for({"pysqlite3.dbapi2": dropin}),
         )
@@ -161,47 +158,10 @@ class TestSelection:
             raise ImportError(name)
 
         module, info = compat.select_sqlite_module(
-            env={}, stdlib_module=stdlib, importer=_import
+            stdlib_module=stdlib, importer=_import
         )
         assert module is stdlib
         assert info["wal_safe"] is False
-
-    def test_env_override_selects_fixed_module(self):
-        stdlib = make_stdlib_stub(VULNERABLE)
-        override = make_fake_module(FIXED, name="my_backport")
-        module, info = compat.select_sqlite_module(
-            env={compat.ENV_OVERRIDE: "my_backport"},
-            stdlib_module=stdlib,
-            importer=_importer_for({"my_backport": override}),
-        )
-        assert module is override
-        assert info["override"] is True
-        assert info["wal_safe"] is True
-
-    def test_env_override_refused_when_vulnerable(self, caplog):
-        """An operator override never bypasses the version gate."""
-        stdlib = make_stdlib_stub(VULNERABLE)
-        override = make_fake_module(VULNERABLE, name="my_backport")
-        with caplog.at_level("WARNING", logger="hermes_sqlite_compat"):
-            module, info = compat.select_sqlite_module(
-                env={compat.ENV_OVERRIDE: "my_backport"},
-                stdlib_module=stdlib,
-                importer=_importer_for({"my_backport": override}),
-            )
-        assert module is stdlib
-        assert info["wal_safe"] is False
-        assert any("refused" in r.getMessage() for r in caplog.records)
-
-    def test_env_override_sqlite3_forces_stdlib(self):
-        stdlib = make_stdlib_stub(FIXED)
-        dropin = make_fake_module(FIXED, name="pysqlite3.dbapi2")
-        module, info = compat.select_sqlite_module(
-            env={compat.ENV_OVERRIDE: "sqlite3"},
-            stdlib_module=stdlib,
-            importer=_importer_for({"pysqlite3.dbapi2": dropin}),
-        )
-        assert module is stdlib
-        assert info["override"] is True
 
     def test_process_selection_is_wired(self):
         """The module-level selection is what hermes_state actually uses."""

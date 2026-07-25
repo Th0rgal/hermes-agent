@@ -400,6 +400,8 @@ def main():
 
     # Live-apply skins Hermes activates mid-conversation.
     server._ensure_skin_watcher()
+    # Announce scheduler-appended deliveries (session.delivery).
+    server._ensure_delivery_watcher()
 
     while True:
         raw = sys.stdin.readline()

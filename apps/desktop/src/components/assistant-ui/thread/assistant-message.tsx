@@ -74,6 +74,15 @@ export const AssistantMessage: FC<{
     return typeof delivery?.label === 'string' ? delivery.label : null
   })
 
+  // Epoch-ms selector (number, referentially stable) — only set for delivery
+  // rows, whose createdAt comes from the persisted row's timestamp.
+  const deliveryCreatedAt = useAuiState(s =>
+    s.message.metadata?.custom?.delivery ? (s.message.createdAt?.getTime() ?? null) : null
+  )
+
+  const deliveryTimeText =
+    deliveryCreatedAt !== null ? formatMessageTimestamp(deliveryCreatedAt, t.assistant.thread) : ''
+
   // Preview targets only materialize once the turn completes — while running
   // the selector returns '' (stable), so per-token flushes skip the regex
   // scan and the re-render it would cause.
@@ -107,6 +116,9 @@ export const AssistantMessage: FC<{
           <span className="flex min-w-0 max-w-[75%] items-center gap-1.5 rounded-full border border-(--ui-stroke-tertiary) px-2.5 py-0.5 text-[0.72rem] leading-5 text-(--ui-text-secondary)">
             <Clock aria-hidden className="size-3 shrink-0" />
             <span className="truncate">{deliveryLabel}</span>
+            {deliveryTimeText && (
+              <span className="shrink-0 tabular-nums text-(--ui-text-quaternary)">· {deliveryTimeText}</span>
+            )}
           </span>
           <div className="h-px flex-1 bg-(--ui-stroke-tertiary)" />
         </div>

@@ -9,6 +9,36 @@ from hermes_state import (
 )
 
 
+def test_observed_deliveries_since_lists_only_new_delivery_rows(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("desk-1", source="tui")
+        db.append_message("desk-1", role="user", content="start the watch")
+        db.append_message("desk-1", role="assistant", content="Watching.")
+        baseline = db.latest_message_id()
+        assert baseline > 0
+
+        db.append_message(
+            "desk-1",
+            role="assistant",
+            content="[Cron delivery: watcher]\nBuild finished.",
+            observed=True,
+            delivery_id="cron:tui:desk-1:j:r1",
+        )
+        # Ordinary turns after the baseline are not deliveries.
+        db.append_message("desk-1", role="assistant", content="Anything else?")
+
+        rows = db.list_observed_deliveries_since(baseline)
+        assert [row["session_id"] for row in rows] == ["desk-1"]
+        assert rows[0]["content"].startswith("[Cron delivery: watcher]")
+        assert rows[0]["id"] > baseline
+
+        # The returned highwater excludes nothing on the next pass.
+        assert db.list_observed_deliveries_since(rows[-1]["id"] + 1) == []
+    finally:
+        db.close()
+
+
 def test_delivery_id_deduplicates_transcript_append(tmp_path):
     db = SessionDB(db_path=tmp_path / "state.db")
     try:

@@ -101,6 +101,10 @@ export type GatewayEventPayload = {
   // Lets the desktop app map runtime→stored for background sessions it hasn't
   // opened, so the sidebar working indicator updates without opening the chat.
   stored_session_id?: string
+  // session.delivery — a scheduler-appended durable delivery (cron/callback)
+  // landed in the stored session. Announced by the gateway's delivery watcher.
+  delivery_label?: string
+  delivery_message_id?: number
   // moa.reference / moa.aggregating (Mixture of Agents per-model relay)
   label?: string
   index?: number

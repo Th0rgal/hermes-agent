@@ -1222,4 +1222,22 @@ describe('userTurnIdentityText', () => {
   it('strips context warnings alongside the attached context', () => {
     expect(userTurnIdentityText(`${typed}\n\n--- Context Warnings ---\nsome warning`)).toBe(typed)
   })
+
+  it('matches a newline-preserving optimistic row against a backend-reflowed stored row', () => {
+    // Real case (session 20260724_180921): the backend reflows a relayed
+    // prompt (newlines → spaces) when persisting, while the optimistic
+    // composer row keeps the typed newlines. Same turn — must compare equal.
+    const optimistic = 'I was reported:\nRun this shadow campaign on the DGX\nDownload the complete shadow hotfix v3'
+
+    const storedReflowed =
+      'I was reported: Run this shadow campaign on the DGX Download the complete shadow hotfix v3' +
+      '\n\n--- Attached Context ---\n\n📎 @file:.hermes/desktop-attachments/collatz_shadow_hotfix_v3.tar.gz (application/x-tar)'
+
+    const projected =
+      '@file:.hermes/desktop-attachments/collatz_shadow_hotfix_v3.tar.gz\n\n' +
+      'I was reported: Run this shadow campaign on the DGX Download the complete shadow hotfix v3'
+
+    expect(userTurnIdentityText(optimistic)).toBe(userTurnIdentityText(storedReflowed))
+    expect(userTurnIdentityText(optimistic)).toBe(userTurnIdentityText(projected))
+  })
 })

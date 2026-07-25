@@ -598,6 +598,85 @@ describe('preserveLocalAssistantErrors', () => {
     ])
   })
 
+  it('re-inserts a preserved error at its historical position, not the tail', () => {
+    // Stored history has moved past the failed turn (two newer turns landed).
+    const nextMessages: ChatMessage[] = [
+      {
+        id: 'stored-user-1',
+        parts: [{ text: 'first prompt', type: 'text' }],
+        role: 'user'
+      },
+      {
+        id: 'stored-assistant-1',
+        parts: [{ text: 'first answer', type: 'text' }],
+        role: 'assistant'
+      },
+      {
+        id: 'stored-user-2',
+        parts: [{ text: 'second prompt', type: 'text' }],
+        role: 'user'
+      },
+      {
+        id: 'stored-assistant-2',
+        parts: [{ text: 'second answer', type: 'text' }],
+        role: 'assistant'
+      }
+    ]
+
+    // The local view still holds the failed turn where it happened: after the
+    // first exchange, before the second one.
+    const currentMessages: ChatMessage[] = [
+      nextMessages[0],
+      nextMessages[1],
+      {
+        error: 'API call failed after 3 retries: Internal server error',
+        id: 'assistant-stream-err',
+        parts: [{ text: 'partial reasoning', type: 'reasoning' }],
+        role: 'assistant'
+      },
+      nextMessages[2],
+      nextMessages[3]
+    ]
+
+    const merged = preserveLocalAssistantErrors(nextMessages, currentMessages)
+
+    expect(merged.map(message => message.id)).toEqual([
+      'stored-user-1',
+      'stored-assistant-1',
+      'assistant-stream-err',
+      'stored-user-2',
+      'stored-assistant-2'
+    ])
+  })
+
+  it('does not drift a preserved error further down across repeated hydrates', () => {
+    const nextMessages: ChatMessage[] = [
+      {
+        id: 'stored-user-1',
+        parts: [{ text: 'prompt', type: 'text' }],
+        role: 'user'
+      },
+      {
+        id: 'stored-assistant-1',
+        parts: [{ text: 'answer', type: 'text' }],
+        role: 'assistant'
+      }
+    ]
+
+    const errored: ChatMessage = {
+      error: 'HTTP 401: Invalid Authentication',
+      id: 'assistant-error-1',
+      parts: [],
+      role: 'assistant'
+    }
+
+    const firstPass = preserveLocalAssistantErrors(nextMessages, [nextMessages[0], errored, nextMessages[1]])
+    const secondPass = preserveLocalAssistantErrors(nextMessages, firstPass)
+
+    expect(secondPass.map(message => message.id)).toEqual(firstPass.map(message => message.id))
+    expect(firstPass.map(message => message.id)).toEqual(['stored-user-1', 'assistant-error-1', 'stored-assistant-1'])
+  })
+
   it('keeps local assistant error when hydrated message reuses same id', () => {
     const nextMessages: ChatMessage[] = [
       {

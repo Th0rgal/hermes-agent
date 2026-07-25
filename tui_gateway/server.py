@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -2876,6 +2877,70 @@ def _ensure_skin_watcher() -> None:
             _broadcast_skin_if_changed()
 
     threading.Thread(target=_loop, name="hermes-skin-watcher", daemon=True).start()
+
+
+_delivery_watcher_started = False
+_DELIVERY_SENTINEL_RE = re.compile(r"^\s*\[Cron delivery:\s*([^\]]*)\]")
+_DELIVERY_WATCH_INTERVAL_S = 1.5
+
+
+def _ensure_delivery_watcher() -> None:
+    """Broadcast ``session.delivery`` for durable rows the cron scheduler
+    appends to stored sessions from another process. Nothing else on this
+    websocket announces them, so without this the desktop only discovers a
+    delivery through its slow list polls — no chime, dark sidebar row. Same
+    lifecycle as the skin watcher: idempotent, started at gateway.ready."""
+    global _delivery_watcher_started
+    if _delivery_watcher_started:
+        return
+    _delivery_watcher_started = True
+
+    def _loop() -> None:
+        db = None
+        last_id = None
+        while True:
+            time.sleep(_DELIVERY_WATCH_INTERVAL_S)
+            try:
+                if db is None:
+                    from hermes_state import SessionDB
+
+                    db = SessionDB(read_only=True)
+                    last_id = None
+                if last_id is None:
+                    # Baseline at "now": announce only rows appended while
+                    # this watcher is alive, never replay history.
+                    last_id = db.latest_message_id()
+                    continue
+                rows = db.list_observed_deliveries_since(last_id)
+                if not rows:
+                    continue
+                last_id = max(int(r["id"]) for r in rows)
+                with _live_transports_lock:
+                    has_clients = bool(_live_transports)
+                if not has_clients:
+                    # Baseline advanced; nobody connected to tell.
+                    continue
+                for r in rows:
+                    match = _DELIVERY_SENTINEL_RE.match(str(r.get("content") or ""))
+                    if not match:
+                        continue
+                    _broadcast_global_event(
+                        "session.delivery",
+                        {
+                            "stored_session_id": str(r.get("session_id") or ""),
+                            "delivery_label": match.group(1).strip(),
+                            "delivery_message_id": int(r["id"]),
+                            "timestamp": r.get("timestamp"),
+                        },
+                    )
+            except Exception:
+                logger.debug("delivery watcher tick failed", exc_info=True)
+                # Reopen on the next tick — the db file may be mid-rotation.
+                db = None
+
+    threading.Thread(
+        target=_loop, name="hermes-delivery-watcher", daemon=True
+    ).start()
 
 
 def _resolve_model() -> str:

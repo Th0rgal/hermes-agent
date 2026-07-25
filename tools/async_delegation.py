@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 import threading
 import time
 import uuid
@@ -46,6 +45,9 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional
 
 from hermes_constants import get_hermes_home
+# state.db must always be opened through the selected WAL-safe driver —
+# see hermes_sqlite_compat.
+from hermes_sqlite_compat import sqlite3
 from tools.daemon_pool import DaemonThreadPoolExecutor
 from tools.thread_context import propagate_context_to_thread
 

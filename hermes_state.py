@@ -21,7 +21,6 @@ import logging
 import os
 import random
 import re
-import sqlite3
 import sys
 import threading
 import time
@@ -30,6 +29,11 @@ from pathlib import Path
 from agent.memory_manager import sanitize_context
 from agent.message_sanitization import _sanitize_surrogates
 from hermes_constants import get_hermes_home
+from hermes_sqlite_compat import (
+    connection_sqlite_version_info,
+    is_sqlite_wal_reset_vulnerable,
+    sqlite3,
+)
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 try:  # Hard dependency, but tolerate scaffold-phase imports before pip install.
@@ -543,30 +547,6 @@ def _enforce_macos_synchronous_full(conn: sqlite3.Connection) -> None:
         pass
 
 
-def is_sqlite_wal_reset_vulnerable(
-    version_info: Optional[tuple] = None,
-) -> bool:
-    """Return True when the linked SQLite library has the WAL-reset bug.
-
-    Upstream documents the bug in versions 3.7.0 through 3.51.2, fixed in
-    3.51.3+, with backports 3.50.7 and 3.44.6:
-    https://sqlite.org/wal.html#walresetbug
-
-    Pre-WAL libraries (< 3.7.0) cannot hit the race and are treated as safe.
-    """
-    info = version_info if version_info is not None else sqlite3.sqlite_version_info
-    if info < (3, 7, 0):
-        return False
-    if info >= (3, 51, 3):
-        return False
-    # Backports of the same fix on older release lines.
-    if (3, 50, 7) <= info < (3, 51, 0):
-        return False
-    if (3, 44, 6) <= info < (3, 45, 0):
-        return False
-    return True
-
-
 def sqlite_source_id() -> str:
     """Return ``sqlite_source_id()``, or an empty string when unavailable."""
     try:
@@ -614,9 +594,16 @@ def apply_wal_with_fallback(
     _on_disk_journal_mode.  That holds for both the NFS path and the
     WAL-reset vulnerability path.
     """
-    # Vulnerable SQLite: do not enable WAL on new/non-WAL files.
-    if is_sqlite_wal_reset_vulnerable():
-        return _apply_delete_for_wal_reset_bug(conn, db_label=db_label)
+    # Vulnerable SQLite: do not enable WAL on new/non-WAL files.  The gate
+    # probes the library linked behind *this connection* — not just the
+    # selected hermes_sqlite_compat driver — because callers may still hand
+    # us connections created by a different (possibly vulnerable) sqlite3
+    # module, and enabling WAL through one of those would re-open the race.
+    linked_version = connection_sqlite_version_info(conn)
+    if is_sqlite_wal_reset_vulnerable(linked_version):
+        return _apply_delete_for_wal_reset_bug(
+            conn, db_label=db_label, linked_version=linked_version
+        )
 
     # Read-only probe — no flock, no checkpoint, no WAL/SHM unlink.
     # Skipping the set-pragma prevents WAL-init from unlinking files other connections hold open.
@@ -652,6 +639,7 @@ def _apply_delete_for_wal_reset_bug(
     conn: sqlite3.Connection,
     *,
     db_label: str,
+    linked_version: Optional[tuple] = None,
 ) -> str:
     """Avoid enabling WAL when the linked SQLite has the WAL-reset bug.
 
@@ -669,7 +657,7 @@ def _apply_delete_for_wal_reset_bug(
     if current == "wal":
         # Do not TRUNCATE / journal_mode=DELETE while other processes may
         # still hold this WAL DB open — same safety rule as the NFS path.
-        _log_wal_reset_bug_once(db_label, kept_wal=True)
+        _log_wal_reset_bug_once(db_label, kept_wal=True, linked_version=linked_version)
         _apply_macos_checkpoint_barrier(conn)
         _enforce_macos_synchronous_full(conn)
         return "wal"
@@ -679,7 +667,7 @@ def _apply_delete_for_wal_reset_bug(
     except sqlite3.OperationalError:
         # Best-effort: DELETE is usually already the default for new files.
         pass
-    _log_wal_reset_bug_once(db_label, kept_wal=False)
+    _log_wal_reset_bug_once(db_label, kept_wal=False, linked_version=linked_version)
     return "delete"
 
 
@@ -687,6 +675,7 @@ def _log_wal_reset_bug_once(
     db_label: str,
     *,
     kept_wal: bool,
+    linked_version: Optional[tuple] = None,
 ) -> None:
     """Log once per (process, db_label) about the WAL-reset vulnerability path."""
     with _wal_reset_bug_warned_lock:
@@ -699,15 +688,23 @@ def _log_wal_reset_bug_once(
         if kept_wal
         else "using journal_mode=DELETE instead of enabling WAL"
     )
+    version_text = (
+        ".".join(str(part) for part in linked_version)
+        if linked_version
+        else sqlite3.sqlite_version
+    )
     logger.warning(
         "%s: linked SQLite %s is vulnerable to the WAL-reset corruption "
         "bug (https://sqlite.org/wal.html#walresetbug) — %s. "
         "Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); "
         "`hermes update` alone may not change python-build-standalone's "
-        "embedded SQLite. See `hermes doctor`. This warning fires once "
-        "per process per database.",
+        "embedded SQLite, but installing a fixed drop-in driver (e.g. a "
+        "pysqlite3 or sqlean.py build bundling SQLite 3.51.3+, or "
+        "HERMES_SQLITE_MODULE=<module>) is auto-detected on the next "
+        "start. See `hermes doctor`. This warning fires once per process "
+        "per database.",
         db_label,
-        sqlite3.sqlite_version,
+        version_text,
         action,
     )
 
@@ -1702,6 +1699,10 @@ class SessionDB:
         self._fts_cjk_available = False
         self._fts_unavailable_warned = False
         self._conn = None
+        # Journal mode actually in effect ("wal" or "delete"; None for
+        # read-only attaches) — surfaced by doctor/diagnostics alongside
+        # the hermes_sqlite_compat driver selection.
+        self.journal_mode: Optional[str] = None
         try:
             if read_only:
                 # Read-only attach for cross-profile aggregation: SELECT-only,
@@ -1738,7 +1739,9 @@ class SessionDB:
                     isolation_level=None,
                 )
                 self._conn.row_factory = sqlite3.Row
-                apply_wal_with_fallback(self._conn, db_label="state.db")
+                self.journal_mode = apply_wal_with_fallback(
+                    self._conn, db_label="state.db"
+                )
                 self._conn.execute("PRAGMA foreign_keys=ON")
                 self._fts_cjk_loaded = load_fts5_cjk_extension(self._conn)
                 self._init_schema()

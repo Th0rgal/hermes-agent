@@ -745,20 +745,33 @@ def run_doctor(args):
     # SQLite across Python upgrades.
     try:
         import sqlite3
+        from hermes_sqlite_compat import compat_info
         from hermes_state import is_sqlite_wal_reset_vulnerable, sqlite_source_id
 
         _sqlite_ver = sqlite3.sqlite_version
+        _compat = compat_info()
         _sqlite_src = sqlite_source_id()
         _sqlite_src_short = (
             (_sqlite_src[:48] + "…") if len(_sqlite_src) > 48 else _sqlite_src
         )
-        if is_sqlite_wal_reset_vulnerable():
+        if _compat.get("module", "sqlite3") != "sqlite3":
+            # A WAL-safe drop-in driver was selected over the vulnerable
+            # stdlib build (see hermes_sqlite_compat).
+            check_ok(
+                f"SQLite {_compat.get('sqlite_version')} via "
+                f"{_compat.get('module')} (stdlib {_sqlite_ver} has the "
+                "WAL-reset bug; drop-in driver active)"
+            )
+        elif is_sqlite_wal_reset_vulnerable():
             # Warn-only: Hermes already refuses to enable WAL on fresh DBs.
             # Do not append to ``issues`` — users often cannot change the
             # SQLite embedded in python-build-standalone via `hermes update`.
             check_warn(
                 f"SQLite {_sqlite_ver} (WAL-reset bug)",
-                "(new shared DBs use DELETE; prefer 3.51.3+ / 3.50.7 / 3.44.6 — "
+                "(new shared DBs use DELETE; prefer 3.51.3+ / 3.50.7 / 3.44.6, "
+                "or install a drop-in driver bundling a fixed SQLite — e.g. "
+                "pysqlite3-binary / sqlean.py once they ship 3.51.3+, or "
+                "HERMES_SQLITE_MODULE=<module> — auto-detected on restart; "
                 "see https://sqlite.org/wal.html#walresetbug)",
             )
         else:
@@ -1390,7 +1403,9 @@ def run_doctor(args):
     state_db_path = hermes_home / "state.db"
     if state_db_path.exists():
         try:
-            import sqlite3
+            # state.db connections must use the selected WAL-safe driver
+            # (hermes_sqlite_compat), same as SessionDB and the gateway.
+            from hermes_sqlite_compat import sqlite3
             conn = sqlite3.connect(str(state_db_path))
             cursor = conn.execute("SELECT COUNT(*) FROM sessions")
             count = cursor.fetchone()[0]
@@ -1452,6 +1467,7 @@ def run_doctor(args):
                     report = repair_state_db_schema(state_db_path)
                     if report.get("repaired"):
                         try:
+                            from hermes_sqlite_compat import sqlite3
                             conn = sqlite3.connect(str(state_db_path))
                             count = conn.execute(
                                 "SELECT COUNT(*) FROM sessions"
@@ -1498,7 +1514,7 @@ def run_doctor(args):
                     "(may indicate missed checkpoints)"
                 )
                 if should_fix:
-                    import sqlite3
+                    from hermes_sqlite_compat import sqlite3
                     conn = sqlite3.connect(str(state_db_path))
                     conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
                     conn.close()

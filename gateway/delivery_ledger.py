@@ -43,12 +43,15 @@ import hashlib
 import json
 import logging
 import os
-import sqlite3
 import threading
 import time
 from typing import Any, Dict, List, Optional
 
 from hermes_constants import get_hermes_home
+# All Hermes connections to state.db must come from the same driver: mixing
+# a WAL-safe drop-in with a vulnerable stdlib sqlite3 on one WAL database
+# would re-open the WAL-reset race (see hermes_sqlite_compat).
+from hermes_sqlite_compat import sqlite3
 
 logger = logging.getLogger(__name__)
 

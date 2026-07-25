@@ -181,6 +181,52 @@ function handleTransition(previous: ClientSessionState | null, next: ClientSessi
   }
 }
 
+/** Cron/callback deliveries are appended to a stored session by the scheduler
+ *  process — there is no runtime session and no busy→settled transition, so
+ *  the unread marker in handleTransition never fires for them. The session
+ *  list poll calls this with the previous and freshly fetched rows: a row
+ *  whose message_count grew while the session sat idle and unopened gets the
+ *  same unread cue as a finished background turn. */
+export function markSilentSessionActivity(
+  previous: readonly { id: string; message_count?: number }[],
+  next: readonly { id: string; message_count?: number }[]
+): void {
+  const previousCounts = new Map(
+    previous.filter(s => typeof s.message_count === 'number').map(s => [s.id, s.message_count as number])
+  )
+
+  if (!previousCounts.size) {
+    return
+  }
+
+  const working = new Set($workingSessionIds.get())
+  const selected = $selectedStoredSessionId.get()
+  const unread = $unreadFinishedSessionIds.get()
+  const added: string[] = []
+
+  for (const session of next) {
+    const before = previousCounts.get(session.id)
+
+    if (before === undefined || typeof session.message_count !== 'number' || session.message_count <= before) {
+      continue
+    }
+
+    // A working session's growth is its own turn — the settle transition owns
+    // that unread cue. The selected session is being looked at right now.
+    if (session.id === selected || working.has(session.id) || unread.includes(session.id)) {
+      continue
+    }
+
+    if (!added.includes(session.id)) {
+      added.push(session.id)
+    }
+  }
+
+  if (added.length) {
+    $unreadFinishedSessionIds.set([...unread, ...added])
+  }
+}
+
 /** Publish one session's state. Automatically fires transition side-effects
  *  (watchdog arm/disarm, settle grace, unread marker, compression id rotation)
  *  by diffing previous vs next — callers never need to manually call a

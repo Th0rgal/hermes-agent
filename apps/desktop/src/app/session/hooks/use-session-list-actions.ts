@@ -28,6 +28,7 @@ import {
   setSessionsLoading,
   setSessionsTotal
 } from '@/store/session'
+import { markSilentSessionActivity } from '@/store/session-states'
 import { $workingSessionIds, getRecentlySettledSessionIds } from '@/store/session-states'
 
 // The recents list is local-only: cron rows have their own section, and each
@@ -192,6 +193,11 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
               s => !tombstones.has(s.id) && !(s._lineage_root_id && tombstones.has(s._lineage_root_id))
             )
           : recents.sessions
+
+        // Scheduler-appended deliveries grow a session's transcript without a
+        // turn; diff the fresh rows against the current ones so those sessions
+        // pick up the unread dot (see markSilentSessionActivity).
+        markSilentSessionActivity($sessions.get(), incoming)
 
         // Signature-gate the swap (same pattern as cron/messaging): a refresh
         // that returns content-identical rows must keep the previous array

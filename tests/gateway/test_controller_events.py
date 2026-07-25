@@ -265,6 +265,17 @@ class TestBatcher:
         assert len(flushed) == 9  # 1 shared + 8 unique
         assert len({dedupe_key(e) for e in flushed}) == 9
 
+    def test_accept_many_dedupes_without_touching_pending_queue(self):
+        batcher = ControllerEventBatcher(window_seconds=300)
+        queued = UserNotification(text="queued elsewhere")
+        batcher.add(queued, now=100.0)
+
+        event = UserNotification(text="call local")
+        accepted = batcher.accept_many([event, event], now=100.0)
+
+        assert accepted == [event]
+        assert batcher.flush() == [queued]
+
 
 class TestEmission:
     def test_sink_receives_event(self):

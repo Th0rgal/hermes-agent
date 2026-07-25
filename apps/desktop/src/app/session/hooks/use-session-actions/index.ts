@@ -285,6 +285,16 @@ export function useSessionActions({
       const isCurrentResume = () =>
         resumeRequestRef.current === requestId && selectedStoredSessionIdRef.current === storedSessionId
 
+      // Which stored session the $messages view showed when this resume began
+      // — captured before the ref flips below. The cold path clears the view,
+      // but the warm-cache fall-throughs reach the full resume with the
+      // PREVIOUS thread still in $messages; merging its local errors would
+      // graft that thread's failed turn onto this one. Only carry errors
+      // across a same-session re-resume (reconnect / retry).
+      const previousStoredSessionId = selectedStoredSessionIdRef.current
+
+      const localErrorBaseline = () => (previousStoredSessionId === storedSessionId ? $messages.get() : [])
+
       // Paint the click before the profile-resolve / gateway-swap awaits below,
       // so there's zero dead air: highlight the row instantly (the sidebar reads
       // $selectedStoredSessionId) and, for a cold target, drop the previous
@@ -480,7 +490,7 @@ export function useSessionActions({
             const storedMessages = await prefetchPromise
 
             if (isCurrentResume()) {
-              localSnapshot = preserveLocalAssistantErrors(toChatMessages(storedMessages.messages), $messages.get())
+              localSnapshot = preserveLocalAssistantErrors(toChatMessages(storedMessages.messages), localErrorBaseline())
 
               if (!chatMessageArraysEquivalent($messages.get(), localSnapshot)) {
                 setMessages(localSnapshot)
@@ -510,7 +520,7 @@ export function useSessionActions({
             : (() => {
                 const resumedMessages = preserveLocalAssistantErrors(
                   reconcileResumeMessages(toChatMessages(resumed.messages), currentMessages),
-                  currentMessages
+                  localErrorBaseline()
                 )
 
                 return chatMessageArraysEquivalent(currentMessages, resumedMessages) ? currentMessages : resumedMessages
@@ -522,7 +532,7 @@ export function useSessionActions({
         const messagesForView =
           preferredMessages === currentMessages
             ? currentMessages
-            : preserveLocalAssistantErrors(preferredMessages, currentMessages)
+            : preserveLocalAssistantErrors(preferredMessages, localErrorBaseline())
 
         if (sessionShouldHaveTranscript(stored) && messagesForView.length === 0) {
           setActiveSessionId(null)
@@ -574,7 +584,7 @@ export function useSessionActions({
             return
           }
 
-          setMessages(preserveLocalAssistantErrors(toChatMessages(fallback.messages), $messages.get()))
+          setMessages(preserveLocalAssistantErrors(toChatMessages(fallback.messages), localErrorBaseline()))
         } catch (e) {
           // Fallback also failed: nothing to paint. Leave whatever messages are
           // already shown and fall through to arm the resume-failure latch so

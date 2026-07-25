@@ -328,6 +328,23 @@ def _is_cron_silence_response(text: str) -> bool:
 
     return is_autonomous_silence_response(text)
 
+
+def _emit_controller_event(event_factory) -> None:
+    """Best-effort structured controller-event emission.
+
+    ``event_factory`` receives the ``gateway.controller_events`` module and
+    returns the event, so callers pay construction cost only when the module
+    imports cleanly. Never raises: structured observability must not be able
+    to break job firing or delivery.
+    """
+    try:
+        from gateway import controller_events as ce
+
+        ce.emit_controller_event(event_factory(ce))
+    except Exception:
+        logger.debug("controller event emission skipped", exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Persistent thread pool for parallel cron jobs.
 # The tick function submits jobs here and returns immediately so the ticker
@@ -1306,6 +1323,17 @@ def _resolve_project_route_target(job: dict, project_token: str) -> Optional[dic
             job.get("id", "?"), token, e,
         )
         return None
+
+    # Structured progress beat: the explicit route resolved to a concrete
+    # local session (silent — the delivered content itself is the
+    # user-visible artifact; this records the routing fact for audit).
+    _emit_controller_event(lambda ce: ce.ProjectProgress(
+        project=token,
+        stage="route_resolved",
+        session_id=str(target.session_id),
+        silent=True,
+        ts=time.time(),
+    ))
 
     if target.source in _LOCAL_SESSION_PLATFORMS:
         return _local_session_delivery_target(target.source, target.session_id)
@@ -4181,6 +4209,13 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
         # becomes running only immediately before the actual run.
         mark_execution_running(execution_id)
 
+        _emit_controller_event(lambda ce: ce.ControllerWakeup(
+            reason="cron_fire",
+            job_id=str(job.get("id", "")),
+            job_name=str(job.get("name", "")),
+            ts=time.time(),
+        ))
+
         # Run the job under the profile's secret scope. get_secret() fails
         # closed outside a scope once profile isolation is in play (multiple
         # gateway profiles / room→profile multiplexing), and cron fires from
@@ -4265,6 +4300,15 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             if should_deliver and success and _is_cron_silence_response(deliver_content):
                 logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
                 should_deliver = False
+                # Record the suppression as a structured fact (silent=True →
+                # audit-only, never platform-delivered) so silence is
+                # observable without re-parsing marker strings downstream.
+                _emit_controller_event(lambda ce: ce.ReconciliationEvent(
+                    kind="silent_suppression",
+                    subject=str(job.get("id", "")),
+                    detail="cron silence marker suppressed delivery",
+                    ts=time.time(),
+                ))
 
             if should_deliver:
                 unresolved_origin = (

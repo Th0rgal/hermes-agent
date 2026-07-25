@@ -16,6 +16,11 @@ import type { GatewayRequester } from '../types'
 // the background gateway (Telegram, WeChat, Discord, …) — neither signals the
 // desktop websocket, so poll the bounded lists while the app is visible.
 const CRON_POLL_INTERVAL_MS = 30_000
+// Cron/callback deliveries are appended by the scheduler straight into stored
+// sessions — nothing rides this window's websocket. Polling the sidebar list
+// lets refreshSessions' silent-growth diff flip the unread dot on the
+// delivered-to row (markSilentSessionActivity).
+const SESSIONS_POLL_INTERVAL_MS = 30_000
 const MESSAGING_POLL_INTERVAL_MS = 10_000
 const ACTIVE_MESSAGING_SESSION_POLL_INTERVAL_MS = 5_000
 // Match the TUI's live-session refresh cadence. Auto-compression can rotate a
@@ -220,6 +225,16 @@ export function useBackgroundSync({
 
     return visiblePoll(CRON_POLL_INTERVAL_MS, () => void refreshCronJobs())
   }, [gatewayState, refreshCronJobs])
+
+  // Keep the sidebar session list live so scheduler-appended deliveries can
+  // mark their target row unread (see SESSIONS_POLL_INTERVAL_MS above).
+  useEffect(() => {
+    if (gatewayState !== 'open') {
+      return
+    }
+
+    return visiblePoll(SESSIONS_POLL_INTERVAL_MS, () => void refreshSessions())
+  }, [gatewayState, refreshSessions])
 
   // Keep the messaging-platform session lists live (inbound turns are written
   // by the gateway, not the desktop websocket).

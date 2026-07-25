@@ -34,6 +34,8 @@ import {
   $currentCwd,
   $currentModel,
   $currentProvider,
+  $selectedStoredSessionId,
+  pingSessionDelivery,
   sessionMatchesStoredId,
   setCurrentBranch,
   setCurrentCwd,
@@ -46,6 +48,7 @@ import {
   setTurnStartedAt,
   setYoloActive
 } from '@/store/session'
+import { markSessionUnread } from '@/store/session-states'
 import { clearSessionSubagents, pruneDelegateFallbackSubagents, upsertSubagent } from '@/store/subagents'
 import { clearActiveSessionTodos } from '@/store/todos'
 import { recordToolDiff } from '@/store/tool-diffs'
@@ -251,6 +254,26 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
 
         if (fromActiveProfile) {
           ingestBackendSkin(payload as HermesSkin | undefined, { apply: true })
+        }
+
+        return
+      } else if (event.type === 'session.delivery') {
+        // A cron/callback delivery was appended to a stored session by the
+        // scheduler (another process) — announce it like a finished reply:
+        // same chime (muted/deduped by playCompletionSound itself), unread
+        // dot when the session is in the background, and a ping so the open
+        // transcript refreshes now instead of at the next visibility poll.
+        const deliveredTo =
+          typeof payload?.stored_session_id === 'string' ? payload.stored_session_id.trim() : ''
+
+        if (deliveredTo) {
+          playCompletionSound(`delivery:${payload?.delivery_message_id ?? deliveredTo}`)
+
+          if ($selectedStoredSessionId.get() !== deliveredTo) {
+            markSessionUnread(deliveredTo)
+          }
+
+          pingSessionDelivery(deliveredTo)
         }
 
         return

@@ -2,7 +2,13 @@ import { useEffect } from 'react'
 
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { refreshActiveProfile } from '@/store/profile'
-import { $activeSessionId, $currentCwd, setCurrentCwd } from '@/store/session'
+import {
+  $activeSessionId,
+  $currentCwd,
+  $lastDeliveryPing,
+  $selectedStoredSessionId,
+  setCurrentCwd
+} from '@/store/session'
 import {
   $sessionStates,
   publishSessionState,
@@ -235,6 +241,28 @@ export function useBackgroundSync({
 
     return visiblePoll(SESSIONS_POLL_INTERVAL_MS, () => void refreshSessions())
   }, [gatewayState, refreshSessions])
+
+  // Instant follow-up on a websocket-announced delivery (session.delivery):
+  // re-sort the sidebar now, and re-fetch the open transcript when it is the
+  // delivered-to session — no waiting for the next visibility poll. listen()
+  // (not subscribe()) so re-mounting never replays the last ping.
+  useEffect(() => {
+    if (gatewayState !== 'open') {
+      return
+    }
+
+    return $lastDeliveryPing.listen(ping => {
+      if (!ping) {
+        return
+      }
+
+      void refreshSessions()
+
+      if (ping.sessionId === $selectedStoredSessionId.get()) {
+        void refreshActiveStoredTranscript()
+      }
+    })
+  }, [gatewayState, refreshActiveStoredTranscript, refreshSessions])
 
   // Keep the messaging-platform session lists live (inbound turns are written
   // by the gateway, not the desktop websocket).

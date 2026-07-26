@@ -1,6 +1,7 @@
 import type { ThreadMessageLike } from '@assistant-ui/react'
 import type { BillingBlock } from '@hermes/shared'
 
+import { extractImageRefs } from '@/lib/embedded-images'
 import { dedupeGeneratedImageEchoesInParts } from '@/lib/generated-images'
 import { mediaDisplayLabel, mediaMarkdownHref } from '@/lib/media'
 import { normalize } from '@/lib/text'
@@ -116,6 +117,12 @@ export type GatewayEventPayload = {
   // message.complete — signals the final text was already previewed via
   // interim_assistant_callback, so the UI can settle instead of duplicating.
   response_previewed?: boolean
+  // message.complete with status "error" — `text` is streamed partial output
+  // (keep it visible), not the error string.
+  partial?: boolean
+  // message.complete with status "error" — the failed turn was retained
+  // backend-side and will replay through session.resume's inflight payload.
+  recoverable?: boolean
   // Structured billing wall forwarded on message.complete when a turn fails
   // with FailoverReason.billing (shape mirrors @hermes/shared BillingBlock).
   billing?: BillingBlock
@@ -361,16 +368,39 @@ function transcriptContent(displayKind: SessionMessage['display_kind'], content:
   return displayKind === 'hidden' ? null : content
 }
 
+// A remote backend older than this app serves display_metadata as raw JSON text,
+// and `in` throws on a primitive — which used to fail the whole session resume.
+function timelineTaskCount(metadata: SessionMessage['display_metadata']): number | undefined {
+  let parsed: unknown = metadata
+
+  if (typeof parsed === 'string') {
+    try {
+      parsed = JSON.parse(parsed)
+    } catch {
+      return undefined
+    }
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    return undefined
+  }
+
+  const count = (parsed as { task_count?: unknown }).task_count
+
+  return typeof count === 'number' ? count : undefined
+}
+
 function timelineDisplayContent(message: SessionMessage, content: string): string {
   if (message.display_kind === 'model_switch') {
     return 'model changed'
   }
 
+  if (message.display_kind === 'auto_continue') {
+    return 'resumed interrupted turn'
+  }
+
   if (message.display_kind === 'async_delegation_complete') {
-    const count =
-      message.display_metadata && 'task_count' in message.display_metadata
-        ? message.display_metadata.task_count
-        : undefined
+    const count = timelineTaskCount(message.display_metadata)
 
     return count === undefined
       ? 'background agent work finished'
@@ -973,7 +1003,9 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     const isObservedCronDelivery = message.role === 'user' && deliveryMatch !== null
 
     const durableDisplayRole: SessionMessage['role'] =
-      message.display_kind === 'model_switch' || message.display_kind === 'async_delegation_complete'
+      message.display_kind === 'model_switch' ||
+      message.display_kind === 'async_delegation_complete' ||
+      message.display_kind === 'auto_continue'
         ? 'system'
         : message.role
 
@@ -983,15 +1015,19 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
 
     const delivery =
       deliveryMatch && displayRole === 'assistant' ? { label: deliveryMatch[1].trim() || 'cron' } : undefined
-
     const rawDisplayContent = transcriptContent(
       message.display_kind,
       timelineDisplayContent(message, displayContentForMessage(displayRole, content))
     )
 
-    // The sentinel is provenance, not prose — the divider carries the label.
-    const displayContent =
+    // Persisted user turns carry `@image:<path>` directive lines inline in
+    // the text (see tui_gateway/server.py's persist-time rewrite). Pull those
+    // refs into the same attachment shape used by optimistic composer turns.
+    const imageRefExtraction = displayRole === 'user' && rawDisplayContent ? extractImageRefs(rawDisplayContent) : null
+    const sentinelFreeContent =
       delivery && rawDisplayContent ? rawDisplayContent.replace(CRON_DELIVERY_SENTINEL_RE, '') : rawDisplayContent
+    const displayContent = imageRefExtraction ? imageRefExtraction.cleanedText : sentinelFreeContent
+    const extractedAttachmentRefs = imageRefExtraction?.refs.length ? imageRefExtraction.refs : undefined
 
     const parts: ChatMessagePart[] = []
 
@@ -1012,7 +1048,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       parts.push(...message.tool_calls.map((call, callIndex) => toolPartFromStoredCall(call, callIndex)))
     }
 
-    if (!parts.length) {
+    if (!parts.length && !extractedAttachmentRefs?.length) {
       if (displayRole !== 'assistant') {
         flushPendingTools(index)
         activeAssistantIndex = null
@@ -1065,6 +1101,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       role: displayRole,
       parts,
       timestamp: message.timestamp,
+      ...(extractedAttachmentRefs ? { attachmentRefs: extractedAttachmentRefs } : {}),
       ...(delivery ? { delivery } : {})
     })
 
@@ -1078,7 +1115,9 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
   )
 
   return withUniqueToolCallIds(
-    withoutGeneratedImageEchoes.filter(m => chatMessageText(m).trim() || m.parts.some(part => part.type !== 'text'))
+    withoutGeneratedImageEchoes.filter(
+      m => chatMessageText(m).trim() || m.parts.some(part => part.type !== 'text') || m.attachmentRefs?.length
+    )
   )
 }
 

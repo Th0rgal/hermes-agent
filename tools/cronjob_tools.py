@@ -287,6 +287,18 @@ def _origin_from_env() -> Optional[Dict[str, str]]:
     from gateway.session_context import get_session_env
     origin_platform = get_session_env("HERMES_SESSION_PLATFORM")
     origin_chat_id = get_session_env("HERMES_SESSION_CHAT_ID")
+    origin_session_id = get_session_env("HERMES_SESSION_ID")
+
+    # Desktop/WebUI conversations have a durable SessionDB id but no gateway
+    # chat id. Treat that session id as the local delivery address so
+    # ``deliver=origin`` means the exact conversation that created or updated
+    # the cron, just as it does for Telegram/Discord chats.
+    if (
+        origin_platform in {"desktop", "webui"}
+        and origin_session_id
+        and not origin_chat_id
+    ):
+        origin_chat_id = origin_session_id
     if origin_platform and origin_chat_id:
         thread_id = get_session_env("HERMES_SESSION_THREAD_ID") or None
         if thread_id:
@@ -894,7 +906,12 @@ def cronjob(
             if name is not None:
                 updates["name"] = name
             if deliver is not None:
-                updates["deliver"] = _normalize_deliver_param(deliver)
+                normalized_deliver = _normalize_deliver_param(deliver)
+                updates["deliver"] = normalized_deliver
+                if normalized_deliver == "origin":
+                    current_origin = _origin_from_env()
+                    if current_origin:
+                        updates["origin"] = current_origin
             if skills is not None or skill is not None:
                 canonical_skills = _canonical_skills(skill, skills)
                 updates["skills"] = canonical_skills
@@ -953,6 +970,15 @@ def cronjob(
                 updates["enabled_toolsets"] = enabled_toolsets or None
             if attach_to_session is not None:
                 updates["attach_to_session"] = bool(attach_to_session)
+                if attach_to_session:
+                    # Updating an existing job from a Desktop conversation
+                    # must also refresh its durable return address. Previously
+                    # this only flipped the continuation/mirroring flag, so a
+                    # job with ``deliver=origin`` and ``origin=None`` kept
+                    # running successfully while every report was dropped.
+                    current_origin = _origin_from_env()
+                    if current_origin:
+                        updates["origin"] = current_origin
             if pause_after_delivery is not None:
                 updates["pause_after_delivery"] = bool(pause_after_delivery)
             if workdir is not None:

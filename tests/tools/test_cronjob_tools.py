@@ -309,6 +309,101 @@ class TestUnifiedCronjobTool:
         assert updated["job"]["name"] == "New Name"
         assert updated["job"]["schedule"] == "every 120m"
 
+    def test_desktop_create_captures_durable_session_as_origin(self):
+        from cron.jobs import get_job
+        from gateway.session_context import clear_session_vars, set_session_vars
+
+        tokens = set_session_vars(
+            platform="desktop", session_id="desktop-session-create"
+        )
+        try:
+            created = json.loads(
+                cronjob(
+                    action="create",
+                    prompt="Check",
+                    schedule="every 1h",
+                )
+            )
+        finally:
+            clear_session_vars(tokens)
+
+        stored = get_job(created["job_id"])
+        assert created["deliver"] == "origin"
+        assert stored["origin"] == {
+            "platform": "desktop",
+            "chat_id": "desktop-session-create",
+            "chat_name": None,
+            "thread_id": None,
+            "user_id": None,
+        }
+
+    def test_update_attach_refreshes_missing_desktop_origin(self):
+        from cron.jobs import get_job
+        from gateway.session_context import clear_session_vars, set_session_vars
+
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt="Check",
+                schedule="every 1h",
+                deliver="origin",
+            )
+        )
+        assert get_job(created["job_id"])["origin"] is None
+
+        tokens = set_session_vars(
+            platform="desktop", session_id="desktop-session-update"
+        )
+        try:
+            updated = json.loads(
+                cronjob(
+                    action="update",
+                    job_id=created["job_id"],
+                    attach_to_session=True,
+                )
+            )
+        finally:
+            clear_session_vars(tokens)
+
+        assert updated["success"] is True
+        stored = get_job(created["job_id"])
+        assert stored["attach_to_session"] is True
+        assert stored["origin"]["platform"] == "desktop"
+        assert stored["origin"]["chat_id"] == "desktop-session-update"
+
+    def test_update_deliver_origin_captures_current_desktop_without_attach(self):
+        from cron.jobs import get_job
+        from gateway.session_context import clear_session_vars, set_session_vars
+
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt="Check",
+                schedule="every 1h",
+                deliver="local",
+            )
+        )
+
+        tokens = set_session_vars(
+            platform="desktop", session_id="desktop-session-deliver-update"
+        )
+        try:
+            updated = json.loads(
+                cronjob(
+                    action="update",
+                    job_id=created["job_id"],
+                    deliver="origin",
+                )
+            )
+        finally:
+            clear_session_vars(tokens)
+
+        assert updated["success"] is True
+        stored = get_job(created["job_id"])
+        assert stored["deliver"] == "origin"
+        assert stored["origin"]["platform"] == "desktop"
+        assert stored["origin"]["chat_id"] == "desktop-session-deliver-update"
+
     def test_update_runtime_overrides_can_set_and_clear(self):
         created = json.loads(
             cronjob(

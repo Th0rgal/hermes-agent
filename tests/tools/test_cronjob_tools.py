@@ -371,6 +371,39 @@ class TestUnifiedCronjobTool:
         assert stored["origin"]["platform"] == "desktop"
         assert stored["origin"]["chat_id"] == "desktop-session-update"
 
+    def test_update_deliver_origin_captures_current_desktop_without_attach(self):
+        from cron.jobs import get_job
+        from gateway.session_context import clear_session_vars, set_session_vars
+
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt="Check",
+                schedule="every 1h",
+                deliver="local",
+            )
+        )
+
+        tokens = set_session_vars(
+            platform="desktop", session_id="desktop-session-deliver-update"
+        )
+        try:
+            updated = json.loads(
+                cronjob(
+                    action="update",
+                    job_id=created["job_id"],
+                    deliver="origin",
+                )
+            )
+        finally:
+            clear_session_vars(tokens)
+
+        assert updated["success"] is True
+        stored = get_job(created["job_id"])
+        assert stored["deliver"] == "origin"
+        assert stored["origin"]["platform"] == "desktop"
+        assert stored["origin"]["chat_id"] == "desktop-session-deliver-update"
+
     def test_update_runtime_overrides_can_set_and_clear(self):
         created = json.loads(
             cronjob(

@@ -618,10 +618,12 @@ const DESKTOP_PROFILE_CONFIG_PATH = path.join(app.getPath('userData'), 'active-p
 // Mirrors hermes_cli.profiles._PROFILE_ID_RE so we never hand the backend a
 // value its profile resolver would reject and exit on.
 const PROFILE_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
-// Branch we track for self-update. The GUI work has merged to main, so this
-// tracks main. User can also override at runtime via
-// hermesDesktop.updates.setBranch().
-const DEFAULT_UPDATE_BRANCH = 'main'
+// Track the branch this packaged Desktop was built from. Official builds are
+// stamped ``main`` while our production fork is stamped ``production``; using
+// the stamp prevents the updater from silently replacing a fork build with
+// upstream after the first update. Dev/fallback builds still default to main,
+// and users can override the value via hermesDesktop.updates.setBranch().
+const DEFAULT_UPDATE_BRANCH = INSTALL_STAMP?.branch || 'main'
 // desktop.log lives under HERMES_HOME/logs/ so it sits next to agent.log,
 // errors.log, gateway.log produced by hermes_logging.setup_logging — one log
 // directory per user, regardless of which UI surface produced the line.

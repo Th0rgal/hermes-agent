@@ -13,6 +13,7 @@ import { coerceGatewayText, coerceThinkingText, normalizePersonalityValue } from
 import { playCompletionSound } from '@/lib/completion-sound'
 import { resolveGatewayEventSessionId } from '@/lib/gateway-events'
 import { triggerHaptic } from '@/lib/haptics'
+import { nextLiveMessageId } from '@/lib/live-message-id'
 import { modelOptionsQueryKey } from '@/lib/model-options'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
 import { invalidateSlashCompletions } from '@/lib/slash-completion-cache'
@@ -1095,7 +1096,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
             messages: [
               ...state.messages,
               {
-                id: `review-summary-${Date.now()}`,
+                id: nextLiveMessageId('review-summary'),
                 role: 'system',
                 parts: [textPart(text)],
                 timestamp: Math.floor(Date.now() / 1000)

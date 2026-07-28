@@ -5,6 +5,7 @@ import type { Translations } from '@/i18n'
 import { type ChatMessage, textPart } from '@/lib/chat-messages'
 import { optimisticAttachmentRef } from '@/lib/chat-runtime'
 import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
+import { nextLiveMessageId } from '@/lib/live-message-id'
 import { setMutableRef } from '@/lib/mutable-ref'
 import {
   isVoicePlaybackActive,
@@ -692,7 +693,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             messages: [
               ...state.messages,
               {
-                id: `assistant-error-${Date.now()}`,
+                id: nextLiveMessageId('assistant-error'),
                 role: 'assistant',
                 parts: [],
                 error: message || copy.promptFailed,

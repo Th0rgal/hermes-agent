@@ -20,6 +20,7 @@ import {
   generatedImageEchoSources,
   stripGeneratedImageEchoes
 } from '@/lib/generated-images'
+import { nextLiveMessageId } from '@/lib/live-message-id'
 import { parseTodos } from '@/lib/todos'
 import { dispatchNativeNotification } from '@/store/native-notifications'
 import { isDiskFullErrorMessage, notifyError } from '@/store/notifications'
@@ -58,10 +59,10 @@ interface QueuedStreamDeltas {
 
 // Date.now() alone can collide when an interim seal and the next segment's
 // first delta land in the same millisecond — the new segment would then find
-// the sealed bubble by id and append into it instead of starting fresh.
-let streamMessageSeq = 0
-
-const nextStreamMessageId = (prefix: string) => `${prefix}-${Date.now()}-${++streamMessageSeq}`
+// the sealed bubble by id and append into it instead of starting fresh. The
+// shared counter also keeps completion/error bubbles unique when a burst of
+// gateway events settles several of them in the same millisecond.
+const nextStreamMessageId = nextLiveMessageId
 
 export function useMessageStream({
   activeGatewayProfile = 'default',
@@ -590,7 +591,7 @@ export function useMessageStream({
         }
 
         const newAssistantFromCompletion = (): ChatMessage => ({
-          id: `assistant-${Date.now()}`,
+          id: nextStreamMessageId('assistant'),
           role: 'assistant',
           parts: completionError && !keepFailedPartialText ? [] : [assistantTextPart(finalText)],
           branchGroupId: state.pendingBranchGroup ?? undefined,
@@ -706,7 +707,7 @@ export function useMessageStream({
   const failAssistantMessage = useCallback(
     (sessionId: string, errorMessage: string) => {
       updateSessionState(sessionId, state => {
-        const streamId = state.streamId ?? `assistant-error-${Date.now()}`
+        const streamId = state.streamId ?? nextStreamMessageId('assistant-error')
         const groupId = state.pendingBranchGroup ?? undefined
         const prev = state.messages
         const error = errorMessage.trim() || 'Hermes reported an error'

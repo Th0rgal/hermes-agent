@@ -17,6 +17,7 @@ export function useRuntimeMessageRepository(messages: ChatMessage[]): ExportedMe
   return useMemo(() => {
     const items: { message: ThreadMessage; parentId: string | null }[] = []
     const branchParentByGroup = new Map<string, string | null>()
+    const seenIds = new Set<string>()
     let visibleParentId: string | null = null
     let headId: string | null = null
 
@@ -32,17 +33,27 @@ export function useRuntimeMessageRepository(messages: ChatMessage[]): ExportedMe
       }
 
       const cachedMessage = cacheRef.current.get(message)
-      const runtimeMessage = cachedMessage ?? toRuntimeMessage(message)
+      let runtimeMessage = cachedMessage ?? toRuntimeMessage(message)
 
       if (!cachedMessage) {
         cacheRef.current.set(message, runtimeMessage)
       }
 
+      // A duplicate id makes MessageRepository.link throw and takes the whole
+      // chat surface down in its error boundary — unrecoverably, since Retry
+      // rebuilds the same repository. Ids are supposed to be unique upstream;
+      // if one slips through anyway, render the message under a suffixed id
+      // instead of crashing. Not cached: the remap depends on list position.
+      if (seenIds.has(runtimeMessage.id)) {
+        runtimeMessage = { ...runtimeMessage, id: `${runtimeMessage.id}~dup${items.length}` }
+      }
+
+      seenIds.add(runtimeMessage.id)
       items.push({ message: runtimeMessage, parentId })
 
       if (!message.hidden) {
-        visibleParentId = message.id
-        headId = message.id
+        visibleParentId = runtimeMessage.id
+        headId = runtimeMessage.id
       }
     }
 

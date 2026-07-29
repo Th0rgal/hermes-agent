@@ -4553,6 +4553,10 @@ def _with_sandboxed_mission_origin(
     from gateway.session_context import get_session_env
 
     enriched = dict(args)
+    requested_merge_authority = enriched.pop("request_merge_authority", False) is True
+    # Hidden fields are owned by this trusted client, never by model output.
+    enriched.pop("may_merge", None)
+    enriched.pop("merge_authority_source", None)
     session_id = get_session_env("HERMES_SESSION_ID", "").strip()
     platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip()
     if session_id:
@@ -4563,6 +4567,25 @@ def _with_sandboxed_mission_origin(
         enriched["origin_platform"] = platform
     else:
         enriched.pop("origin_platform", None)
+    if requested_merge_authority:
+        enriched["request_merge_authority"] = True
+        github_pr = str(enriched.get("github_pr") or "").strip()
+        match = re.fullmatch(
+            r"([A-Za-z0-9_.-]{1,100})/([A-Za-z0-9_.-]{1,100})#([0-9]+)",
+            github_pr,
+        )
+        authority_source = os.getenv("HERMES_MERGE_AUTHORITY_SOURCE", "").strip()
+        allowed_repositories = {
+            item.strip().casefold()
+            for item in os.getenv("HERMES_MERGE_AUTHORITY_REPOSITORIES", "").split(",")
+            if item.strip()
+        }
+        if match and authority_source:
+            repository = f"{match.group(1)}/{match.group(2)}".casefold()
+            owner_wildcard = f"{match.group(1).casefold()}/*"
+            if repository in allowed_repositories or owner_wildcard in allowed_repositories:
+                enriched["may_merge"] = True
+                enriched["merge_authority_source"] = authority_source
     return enriched
 
 

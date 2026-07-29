@@ -7,6 +7,7 @@ don't see an unexplained "credentials ✓" line when their .env is empty.
 
 from __future__ import annotations
 
+import io
 import os
 import sys
 from pathlib import Path
@@ -248,6 +249,14 @@ def test_apply_external_secret_sources_status_line_suppresses_secret_names(
     assert "Bitwarden Secrets Manager: applied 2 secrets" in err
     assert "LEAK_THIS_API_KEY" not in err
     assert "LEAK_THIS_TOKEN" not in err
+
+
+def test_secret_source_status_does_not_fail_when_stderr_is_closed(monkeypatch):
+    closed_stderr = io.StringIO()
+    closed_stderr.close()
+    monkeypatch.setattr(sys, "stderr", closed_stderr)
+
+    env_loader._print_secret_source_status("diagnostic only")
 
 
 def test_external_secret_values_are_isolated_between_homes(tmp_path, monkeypatch):

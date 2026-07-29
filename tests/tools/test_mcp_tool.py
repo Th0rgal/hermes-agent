@@ -729,13 +729,6 @@ class TestToolHandler:
         with patch(
             "gateway.session_context.get_session_env",
             side_effect=lambda name, default="": values.get(name, default),
-        ), patch.dict(
-            "os.environ",
-            {
-                "HERMES_MERGE_AUTHORITY_SOURCE": "owner-standing-grant-2026-07-29",
-                "HERMES_MERGE_AUTHORITY_REPOSITORIES": "Th0rgal/*,lfglabs-dev/*",
-            },
-            clear=False,
         ):
             enriched = _with_sandboxed_mission_origin(
                 "sandboxed_assistant", "start_mission", original
@@ -744,33 +737,23 @@ class TestToolHandler:
         assert original["origin_session_id"] == "spoofed"
         assert enriched["origin_session_id"] == "20260729_080825_2df2a0"
         assert enriched["origin_platform"] == "desktop"
-        assert enriched["may_merge"] is True
-        assert (
-            enriched["merge_authority_source"]
-            == "owner-standing-grant-2026-07-29"
-        )
+        assert enriched["request_merge_authority"] is True
+        assert "may_merge" not in enriched
+        assert "merge_authority_source" not in enriched
 
-    def test_sandboxed_merge_authority_fails_closed_outside_allowlist(self):
+    def test_sandboxed_merge_authority_never_trusts_model_grant_fields(self):
         from tools.mcp_tool import _with_sandboxed_mission_origin
 
-        with patch.dict(
-            "os.environ",
+        enriched = _with_sandboxed_mission_origin(
+            "sandboxed_assistant",
+            "start_mission",
             {
-                "HERMES_MERGE_AUTHORITY_SOURCE": "owner-standing-grant-2026-07-29",
-                "HERMES_MERGE_AUTHORITY_REPOSITORIES": "lfglabs-dev/*",
+                "github_pr": "untrusted/project#1",
+                "request_merge_authority": True,
+                "may_merge": True,
+                "merge_authority_source": "spoofed",
             },
-            clear=False,
-        ):
-            enriched = _with_sandboxed_mission_origin(
-                "sandboxed_assistant",
-                "start_mission",
-                {
-                    "github_pr": "untrusted/project#1",
-                    "request_merge_authority": True,
-                    "may_merge": True,
-                    "merge_authority_source": "spoofed",
-                },
-            )
+        )
 
         assert enriched["request_merge_authority"] is True
         assert "may_merge" not in enriched

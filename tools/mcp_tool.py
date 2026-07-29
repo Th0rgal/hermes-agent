@@ -4569,23 +4569,6 @@ def _with_sandboxed_mission_origin(
         enriched.pop("origin_platform", None)
     if requested_merge_authority:
         enriched["request_merge_authority"] = True
-        github_pr = str(enriched.get("github_pr") or "").strip()
-        match = re.fullmatch(
-            r"([A-Za-z0-9_.-]{1,100})/([A-Za-z0-9_.-]{1,100})#([0-9]+)",
-            github_pr,
-        )
-        authority_source = os.getenv("HERMES_MERGE_AUTHORITY_SOURCE", "").strip()
-        allowed_repositories = {
-            item.strip().casefold()
-            for item in os.getenv("HERMES_MERGE_AUTHORITY_REPOSITORIES", "").split(",")
-            if item.strip()
-        }
-        if match and authority_source:
-            repository = f"{match.group(1)}/{match.group(2)}".casefold()
-            owner_wildcard = f"{match.group(1).casefold()}/*"
-            if repository in allowed_repositories or owner_wildcard in allowed_repositories:
-                enriched["may_merge"] = True
-                enriched["merge_authority_source"] = authority_source
     return enriched
 
 

@@ -4535,6 +4535,37 @@ def _mark_server_call_started(server: Any) -> None:
         mark_tool_call()
 
 
+def _with_sandboxed_mission_origin(
+    server_name: str, tool_name: str, args: dict,
+) -> dict:
+    """Attach task-local Hermes provenance to Sandboxed.sh mission creation.
+
+    These fields are injected below the model-facing schema. This prevents a
+    model from claiming a different conversation as the creator and lets
+    Sandboxed.sh attribute later GitHub mutations to the commissioning Hermes
+    session rather than only to the shared GitHub account.
+    """
+    if server_name not in {"sandboxed_assistant", "sandboxed-assistant"}:
+        return args
+    if tool_name != "start_mission" or not isinstance(args, dict):
+        return args
+
+    from gateway.session_context import get_session_env
+
+    enriched = dict(args)
+    session_id = get_session_env("HERMES_SESSION_ID", "").strip()
+    platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip()
+    if session_id:
+        enriched["origin_session_id"] = session_id
+    else:
+        enriched.pop("origin_session_id", None)
+    if platform:
+        enriched["origin_platform"] = platform
+    else:
+        enriched.pop("origin_platform", None)
+    return enriched
+
+
 def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """Return a sync handler that calls an MCP tool via the background loop.
 
@@ -4543,6 +4574,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """
 
     def _handler(args: dict, **kwargs) -> str:
+        args = _with_sandboxed_mission_origin(server_name, tool_name, args)
         # Circuit breaker: if this server has failed too many times
         # consecutively, short-circuit with a clear message so the model
         # stops retrying and uses alternative approaches (#10447).

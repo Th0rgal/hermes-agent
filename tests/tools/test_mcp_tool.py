@@ -711,6 +711,41 @@ class TestRunOnMcpLoop:
 class TestToolHandler:
     """Tool handlers are sync functions that schedule work on the MCP loop."""
 
+    def test_sandboxed_start_mission_injects_task_local_origin(self):
+        from tools.mcp_tool import _with_sandboxed_mission_origin
+
+        original = {"title": "Review PR", "origin_session_id": "spoofed"}
+        values = {
+            "HERMES_SESSION_ID": "20260729_080825_2df2a0",
+            "HERMES_SESSION_PLATFORM": "desktop",
+        }
+        with patch(
+            "gateway.session_context.get_session_env",
+            side_effect=lambda name, default="": values.get(name, default),
+        ):
+            enriched = _with_sandboxed_mission_origin(
+                "sandboxed_assistant", "start_mission", original
+            )
+
+        assert original["origin_session_id"] == "spoofed"
+        assert enriched["origin_session_id"] == "20260729_080825_2df2a0"
+        assert enriched["origin_platform"] == "desktop"
+
+    def test_mission_origin_is_not_injected_into_other_mcp_tools(self):
+        from tools.mcp_tool import _with_sandboxed_mission_origin
+
+        original = {"title": "Unrelated"}
+        assert (
+            _with_sandboxed_mission_origin("github", "start_mission", original)
+            is original
+        )
+        assert (
+            _with_sandboxed_mission_origin(
+                "sandboxed_assistant", "list_missions", original
+            )
+            is original
+        )
+
     def _patch_mcp_loop(self, coro_side_effect=None):
         """Return a patch for _run_on_mcp_loop that runs the coroutine directly."""
         def fake_run(coro_or_factory, timeout=30):

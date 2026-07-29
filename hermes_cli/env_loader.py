@@ -50,6 +50,20 @@ _SECRET_SOURCE_VALUES_BY_HOME: dict[str, dict[str, str]] = {}
 _APPLIED_HOMES: set[str] = set()
 
 
+def _print_secret_source_status(message: str) -> None:
+    """Emit best-effort secret-source telemetry without blocking env loading.
+
+    Long-running gateway processes may reload their environment from cron jobs
+    after a CLI capture context has already closed ``sys.stderr``.  Status
+    output is diagnostic only, so a closed or otherwise unwritable stream must
+    not abort the job before its controller logic runs.
+    """
+    try:
+        print(message, file=sys.stderr)
+    except (OSError, ValueError):
+        pass
+
+
 def get_secret_source(env_var: str) -> str | None:
     """Return the label of the secret source that supplied ``env_var``, if any.
 
@@ -459,20 +473,19 @@ def _apply_external_secret_sources(home_path: Path) -> None:
 
     for src in report.sources:
         if src.applied:
-            print(
+            _print_secret_source_status(
                 f"  {src.label}: applied {len(src.applied)} "
-                f"secret{'s' if len(src.applied) != 1 else ''}",
-                file=sys.stderr,
+                f"secret{'s' if len(src.applied) != 1 else ''}"
             )
         if src.result.error:
-            print(f"  {src.label}: {src.result.error}", file=sys.stderr)
+            _print_secret_source_status(f"  {src.label}: {src.result.error}")
             hint = _remediation_hint(src.name, src.result.error_kind, cfg)
             if hint:
-                print(f"  {src.label}: → {hint}", file=sys.stderr)
+                _print_secret_source_status(f"  {src.label}: → {hint}")
         for warn in src.result.warnings:
-            print(f"  {src.label}: {warn}", file=sys.stderr)
+            _print_secret_source_status(f"  {src.label}: {warn}")
     for conflict in report.conflicts:
-        print(f"  Secret sources: {conflict}", file=sys.stderr)
+        _print_secret_source_status(f"  Secret sources: {conflict}")
 
 
 def _remediation_hint(source_name: str, error_kind, secrets_cfg: dict) -> str:

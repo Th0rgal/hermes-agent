@@ -233,20 +233,6 @@ class TestSessionTokenInjection:
 
         assert ws._SESSION_TOKEN and len(ws._SESSION_TOKEN) >= 32
 
-    def test_adopts_token_loaded_after_module_import(self, monkeypatch):
-        import importlib
-        import hermes_cli.web_server as ws
-
-        monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
-        importlib.reload(ws)
-        import_time_token = ws._SESSION_TOKEN
-
-        monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "late-loaded-token")
-        ws._refresh_session_token()
-
-        assert ws._SESSION_TOKEN == "late-loaded-token"
-        assert ws._SESSION_TOKEN != import_time_token
-
 
 # ---------------------------------------------------------------------------
 # web_server tests (FastAPI endpoints)

@@ -305,6 +305,20 @@ def _apply_ssh_session_token(token: str) -> None:
         _SESSION_TOKEN = token
 
 
+def _refresh_session_token(ssh_session_token: Optional[str] = None) -> None:
+    """Adopt the final startup token after dotenv/secret-source loading.
+
+    ``web_server`` can be imported before external secret sources finish
+    populating ``os.environ``.  Re-read the environment at listen time so a
+    dashboard launched with ``HERMES_DASHBOARD_SESSION_TOKEN`` does not keep
+    the random import-time fallback and reject every Desktop request.
+    An explicit SSH bootstrap token remains authoritative when supplied.
+    """
+    _apply_ssh_session_token(
+        ssh_session_token or os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN", "")
+    )
+
+
 def _apply_ssh_owner_nonce(nonce: Optional[str]) -> None:
     global _SSH_OWNER_NONCE
     _SSH_OWNER_NONCE = nonce
@@ -19997,7 +20011,7 @@ def start_server(
     ``ssh_session_token`` and ``ssh_owner_nonce`` are process-local Desktop SSH
     bootstrap state. Neither is persisted or exported to child processes.
     """
-    _apply_ssh_session_token(ssh_session_token or "")
+    _refresh_session_token(ssh_session_token)
     _apply_ssh_owner_nonce(ssh_owner_nonce)
 
     import uvicorn

@@ -711,8 +711,8 @@ class TestRunOnMcpLoop:
 class TestToolHandler:
     """Tool handlers are sync functions that schedule work on the MCP loop."""
 
-    def test_sandboxed_start_mission_injects_task_local_origin(self):
-        from tools.mcp_tool import _with_sandboxed_mission_origin
+    def test_sandboxed_start_mission_sanitizes_authority_fields(self):
+        from tools.mcp_tool import _sanitize_sandboxed_start_mission
 
         original = {
             "title": "Review PR",
@@ -722,29 +722,21 @@ class TestToolHandler:
             "may_merge": True,
             "merge_authority_source": "spoofed",
         }
-        values = {
-            "HERMES_SESSION_ID": "20260729_080825_2df2a0",
-            "HERMES_SESSION_PLATFORM": "desktop",
-        }
-        with patch(
-            "gateway.session_context.get_session_env",
-            side_effect=lambda name, default="": values.get(name, default),
-        ):
-            enriched = _with_sandboxed_mission_origin(
-                "sandboxed_assistant", "start_mission", original
-            )
+        enriched = _sanitize_sandboxed_start_mission(
+            "sandboxed_assistant", "start_mission", original
+        )
 
         assert original["origin_session_id"] == "spoofed"
-        assert enriched["origin_session_id"] == "20260729_080825_2df2a0"
-        assert enriched["origin_platform"] == "desktop"
+        assert "origin_session_id" not in enriched
+        assert "origin_platform" not in enriched
         assert enriched["request_merge_authority"] is True
         assert "may_merge" not in enriched
         assert "merge_authority_source" not in enriched
 
     def test_sandboxed_merge_authority_never_trusts_model_grant_fields(self):
-        from tools.mcp_tool import _with_sandboxed_mission_origin
+        from tools.mcp_tool import _sanitize_sandboxed_start_mission
 
-        enriched = _with_sandboxed_mission_origin(
+        enriched = _sanitize_sandboxed_start_mission(
             "sandboxed_assistant",
             "start_mission",
             {
@@ -759,16 +751,16 @@ class TestToolHandler:
         assert "may_merge" not in enriched
         assert "merge_authority_source" not in enriched
 
-    def test_mission_origin_is_not_injected_into_other_mcp_tools(self):
-        from tools.mcp_tool import _with_sandboxed_mission_origin
+    def test_mission_sanitizer_does_not_touch_other_mcp_tools(self):
+        from tools.mcp_tool import _sanitize_sandboxed_start_mission
 
         original = {"title": "Unrelated"}
         assert (
-            _with_sandboxed_mission_origin("github", "start_mission", original)
+            _sanitize_sandboxed_start_mission("github", "start_mission", original)
             is original
         )
         assert (
-            _with_sandboxed_mission_origin(
+            _sanitize_sandboxed_start_mission(
                 "sandboxed_assistant", "list_missions", original
             )
             is original

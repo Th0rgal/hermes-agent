@@ -631,6 +631,13 @@ class TestMarkJobRun:
         updated = get_job(job["id"])
         assert updated["last_delivery_error"] is None
 
+    def test_delivery_signature_is_persisted_separately(self, tmp_cron_dir):
+        from cron.jobs import record_delivery_signature
+
+        job = create_job(prompt="Monitor", schedule="every 1h")
+        assert record_delivery_signature(job["id"], "a" * 64) is True
+        assert get_job(job["id"])["last_delivery_signature"] == "a" * 64
+
     def test_both_agent_and_delivery_error(self, tmp_cron_dir):
         """Agent fails AND delivery fails — both errors recorded."""
         job = create_job(prompt="Report", schedule="every 1h")

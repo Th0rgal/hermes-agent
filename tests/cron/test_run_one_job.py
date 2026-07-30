@@ -38,6 +38,7 @@ def _patch_pipeline(monkeypatch, *, success=True, output="out", final="final res
     monkeypatch.setattr(s, "save_job_output", fake_save)
     monkeypatch.setattr(s, "_deliver_result", fake_deliver)
     monkeypatch.setattr(s, "mark_job_run", fake_mark)
+    monkeypatch.setattr(s, "record_delivery_signature", lambda jid, sig: True)
     return calls
 
 
@@ -76,6 +77,45 @@ def test_run_one_job_silent_skips_delivery(monkeypatch):
     kinds = [c[0] for c in calls]
     assert "run_job" in kinds and "save" in kinds and "mark" in kinds
     assert "deliver" not in kinds
+
+
+def test_run_one_job_suppresses_unchanged_semantic_state(monkeypatch):
+    final = "Still blocked.\n[STATE_SIGNATURE: repo|pr7|abc|blocked|ci]"
+    _, signature = s._extract_state_signature(final)
+    calls = _patch_pipeline(monkeypatch, final=final)
+
+    s.run_one_job({
+        "id": "j-state",
+        "name": "monitor",
+        "last_delivery_signature": signature,
+    })
+
+    assert "deliver" not in [call[0] for call in calls]
+
+
+def test_run_one_job_strips_and_records_new_semantic_state(monkeypatch):
+    final = "Now green.\n[STATE_SIGNATURE: repo|pr7|def|green|merge]"
+    calls = _patch_pipeline(monkeypatch, final=final)
+    delivered = []
+    recorded = []
+    monkeypatch.setattr(
+        s,
+        "_deliver_result",
+        lambda job, content, adapters=None, loop=None: delivered.append(content),
+    )
+    monkeypatch.setattr(
+        s,
+        "record_delivery_signature",
+        lambda jid, sig: recorded.append((jid, sig)) or True,
+    )
+
+    s.run_one_job({"id": "j-new-state", "name": "monitor"})
+
+    assert delivered == ["Now green."]
+    assert len(recorded) == 1
+    assert recorded[0][0] == "j-new-state"
+    assert recorded[0][1] == s._extract_state_signature(final)[1]
+    assert calls[-1] == ("mark", "j-new-state", True)
 
 
 def test_run_one_job_empty_response_is_soft_failure(monkeypatch):

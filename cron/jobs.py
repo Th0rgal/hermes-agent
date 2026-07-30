@@ -1904,6 +1904,28 @@ def _write_wedged_oneshot_diagnostic(job: Dict[str, Any]) -> None:
             job.get("id"), e,
         )
 
+def record_delivery_signature(job_id: str, signature: str) -> bool:
+    """Persist the semantic signature of a successfully delivered cron result.
+
+    This is intentionally separate from ``mark_job_run``: callers record it
+    only after the platform delivery succeeds. If the process dies before the
+    run bookkeeping completes, a retry still knows that the state was already
+    reported and will not notify the user twice.
+    """
+    if not isinstance(signature, str) or not signature:
+        return False
+    with _jobs_lock():
+        jobs = load_jobs()
+        for job in jobs:
+            if job.get("id") == job_id:
+                job["last_delivery_signature"] = signature
+                save_jobs(jobs)
+                return True
+    logger.warning(
+        "record_delivery_signature: job_id %s not found, skipping save", job_id
+    )
+    return False
+
 
 def claim_dispatch(job_id: str) -> bool:
     """Atomically claim a finite one-shot job dispatch BEFORE execution.

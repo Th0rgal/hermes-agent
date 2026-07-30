@@ -291,6 +291,7 @@ from cron.jobs import (
     heartbeat_run_claim,
     mark_job_run,
     pause_job,
+    record_delivery_signature,
     save_job_output,
 )
 from cron.executions import create_execution, finish_execution, mark_execution_running
@@ -310,6 +311,29 @@ SILENT_MARKER = "[SILENT]"
 # The actual matcher is shared with the webhook lane —
 # gateway.response_filters.is_autonomous_silence_response — so the two
 # autonomous lanes cannot drift apart.
+
+_CRON_SILENCE_TOKENS = frozenset({"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY"})
+_STATE_SIGNATURE_RE = re.compile(
+    r"(?im)^[ \t]*\[STATE_SIGNATURE:\s*([^\]\r\n]{1,512})\][ \t]*$"
+)
+
+
+def _extract_state_signature(text: str) -> tuple[str, Optional[str]]:
+    """Strip an optional semantic-state marker and return its stable digest.
+
+    Monitor jobs may emit ``[STATE_SIGNATURE: ...]`` on its own line. The
+    human-facing result never includes the marker. Its normalized digest lets
+    recurring monitors suppress unchanged state even when their prose varies.
+    """
+    if not isinstance(text, str):
+        return text, None
+    matches = _STATE_SIGNATURE_RE.findall(text)
+    if not matches:
+        return text, None
+    normalized = " ".join(matches[-1].split())
+    cleaned = _STATE_SIGNATURE_RE.sub("", text).strip()
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return cleaned, digest
 
 
 def _is_cron_silence_response(text: str) -> bool:
@@ -4286,6 +4310,11 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             # If the agent responded with [SILENT], skip delivery (but
             # output is already saved above).  Failed jobs always deliver.
             deliver_content = final_response if success else _summarize_cron_failure_for_delivery(job, error)
+            delivery_signature = None
+            if success:
+                deliver_content, delivery_signature = _extract_state_signature(
+                    deliver_content
+                )
             # Treat whitespace-only final responses the same as empty
             # responses: do not deliver a blank message, and let the
             # empty-response guard below mark the run as a soft failure.
@@ -4310,6 +4339,24 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
                     ts=time.time(),
                 ))
 
+            if (
+                should_deliver
+                and success
+                and delivery_signature is not None
+                and delivery_signature == job.get("last_delivery_signature")
+            ):
+                logger.info(
+                    "Job '%s': semantic state unchanged — skipping delivery",
+                    job["id"],
+                )
+                should_deliver = False
+                _emit_controller_event(lambda ce: ce.ReconciliationEvent(
+                    kind="duplicate_state_suppression",
+                    subject=str(job.get("id", "")),
+                    detail="cron state signature suppressed duplicate delivery",
+                    ts=time.time(),
+                ))
+
             if should_deliver:
                 unresolved_origin = (
                     _normalize_deliver_value(job.get("deliver", "local")) == "origin"
@@ -4324,6 +4371,8 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
                         adapters=adapters,
                         loop=loop,
                     )
+                    if delivery_error is None and delivery_signature is not None:
+                        record_delivery_signature(job["id"], delivery_signature)
                 except Exception as de:
                     delivery_error = str(de)
                     logger.error("Delivery failed for job %s: %s", job["id"], de)

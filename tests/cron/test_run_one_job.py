@@ -38,6 +38,7 @@ def _patch_pipeline(monkeypatch, *, success=True, output="out", final="final res
     monkeypatch.setattr(s, "save_job_output", fake_save)
     monkeypatch.setattr(s, "_deliver_result", fake_deliver)
     monkeypatch.setattr(s, "mark_job_run", fake_mark)
+    monkeypatch.setattr(s, "record_delivery_signature", lambda jid, sig: True)
     return calls
 
 
@@ -64,6 +65,98 @@ def test_run_one_job_success_sequence(monkeypatch):
     assert ok is True
     assert [c[0] for c in calls] == ["run_job", "save", "deliver", "mark"]
     assert calls[-1] == ("mark", "j2", True)
+
+
+def test_run_one_job_silent_skips_delivery(monkeypatch):
+    """A [SILENT] final response saves output + marks the run but does NOT
+    deliver."""
+    calls = _patch_pipeline(monkeypatch, silent_marker_in="[SILENT]")
+
+    s.run_one_job({"id": "j3", "name": "t"})
+
+    kinds = [c[0] for c in calls]
+    assert "run_job" in kinds and "save" in kinds and "mark" in kinds
+    assert "deliver" not in kinds
+
+
+def test_run_one_job_suppresses_unchanged_semantic_state(monkeypatch):
+    final = "Still blocked.\n[STATE_SIGNATURE: repo|pr7|abc|blocked|ci]"
+    _, signature = s._extract_state_signature(final)
+    calls = _patch_pipeline(monkeypatch, final=final)
+
+    s.run_one_job({
+        "id": "j-state",
+        "name": "monitor",
+        "last_delivery_signature": signature,
+    })
+
+    assert "deliver" not in [call[0] for call in calls]
+
+
+def test_run_one_job_strips_and_records_new_semantic_state(monkeypatch):
+    final = "Now green.\n[STATE_SIGNATURE: repo|pr7|def|green|merge]"
+    calls = _patch_pipeline(monkeypatch, final=final)
+    delivered = []
+    recorded = []
+    monkeypatch.setattr(
+        s,
+        "_deliver_result",
+        lambda job, content, adapters=None, loop=None: delivered.append(content),
+    )
+    monkeypatch.setattr(
+        s,
+        "record_delivery_signature",
+        lambda jid, sig: recorded.append((jid, sig)) or True,
+    )
+
+    s.run_one_job({"id": "j-new-state", "name": "monitor"})
+
+    assert delivered == ["Now green."]
+    assert len(recorded) == 1
+    assert recorded[0][0] == "j-new-state"
+    assert recorded[0][1] == s._extract_state_signature(final)[1]
+    assert calls[-1] == ("mark", "j-new-state", True)
+
+
+def test_run_one_job_empty_response_is_soft_failure(monkeypatch):
+    """An empty final response marks the run as NOT ok (issue #8585)."""
+    calls = _patch_pipeline(monkeypatch, final="   ")
+
+    s.run_one_job({"id": "j4", "name": "t"})
+
+    mark = [c for c in calls if c[0] == "mark"][0]
+    assert mark == ("mark", "j4", False)
+
+
+def test_run_one_job_failed_job_delivers_error(monkeypatch):
+    """A failed job still delivers (the error notice) and marks not-ok."""
+    calls = _patch_pipeline(monkeypatch, success=False, final="", error="boom")
+
+    s.run_one_job({"id": "j5", "name": "t"})
+
+    kinds = [c[0] for c in calls]
+    assert "deliver" in kinds  # failures always deliver
+    mark = [c for c in calls if c[0] == "mark"][0]
+    assert mark == ("mark", "j5", False)
+
+
+def test_run_one_job_exception_marks_failure(monkeypatch):
+    """If run_job raises, the helper marks the run failed and returns False
+    rather than propagating."""
+    def boom(job, *, defer_agent_teardown=None):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(s, "run_job", boom)
+    marks = []
+    monkeypatch.setattr(
+        s, "mark_job_run",
+        lambda jid, ok, err=None, delivery_error=None: marks.append((jid, ok)),
+    )
+
+    ok = s.run_one_job({"id": "j6", "name": "t"})
+
+    assert ok is False
+    assert marks == [("j6", False)]
 
 
 def test_run_one_job_installs_secret_scope_under_multiplex(monkeypatch, tmp_path):

@@ -154,6 +154,69 @@ def test_spool_preserves_observed_delivery_provenance(tmp_path, monkeypatch):
         verify.close()
 
 
+def test_spool_replay_follows_unique_compression_chain(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / "state.db"
+    db = SessionDB(db_path=path)
+    try:
+        db.create_session("parent", source="api_server")
+        db.create_session(
+            "continuation-1", source="api_server", parent_session_id="parent"
+        )
+        db.end_session("parent", end_reason="compression")
+        db.create_session(
+            "continuation-2",
+            source="api_server",
+            parent_session_id="continuation-1",
+        )
+        db.end_session("continuation-1", end_reason="compression")
+    finally:
+        db.close()
+
+    spool_session_delivery(
+        "cron:parent:j:r1", "parent", "assistant", "delivered to the live tip"
+    )
+    assert replay_session_delivery_spool(db_path=path) == {"replayed": 1, "failed": 0}
+
+    verify = SessionDB(db_path=path)
+    try:
+        assert verify.get_messages("parent") == []
+        assert verify.get_messages("continuation-1") == []
+        assert [
+            message["content"] for message in verify.get_messages("continuation-2")
+        ] == ["delivered to the live tip"]
+    finally:
+        verify.close()
+
+
+def test_spool_replay_keeps_ambiguous_compression_delivery(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / "state.db"
+    db = SessionDB(db_path=path)
+    try:
+        db.create_session("parent", source="api_server")
+        db.create_session("child-a", source="api_server", parent_session_id="parent")
+        db.create_session("child-b", source="api_server", parent_session_id="parent")
+        db.end_session("parent", end_reason="compression")
+    finally:
+        db.close()
+
+    spool_path = spool_session_delivery(
+        "cron:parent:j:r2", "parent", "assistant", "must not pick a sibling"
+    )
+    assert replay_session_delivery_spool(db_path=path) == {"replayed": 0, "failed": 1}
+    assert spool_path.exists()
+
+    verify = SessionDB(db_path=path)
+    try:
+        assert verify.get_messages("child-a") == []
+        assert verify.get_messages("child-b") == []
+    finally:
+        verify.close()
+
+
 def test_concurrent_writer_waits_for_lock_without_losing_delivery(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))

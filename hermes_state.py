@@ -143,8 +143,19 @@ def replay_session_delivery_spool(
         for path in sorted(spool_dir.glob("*.json")):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
+                session_id = str(payload["session_id"])
+                # A delivery can be spooled just before context compression
+                # closes its target session.  Replay may happen much later,
+                # after several further compressions, so resolve the unique
+                # writable continuation before claiming the delivery receipt.
+                # Ambiguous or missing lineages deliberately fall back to the
+                # original id: append_message then fails closed and the spool
+                # entry remains available for a later repair/replay.
+                target_session_id = (
+                    db.get_writable_compression_tip(session_id) or session_id
+                )
                 db.append_message(
-                    session_id=str(payload["session_id"]),
+                    session_id=target_session_id,
                     role=str(payload.get("role") or "assistant"),
                     content=payload.get("content"),
                     observed=bool(payload.get("observed")),
@@ -5911,6 +5922,54 @@ class SessionDB:
             seen.add(child_id)
             current = child_id
         return current
+
+    def get_writable_compression_tip(self, session_id: str) -> Optional[str]:
+        """Return the unique live continuation that may accept durable writes.
+
+        Unlike :meth:`get_compression_tip`, which chooses the best visible tip
+        for resume UX, durable delivery must never guess between siblings. Walk
+        through compression-ended nodes only when exactly one non-branch,
+        non-delegate continuation can still lead to a writable session. Return
+        ``None`` for missing, closed, cyclic, or ambiguous lineages.
+        """
+        if not session_id:
+            return None
+        current = session_id
+        seen = {current}
+        for _ in range(100):
+            with self._lock:
+                session = self._conn.execute(
+                    "SELECT ended_at, end_reason FROM sessions WHERE id = ?",
+                    (current,),
+                ).fetchone()
+                if session is None:
+                    return None
+                if session["ended_at"] is None:
+                    return current
+                if session["end_reason"] != "compression":
+                    return None
+                rows = self._conn.execute(
+                    """
+                    SELECT id
+                    FROM sessions
+                    WHERE parent_session_id = ?
+                      AND json_extract(COALESCE(model_config, '{}'), '$._branched_from') IS NULL
+                      AND json_extract(COALESCE(model_config, '{}'), '$._delegate_from') IS NULL
+                      AND COALESCE(source, '') != 'tool'
+                      AND (ended_at IS NULL OR end_reason = 'compression')
+                    ORDER BY started_at ASC, id ASC
+                    LIMIT 2
+                    """,
+                    (current,),
+                ).fetchall()
+            if len(rows) != 1:
+                return None
+            child_id = rows[0]["id"]
+            if not child_id or child_id in seen:
+                return None
+            seen.add(child_id)
+            current = child_id
+        return None
 
     # Columns excluded from compact_rows projections: only the payload-heavy
     # blob no list consumer renders. Everything else — including gateway

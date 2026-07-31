@@ -1,5 +1,30 @@
 export const REMOTE_LIVENESS_TIMEOUT_MS = 10_000
 export const REMOTE_LIVENESS_FAILURE_LIMIT = 3
+// [fork-delta] A resolver flap (Tailscale MagicDNS restarting, captive portal,
+// VPN handover) fails getaddrinfo while the cached transport is often still
+// healthy. Dropping the connection after 3 such probes strands every open
+// session window (observed 2026-07-31: ENOTFOUND agent-backend.thomas.md for
+// ~2 minutes killed a session mid-creation). Resolver-class failures therefore
+// tolerate twice the streak before the connection is torn down.
+export const REMOTE_LIVENESS_RESOLVER_FAILURE_LIMIT = REMOTE_LIVENESS_FAILURE_LIMIT * 2
+
+const RESOLVER_ERROR_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'EAI_FAIL', 'EAI_NONAME'])
+
+export function isResolverError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false
+  }
+  const code = (error as { code?: unknown }).code
+  if (typeof code === 'string' && RESOLVER_ERROR_CODES.has(code)) {
+    return true
+  }
+  const cause = (error as { cause?: unknown }).cause
+  if (cause && cause !== error && isResolverError(cause)) {
+    return true
+  }
+  const message = (error as { message?: unknown }).message
+  return typeof message === 'string' && /\b(ENOTFOUND|EAI_AGAIN|EAI_FAIL|EAI_NONAME)\b/.test(message)
+}
 // Even at the capped retry path, consecutive liveness observations are at most
 // about 48s apart (ticket mint + socket open + backoff + the next status probe).
 // One minute keeps a continuous outage together without carrying old failures.
@@ -96,12 +121,16 @@ export class RemoteLivenessTracker {
     this.#failuresByBaseUrl.delete(baseUrl)
   }
 
-  recordFailure(baseUrl: string): RemoteLivenessFailure {
+  recordFailure(baseUrl: string, options?: { failureLimit?: number }): RemoteLivenessFailure {
     const now = this.#now()
     const previous = this.#failuresByBaseUrl.get(baseUrl)
     const withinFailureWindow = previous && now - previous.lastFailureAt <= this.#failureWindowMs
     const failures = (withinFailureWindow ? previous.failures : 0) + 1
-    const shouldReset = failures >= this.#failureLimit
+    // The CURRENT probe's error class picks the threshold. A mixed streak
+    // (transport error after resolver errors) intentionally applies the
+    // stricter transport limit immediately.
+    const effectiveLimit = options?.failureLimit ?? this.#failureLimit
+    const shouldReset = failures >= effectiveLimit
 
     if (shouldReset) {
       this.#failuresByBaseUrl.delete(baseUrl)
@@ -221,16 +250,18 @@ export async function revalidateRemoteConnection<TConnection extends RemoteConne
     tracker.recordSuccess(baseUrl)
 
     return { ok: true, rebuilt: false }
-  } catch {
+  } catch (error) {
     if (currentConnectionPromise() !== connectionPromise) {
       return { ok: true, rebuilt: false }
     }
 
-    const failure = tracker.recordFailure(baseUrl)
+    const resolverError = isResolverError(error)
+    const failureLimit = resolverError ? REMOTE_LIVENESS_RESOLVER_FAILURE_LIMIT : REMOTE_LIVENESS_FAILURE_LIMIT
+    const failure = tracker.recordFailure(baseUrl, { failureLimit })
 
     if (!failure.shouldReset) {
       log(
-        `Cached remote Hermes backend failed liveness probe (${failure.failures}/${REMOTE_LIVENESS_FAILURE_LIMIT}); keeping connection for retry.`
+        `Cached remote Hermes backend failed liveness probe (${failure.failures}/${failureLimit}${resolverError ? '; resolver error — DNS flap tolerated' : ''}); keeping connection for retry.`
       )
 
       return { ok: true, rebuilt: false }

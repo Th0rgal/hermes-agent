@@ -7,7 +7,9 @@ import {
   RemoteLivenessTracker,
   RemoteRevalidationCoordinator,
   revalidatePooledRemoteBackends,
-  revalidateRemoteConnection
+  revalidateRemoteConnection,
+  isResolverError,
+  REMOTE_LIVENESS_RESOLVER_FAILURE_LIMIT
 } from './remote-liveness'
 
 describe('RemoteLivenessTracker', () => {
@@ -349,5 +351,33 @@ describe('revalidatePooledRemoteBackends', () => {
     await expect(pool.run(tracker)).resolves.toEqual({ dropped: ['coder'] })
     expect(pool.stopBackend).toHaveBeenCalledTimes(1)
     expect(pool.stopBackend).toHaveBeenCalledWith('coder')
+  })
+})
+
+describe('resolver-flap tolerance (fork-delta)', () => {
+  it('classifies getaddrinfo failures as resolver errors, including nested causes', () => {
+    expect(isResolverError(Object.assign(new Error('getaddrinfo ENOTFOUND x'), { code: 'ENOTFOUND' }))).toBe(true)
+    expect(isResolverError(new Error('fetch failed: EAI_AGAIN resolving host'))).toBe(true)
+    expect(isResolverError(Object.assign(new Error('fetch failed'), { cause: { code: 'EAI_AGAIN' } }))).toBe(true)
+    expect(isResolverError(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }))).toBe(false)
+    expect(isResolverError(null)).toBe(false)
+  })
+
+  it('tolerates a longer streak when the per-failure limit is raised', () => {
+    const tracker = new RemoteLivenessTracker(3, 60_000, () => 1_000)
+    const url = 'https://gw.example'
+    for (let i = 0; i < 5; i += 1) {
+      expect(tracker.recordFailure(url, { failureLimit: REMOTE_LIVENESS_RESOLVER_FAILURE_LIMIT }).shouldReset).toBe(false)
+    }
+    expect(tracker.recordFailure(url, { failureLimit: REMOTE_LIVENESS_RESOLVER_FAILURE_LIMIT }).shouldReset).toBe(true)
+  })
+
+  it('applies the stricter transport limit immediately on a mixed streak', () => {
+    const tracker = new RemoteLivenessTracker(3, 60_000, () => 1_000)
+    const url = 'https://gw.example'
+    tracker.recordFailure(url, { failureLimit: 6 })
+    tracker.recordFailure(url, { failureLimit: 6 })
+    // Third failure is a transport error: default limit applies to the streak.
+    expect(tracker.recordFailure(url).shouldReset).toBe(true)
   })
 })

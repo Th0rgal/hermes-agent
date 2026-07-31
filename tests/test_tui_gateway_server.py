@@ -2263,7 +2263,7 @@ def test_history_to_messages_hides_tool_turn_narration_when_interims_disabled():
         include_interim_assistant_messages=False,
     ) == [
         {"role": "user", "text": "first prompt"},
-        {"context": "Searching files for resume", "name": "search_files", "role": "tool"},
+        {"context": "resume", "name": "search_files", "role": "tool"},
         {"role": "assistant", "text": "Here is the final answer."},
     ]
 

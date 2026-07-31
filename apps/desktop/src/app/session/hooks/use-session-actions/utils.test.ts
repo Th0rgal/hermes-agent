@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import type { ChatMessage } from '@/lib/chat-messages'
+import { type ChatMessage, toChatMessages } from '@/lib/chat-messages'
 import { $approvalModes, approvalModeForProfile } from '@/store/approval-mode'
 import { $desktopOnboarding } from '@/store/onboarding'
 import { $activeGatewayProfile } from '@/store/profile'
@@ -830,7 +830,7 @@ describe('appendLiveSessionProjection', () => {
     ]
 
     expect(preserveLocalPendingTurnMessages(authoritative, warmCache)).toBe(authoritative)
-    expect(authoritative.map(message => message.role)).toEqual([
+    expect(authoritative.map((message: ChatMessage) => message.role)).toEqual([
       'user',
       'assistant',
       'assistant',

@@ -58,28 +58,18 @@ export function useRuntimeMessageRepository(messages: ChatMessage[]): ExportedMe
 
       const cachedMessage = cacheRef.current.get(message)
 
-      let runtimeMessage =
+      const runtimeMessage =
         cachedMessage ?? fromThreadMessageLike(toRuntimeMessage(message), message.id, FALLBACK_STATUS)
 
       if (!cachedMessage) {
         cacheRef.current.set(message, runtimeMessage)
       }
 
-      // A duplicate id makes MessageRepository.link throw and takes the whole
-      // chat surface down in its error boundary — unrecoverably, since Retry
-      // rebuilds the same repository. Ids are supposed to be unique upstream;
-      // if one slips through anyway, render the message under a suffixed id
-      // instead of crashing. Not cached: the remap depends on list position.
-      if (seenIds.has(runtimeMessage.id)) {
-        runtimeMessage = { ...runtimeMessage, id: `${runtimeMessage.id}~dup${items.length}` }
-      }
-
-      seenIds.add(runtimeMessage.id)
       items.push({ message: runtimeMessage, parentId })
 
       if (!message.hidden) {
-        visibleParentId = runtimeMessage.id
-        headId = runtimeMessage.id
+        visibleParentId = message.id
+        headId = message.id
       }
     }
 

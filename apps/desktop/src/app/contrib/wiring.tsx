@@ -394,6 +394,62 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     }
   }, [activeSessionIdRef, busyRef, selectedStoredSessionIdRef, updateSessionState])
 
+  // [fork-delta] Refresh the open persisted transcript regardless of source.
+  // Local cron/callback deliveries are appended by a sibling scheduler process
+  // and announced over the websocket (session.delivery); the announcement
+  // needs a refresh path that also covers non-messaging stored sessions.
+  const refreshActiveStoredTranscript = useCallback(async () => {
+    const storedSessionId = selectedStoredSessionIdRef.current
+    const runtimeSessionId = activeSessionIdRef.current
+
+    if (!storedSessionId || !runtimeSessionId || busyRef.current) {
+      return
+    }
+
+    const cachedState = sessionStateByRuntimeIdRef.current.get(runtimeSessionId)
+
+    // Never let an external transcript poll replace an in-flight background
+    // turn's optimistic correction or streaming tail.
+    if (
+      cachedState &&
+      (cachedState.busy ||
+        cachedState.awaitingResponse ||
+        cachedState.streamId ||
+        cachedState.turnStartedAt !== null)
+    ) {
+      return
+    }
+
+    const stored = [...$sessions.get(), ...$messagingSessions.get()].find(s =>
+      sessionMatchesStoredId(s, storedSessionId)
+    )
+
+    if (!stored) {
+      return
+    }
+
+    try {
+      const latest = await getSessionMessages(storedSessionId, stored.profile)
+      const signatureKey = `${stored.profile ?? 'default'}:${storedSessionId}`
+      const sig = sessionMessagesSignature(latest.messages)
+
+      if (messagingTranscriptSignatureRef.current.get(signatureKey) === sig) {
+        return
+      }
+
+      messagingTranscriptSignatureRef.current.set(signatureKey, sig)
+      const messages = toChatMessages(latest.messages)
+
+      updateSessionState(
+        runtimeSessionId,
+        state => ({ ...state, messages: preserveLocalAssistantErrors(messages, state.messages) }),
+        storedSessionId
+      )
+    } catch {
+      // Non-fatal: the next visibility poll or manual refresh can hydrate.
+    }
+  }, [activeSessionIdRef, busyRef, selectedStoredSessionIdRef, sessionStateByRuntimeIdRef, updateSessionState])
+
   const { handleGatewayEvent } = useMessageStream({
     activeGatewayProfile,
     activeSessionIdRef,
@@ -757,6 +813,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     freshDraftReady,
     gatewayState,
     refreshActiveMessagingTranscript,
+    refreshActiveStoredTranscript,
     refreshCronJobs,
     refreshCurrentModel,
     refreshHermesConfig,

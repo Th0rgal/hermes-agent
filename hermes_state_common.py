@@ -288,6 +288,15 @@ CREATE INDEX IF NOT EXISTS idx_session_model_usage_session ON session_model_usag
 CREATE INDEX IF NOT EXISTS idx_session_model_usage_model ON session_model_usage(model);
 CREATE INDEX IF NOT EXISTS idx_async_delegations_delivery
     ON async_delegations(delivery_state, completed_at);
+
+-- [fork-delta] Durable cron/callback delivery idempotence: append_message
+-- claims a delivery_id here in the same transaction as the message row.
+CREATE TABLE IF NOT EXISTS delivery_receipts (
+    delivery_id TEXT PRIMARY KEY,
+    message_id INTEGER,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+);
 """
 
 

@@ -319,6 +319,12 @@ class SessionSchemaMixin:
         # the one table-shape repair reconciliation can't express.
         self._heal_gateway_routing_pk(cursor)
 
+        # [fork-delta] v24: delivery receipts follow their message. Earlier
+        # builds used SQLite's default RESTRICT action, which made
+        # clear/delete/prune fail for any session containing a durably
+        # delivered cron message.
+        self._ensure_delivery_receipts_cascade(cursor)
+
         # Indexes that reference reconciler-added columns must be created
         # AFTER _reconcile_columns runs — declaring them in SCHEMA_SQL
         # makes the initial executescript fail on legacy DBs (the index's

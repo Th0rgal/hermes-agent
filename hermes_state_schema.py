@@ -603,6 +603,11 @@ class SessionSchemaMixin:
         # landed — the version-gated rebuild is unreachable there, #73823).
         # Same PK-rebuild constraint as gateway_routing above.
         self._heal_session_model_usage_pk(cursor)
+        # [fork-delta] v24: delivery receipts follow their message. Earlier
+        # builds used SQLite's default RESTRICT action, which made
+        # clear/delete/prune fail for any session containing a durably
+        # delivered cron message.
+        self._ensure_delivery_receipts_cascade(cursor)
 
         # Indexes that reference reconciler-added columns must be created
         # AFTER _reconcile_columns runs — declaring them in SCHEMA_SQL

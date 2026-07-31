@@ -4,14 +4,13 @@ import type { ClientSessionState } from '@/app/types'
 import { findGroupOfPane, group, split } from '@/components/pane-shell/tree/model'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $layoutTree } from '@/components/pane-shell/tree/store'
-import { $selectedStoredSessionId, setSelectedStoredSessionId } from '@/store/session'
+import { $selectedStoredSessionId, setSelectedStoredSessionId, $unreadFinishedSessionIds } from '@/store/session'
 import type { SessionTile } from '@/store/session-states'
 import {
   blankDraftTile,
   focusedSessionNeedsRoute,
   markSelectionRestore,
   orderTilesByTree,
-  $unreadFinishedSessionIds,
   clearAllSessionStates,
   markSilentSessionActivity,
   publishSessionState,

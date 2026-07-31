@@ -176,9 +176,9 @@ async def test_session_crud_and_message_history(adapter, session_db):
 async def test_session_messages_follow_compression_tip(adapter, session_db):
     source_id = session_db.create_session("source-session", "api_server")
     session_db.append_message(source_id, "user", "before compression")
+    session_db.replace_messages(source_id, [])
     session_db.end_session(source_id, "compression")
     session_db.create_session("tip-session", "api_server", parent_session_id=source_id)
-    session_db.replace_messages(source_id, [])
     session_db.append_message("tip-session", "user", "after compression")
 
     app = _create_session_app(adapter)

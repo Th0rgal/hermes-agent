@@ -178,6 +178,8 @@ interface BackgroundSyncParams {
   freshDraftReady: boolean
   gatewayState: string
   refreshActiveMessagingTranscript: () => Promise<unknown> | unknown
+  // [fork-delta] source-agnostic open-transcript refresh for delivery pings.
+  refreshActiveStoredTranscript: () => Promise<unknown> | unknown
   refreshCronJobs: () => Promise<unknown> | unknown
   refreshCurrentModel: (force?: boolean) => Promise<unknown> | unknown
   refreshHermesConfig: () => Promise<unknown> | unknown
@@ -227,6 +229,7 @@ export function useBackgroundSync({
   freshDraftReady,
   gatewayState,
   refreshActiveMessagingTranscript,
+  refreshActiveStoredTranscript,
   refreshCronJobs,
   refreshCurrentModel,
   refreshHermesConfig,

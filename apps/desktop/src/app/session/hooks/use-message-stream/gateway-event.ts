@@ -324,6 +324,9 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           }
 
           pingSessionDelivery(deliveredTo)
+        }
+
+        return
       } else if (
         event.type === 'pet.changed' ||
         event.type === 'cron.changed' ||

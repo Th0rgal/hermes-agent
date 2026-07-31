@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { textWithoutReferenceLines, WIRE_REFERENCE_KINDS } from '@/components/assistant-ui/reference-kinds'
-import { type ChatMessage, type ChatMessagePart, chatMessageText } from '@/lib/chat-messages'
+import { type ChatMessage, type ChatMessagePart, chatMessageText, toChatMessages } from '@/lib/chat-messages'
 import { $approvalModes, approvalModeForProfile } from '@/store/approval-mode'
 import { $desktopOnboarding } from '@/store/onboarding'
 import { $activeGatewayProfile } from '@/store/profile'
@@ -1290,7 +1290,7 @@ describe('appendLiveSessionProjection', () => {
     ]
 
     expect(preserveLocalPendingTurnMessages(authoritative, warmCache)).toBe(authoritative)
-    expect(authoritative.map(message => message.role)).toEqual([
+    expect(authoritative.map((message: ChatMessage) => message.role)).toEqual([
       'user',
       'assistant',
       'assistant',

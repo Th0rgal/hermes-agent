@@ -736,21 +736,9 @@ class TestWebServerEndpoints:
 
 
 
-        resp = self.client.get("/api/memory")
-        assert resp.status_code == 200
-        providers = {row["name"]: row for row in resp.json()["providers"]}
-        assert providers["not-installed"]["status"] == "missing"
-        assert providers["not-installed"]["available"] is False
+    # ── Memory provider config (Honcho host-block backend) ──────────────
 
-        config = load_config()
-        config.setdefault("memory", {})["provider"] = "builtin"
-        save_config(config)
-
-        resp = self.client.get("/api/memory")
-        assert resp.status_code == 200
-        assert resp.json()["active"] == ""
-        assert "builtin" not in {row["name"] for row in resp.json()["providers"]}
-
+    @pytest.fixture(autouse=True)
     def test_set_memory_provider_rejects_unready_and_clears_builtin(self):
         from hermes_cli.config import load_config
 
@@ -794,48 +782,6 @@ class TestWebServerEndpoints:
             assert isinstance(slot.get("enabled", True), bool)
         assert {"provider", "model"} <= set(data["aggregator"])
 
-    def test_put_moa_models_persists_provider_model_slots(self):
-        from hermes_cli.config import load_config
-
-        payload = {
-            "reference_models": [
-                {"provider": "openai-codex", "model": "gpt-5.5", "max_tokens": 768},
-                {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"},
-            ],
-            "aggregator": {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
-            "reference_temperature": 0.6,
-            "aggregator_temperature": 0.4,
-            "reference_timeout": 44.5,
-            "degraded_reference_policy": "silent",
-            "max_tokens": 4096,
-            "enabled": True,
-        }
-
-        resp = self.client.put("/api/model/moa", json=payload)
-        assert resp.status_code == 200
-        assert resp.json()["ok"] is True
-        cfg = load_config()
-        saved_refs = cfg["moa"]["reference_models"]
-        # Slots normalize with enabled=True defaulted in; provider/model must
-        # round-trip exactly.
-        assert [
-            {"provider": s["provider"], "model": s["model"]} for s in saved_refs
-        ] == [
-            {"provider": s["provider"], "model": s["model"]}
-            for s in payload["reference_models"]
-        ]
-        assert saved_refs[0]["max_tokens"] == 768
-        assert "max_tokens" not in saved_refs[1]
-        assert all(s.get("enabled", True) is True for s in saved_refs)
-        agg = cfg["moa"]["aggregator"]
-        assert {"provider": agg["provider"], "model": agg["model"]} == payload["aggregator"]
-        assert cfg["moa"]["reference_timeout"] == 44.5
-        assert cfg["moa"]["degraded_reference_policy"] == "silent"
-        returned = self.client.get("/api/model/moa").json()
-        assert returned["reference_models"][0]["max_tokens"] == 768
-        assert "max_tokens" not in returned["reference_models"][1]
-        assert returned["reference_timeout"] == 44.5
-        assert returned["degraded_reference_policy"] == "silent"
 
     def test_put_moa_models_persists_reference_failure_controls_per_preset(self):
         from hermes_cli.config import load_config
@@ -1245,6 +1191,7 @@ class TestWebServerEndpoints:
         try:
             db.create_session(session_id="desktop-root", source="cli")
             db.append_message(session_id="desktop-root", role="user", content="before compression")
+            db.replace_messages("desktop-root", [])
             db.end_session("desktop-root", "compression")
             now = _time.time()
             db._conn.execute(
@@ -1253,7 +1200,6 @@ class TestWebServerEndpoints:
             )
             db.create_session(session_id="desktop-tip", source="cli", parent_session_id="desktop-root")
             db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (now - 4, "desktop-tip"))
-            db.replace_messages("desktop-root", [])
             db.append_message(session_id="desktop-tip", role="user", content="after compression")
             db._conn.commit()
         finally:

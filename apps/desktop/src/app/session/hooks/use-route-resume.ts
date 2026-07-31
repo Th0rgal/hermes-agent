@@ -256,6 +256,19 @@ export function useRouteResume({
       retryAttemptRef.current = 0
     }
 
+    // [fork-delta] Connectivity-recovery re-arm: an exhausted latch must not
+    // outlive the outage that caused it. When the OS regains networking
+    // ('online') while this route is still stranded-and-exhausted, clear the
+    // latch exactly like a manual Retry would — the armed->cleared edge above
+    // grants a fresh bounded backoff cycle and the stranded branch reschedules.
+    if (resumeExhaustedSessionId && resumeExhaustedSessionId === routedSessionId) {
+      const rearm = () => {
+        setResumeExhaustedSessionId(current => (current === routedSessionId ? null : current))
+      }
+      window.addEventListener('online', rearm)
+      return () => window.removeEventListener('online', rearm)
+    }
+
     if (retryAttemptRef.current >= MAX_RESUME_RETRIES) {
       // Give up auto-retrying a persistently dead backend; the user can still
       // reconnect / reselect (which resets the counter via the branch above).

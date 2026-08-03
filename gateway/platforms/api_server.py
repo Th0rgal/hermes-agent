@@ -1028,6 +1028,33 @@ _MEDIA_MIME = {
 _MEDIA_DATA_URL_MAX_BYTES = 5 * 1024 * 1024  # skip images larger than 5MB
 
 
+_CODEX_INCOMPLETE_SENTINEL = "remained incomplete after"
+
+def _present_final_response(result) -> str:
+    """Resolve the user-visible text for a finished agent result.
+
+    The conversation loop's retry-exhaustion sentinel ("Codex response
+    remained incomplete after 3 continuation attempts") doubles as
+    ``final_response``. The channel gateway suppresses it (#51628), but the
+    session-stream paths used by the desktop delivered it verbatim as an
+    assistant message. Convert it to an explicit, actionable notice instead.
+    """
+    text = result.get("final_response", "") if isinstance(result, dict) else ""
+    text = text or ""
+    error_text = str(result.get("error", "") or "") if isinstance(result, dict) else ""
+    if (
+        text
+        and _CODEX_INCOMPLETE_SENTINEL in error_text.lower()
+        and text.strip() == error_text.strip()
+    ):
+        return (
+            "⚠️ The model returned only hidden reasoning and no final answer "
+            "after several continuation attempts. Please send your message "
+            "again."
+        )
+    return text
+
+
 def _resolve_media_to_data_urls(text: str) -> str:
     """Replace ``MEDIA:<path>`` image tags with inline base64 data URLs.
 
@@ -3628,7 +3655,7 @@ class APIServerAdapter(BasePlatformAdapter):
             **agent_overrides,
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
-        final_response = _resolve_media_to_data_urls(result.get("final_response", "") if isinstance(result, dict) else "")
+        final_response = _resolve_media_to_data_urls(_present_final_response(result))
         headers = {"X-Hermes-Session-Id": effective_session_id or session_id}
         if gateway_session_key:
             headers["X-Hermes-Session-Key"] = gateway_session_key
@@ -3792,7 +3819,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     confirmed_runtime_lock=lock_active,
                     **agent_overrides,
                 )
-                final_response = _resolve_media_to_data_urls(result.get("final_response", "") if isinstance(result, dict) else "")
+                final_response = _resolve_media_to_data_urls(_present_final_response(result))
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
                 turn_messages = self._turn_transcript_messages(history, user_message, result) if isinstance(result, dict) else []
                 effective_runtime = {}
@@ -4195,7 +4222,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=500,
                 )
 
-        final_response = _resolve_media_to_data_urls(result.get("final_response") or "")
+        final_response = _resolve_media_to_data_urls(_present_final_response(result))
         is_partial = bool(result.get("partial"))
         is_failed = bool(result.get("failed"))
         completed = bool(result.get("completed", True))
@@ -5329,7 +5356,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=500,
                 )
 
-        final_response = _resolve_media_to_data_urls(result.get("final_response", ""))
+        final_response = _resolve_media_to_data_urls(_present_final_response(result))
         if not final_response:
             final_response = _redact_api_error_text(result.get("error", "(No response generated)"))
 

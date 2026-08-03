@@ -733,6 +733,31 @@ _CODEX_INCOMPLETE_NUDGE = (
 )
 
 
+def _salvage_visible_turn_answer(messages: list) -> str:
+    """Return the latest substantive assistant text of the current turn.
+
+    Walks the message tail back to the last real user/tool boundary,
+    skipping the continuation nudges this loop itself appended, and picks
+    the most recent assistant message with visible content. Used when the
+    incomplete-turn retries are exhausted so the user gets the answer that
+    was actually produced instead of the failure sentinel.
+    """
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        content = message.get("content")
+        if role == "user":
+            if content == _CODEX_INCOMPLETE_NUDGE:
+                continue
+            break
+        if role != "assistant":
+            continue
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+    return ""
+
+
 # Shared recovery hint appended to every content-policy refusal message. Both
 # the HTTP-200 refusal path (``finish_reason=content_filter``) and the
 # exception path (a provider moderation error classified as
@@ -5946,13 +5971,25 @@ def run_conversation(
 
                 agent._codex_incomplete_retries = 0
                 agent._persist_session(messages, conversation_history)
+                # Salvage any visible answer the turn already produced before
+                # surfacing the retry-exhaustion sentinel. The continuation
+                # retries append interim assistant messages as they stream;
+                # when one of them carries substantive text, delivering the
+                # sentinel instead of that text makes every consumer (desktop
+                # session stream included, which has no channel-side
+                # suppression) show a spurious hard failure for a turn whose
+                # answer is sitting in the transcript.
+                _salvaged = _salvage_visible_turn_answer(messages)
+                _sentinel = (
+                    "Codex response remained incomplete after 3 continuation attempts"
+                )
                 return {
-                    "final_response": "Codex response remained incomplete after 3 continuation attempts",
+                    "final_response": _salvaged or _sentinel,
                     "messages": messages,
                     "api_calls": api_call_count,
                     "completed": False,
                     "partial": True,
-                    "error": "Codex response remained incomplete after 3 continuation attempts",
+                    "error": _sentinel,
                 }
             elif hasattr(agent, "_codex_incomplete_retries"):
                 agent._codex_incomplete_retries = 0

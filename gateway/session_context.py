@@ -126,6 +126,15 @@ _SESSION_ASYNC_DELIVERY: ContextVar = ContextVar("HERMES_SESSION_ASYNC_DELIVERY"
 _CRON_AUTO_DELIVER_PLATFORM: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_PLATFORM", default=_UNSET)
 _CRON_AUTO_DELIVER_CHAT_ID: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_CHAT_ID", default=_UNSET)
 _CRON_AUTO_DELIVER_THREAD_ID: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_THREAD_ID", default=_UNSET)
+# The project's DURABLE control conversation for this tick, resolved from the
+# route store before the agent runs. Empty means "no explicit binding" and is
+# never a hint to guess from.
+#
+# The HERMES_CRON_AUTO_DELIVER_ prefix is load-bearing, not cosmetic: the
+# shell-snapshot leak guards in tools/environments/base.py match on it, so
+# these inherit that protection with no edit there.
+_CRON_AUTO_DELIVER_CONTROL_SESSION: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_CONTROL_SESSION", default=_UNSET)
+_CRON_AUTO_DELIVER_CONTROL_PROJECT: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_CONTROL_PROJECT", default=_UNSET)
 
 _VAR_MAP = {
     "HERMES_SESSION_PLATFORM": _SESSION_PLATFORM,
@@ -145,6 +154,8 @@ _VAR_MAP = {
     "HERMES_CRON_AUTO_DELIVER_PLATFORM": _CRON_AUTO_DELIVER_PLATFORM,
     "HERMES_CRON_AUTO_DELIVER_CHAT_ID": _CRON_AUTO_DELIVER_CHAT_ID,
     "HERMES_CRON_AUTO_DELIVER_THREAD_ID": _CRON_AUTO_DELIVER_THREAD_ID,
+    "HERMES_CRON_AUTO_DELIVER_CONTROL_SESSION": _CRON_AUTO_DELIVER_CONTROL_SESSION,
+    "HERMES_CRON_AUTO_DELIVER_CONTROL_PROJECT": _CRON_AUTO_DELIVER_CONTROL_PROJECT,
 }
 
 

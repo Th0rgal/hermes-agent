@@ -161,6 +161,7 @@ def bind_route(
     session_id: str,
     *,
     session_db=None,
+    allow_unroutable_source: bool = False,
 ) -> ProjectRoute:
     """Explicitly bind ``project`` to a durable session (upsert).
 
@@ -169,16 +170,28 @@ def bind_route(
     (:data:`ROUTABLE_SESSION_SOURCES`). Binds the *live continuation tip*, so
     binding a compression parent lands on the session that actually receives
     messages. Raises LookupError/ValueError on validation failure.
+
+    ``allow_unroutable_source`` overrides only the *source* check, and exists
+    because the source allowlist is a heuristic, not a fact. It guards against
+    routing a project at a machine-created session — there are 4364 ``webhook``
+    and 5634 ``cron`` sessions on this host, nearly all throwaway — but a human
+    does occasionally adopt one of those as a real working conversation, and no
+    property of the row distinguishes that case (98% of webhook sessions carry
+    user messages, because the payload itself is recorded as one).
+
+    So the override is deliberately not automatic: only an operator asserting
+    "this one is real" may set it. Everything else is still validated.
     """
     ensure_schema(conn)
     proj = _require_project(conn, project)
     with _OwnedSessionDB(session_db) as db:
         live_id, row = _live_session(db, session_id)
         source = str(row.get("source") or "").strip().lower()
-    if source not in ROUTABLE_SESSION_SOURCES:
+    if source not in ROUTABLE_SESSION_SOURCES and not allow_unroutable_source:
         raise ValueError(
             f"session '{live_id}' has source '{source or 'unknown'}' — project "
-            f"routes may only target {sorted(ROUTABLE_SESSION_SOURCES)} sessions"
+            f"routes may only target {sorted(ROUTABLE_SESSION_SOURCES)} sessions "
+            f"(pass allow_unroutable_source=True to override deliberately)"
         )
     now = _now()
     with write_txn(conn):

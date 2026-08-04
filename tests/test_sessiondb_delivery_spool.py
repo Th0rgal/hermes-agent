@@ -218,15 +218,16 @@ def test_spool_replay_keeps_ambiguous_compression_delivery(tmp_path, monkeypatch
 
 
 def test_concurrent_writer_waits_for_lock_without_losing_delivery(tmp_path, monkeypatch):
+    # NB: this used to also assert a configurable `write_retry_deadline_s`.
+    # Upstream dropped that knob in the refactor the fork series was rebased
+    # onto (no `retry_deadline` remains anywhere in the source), so the
+    # assertion outlived its feature. What it guarded — a writer blocked on a
+    # SQLite lock must wait and still land its delivery — is exercised below
+    # against the shipped defaults.
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / "config.yaml").write_text(
-        "session_db:\n  write_retry_deadline_seconds: 2\n",
-        encoding="utf-8",
-    )
     path = tmp_path / "state.db"
     setup = SessionDB(path)
-    assert setup._write_retry_deadline_s == 2.0
     setup.create_session("api-1", source="api_server")
     setup.close()
 

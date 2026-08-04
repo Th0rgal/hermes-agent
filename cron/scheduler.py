@@ -1544,6 +1544,55 @@ def _expand_routing_tokens(part: str) -> List[str]:
     return expanded
 
 
+def _resolve_control_route(job: dict) -> tuple:
+    """The project's durable control conversation for this job: (slug, session_id).
+
+    Explicit-or-nothing, resolved through the same route store as
+    ``deliver=project:<token>`` — so it follows compression to the live tip and
+    raises rather than guessing when a project is unbound.
+
+    ONLY the ``project:`` part of ``deliver`` is considered. Taking
+    ``targets[0]`` would work today (the controllers have a single target) and
+    break the moment someone writes ``deliver=telegram,project:verity``: a
+    Telegram chat id would land in a session-id slot, and the plugin's id
+    validator would happily accept it.
+
+    Returns ("", "") when the job declares no project or the project is
+    unbound. Empty is a refusal to stamp, never an invitation to guess.
+    """
+    deliver = _normalize_deliver_value(job.get("deliver", "local"))
+    if not deliver or deliver == "local":
+        return ("", "")
+    for raw in (p.strip() for p in deliver.split(",")):
+        if not raw.lower().startswith("project:"):
+            continue
+        token = raw.split(":", 1)[1].strip()
+        if not token:
+            continue
+        try:
+            from hermes_cli import project_routes as _routes
+            from hermes_cli import projects_db as _pdb
+
+            with _pdb.connect_closing() as conn:
+                target = _routes.resolve_route_target(conn, token)
+        except LookupError as e:
+            logger.warning(
+                "Job '%s': no control session for project '%s' (%s) — "
+                "missions started this tick will go unstamped rather than "
+                "carry a throwaway session id",
+                job.get("id", "?"), token, e,
+            )
+            return ("", "")
+        except Exception as e:
+            logger.warning(
+                "Job '%s': control route lookup failed for '%s': %s",
+                job.get("id", "?"), token, e,
+            )
+            return ("", "")
+        return (token, str(target.session_id))
+    return ("", "")
+
+
 def _resolve_delivery_targets(job: dict) -> List[dict]:
     """Resolve all concrete auto-delivery targets for a cron job.
 
@@ -3382,6 +3431,8 @@ def run_job(
         "HERMES_CRON_AUTO_DELIVER_PLATFORM",
         "HERMES_CRON_AUTO_DELIVER_CHAT_ID",
         "HERMES_CRON_AUTO_DELIVER_THREAD_ID",
+        "HERMES_CRON_AUTO_DELIVER_CONTROL_SESSION",
+        "HERMES_CRON_AUTO_DELIVER_CONTROL_PROJECT",
     )
     for _var_name in _cron_delivery_vars:
         _VAR_MAP[_var_name].set("")
@@ -3463,6 +3514,14 @@ def run_job(
                 if delivery_target.get("thread_id") is None
                 else str(delivery_target["thread_id"])
             )
+
+        # Publish the project's durable control conversation, when the job
+        # declares one. Missions started during this tick are stamped with it
+        # instead of the tick's own throwaway session, which dies with the tick.
+        _control_project, _control_session = _resolve_control_route(job)
+        if _control_session:
+            _VAR_MAP["HERMES_CRON_AUTO_DELIVER_CONTROL_SESSION"].set(_control_session)
+            _VAR_MAP["HERMES_CRON_AUTO_DELIVER_CONTROL_PROJECT"].set(_control_project)
 
         # Model resolution precedence: per-job override > cron.model (the
         # cron-fleet default) > HERMES_MODEL env > config.yaml ``model:``

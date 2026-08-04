@@ -4875,29 +4875,14 @@ def _mark_server_call_started(server: Any) -> None:
         mark_tool_call()
 
 
-def _make_tool_handler(
-    server_name: str,
-    tool_name: str,
-    tool_timeout: float,
-    injects_session_provenance: bool = False,
-):
+def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """Return a sync handler that calls an MCP tool via the background loop.
 
     The handler conforms to the registry's dispatch interface:
     ``handler(args_dict, **kwargs) -> str``
-
-    ``injects_session_provenance`` is set when the tool's own input schema
-    declares :data:`SESSION_PROVENANCE_ARG` — the server opting in to being
-    told which conversation a call came from (see the constant's docstring).
     """
 
     def _handler(args: dict, **kwargs) -> str:
-        # Stamp the calling session onto tools that asked for it. Done here,
-        # from the dispatcher-supplied session id, so the value is the
-        # gateway's own — a model cannot omit it or name someone else's
-        # conversation.
-        if injects_session_provenance:
-            args = _with_session_provenance(args, kwargs.get("session_id"))
         # Circuit breaker: if this server has failed too many times
         # consecutively, short-circuit with a clear message so the model
         # stops retrying and uses alternative approaches (#10447).
@@ -5530,14 +5515,6 @@ def sanitize_mcp_name_component(value: str) -> str:
 MCP_TOOL_NAME_PREFIX = "mcp__"
 _MCP_NAME_DELIM = "__"
 
-# Argument name an MCP tool declares in its input schema to opt into being
-# told which Hermes conversation is calling it. When present, the dispatcher
-# fills it from the live session id and overwrites anything the model
-# supplied, so a long-running job the tool starts can be routed back to the
-# conversation that asked for it (e.g. sandboxed.sh mission completions).
-# Declaring the argument is the opt-in; no per-server configuration needed.
-SESSION_PROVENANCE_ARG = "origin_session_id"
-
 
 def mcp_prefixed_tool_name(server_name: str, tool_name: str) -> str:
     """Build the registry/wire name for an MCP tool.
@@ -5547,34 +5524,6 @@ def mcp_prefixed_tool_name(server_name: str, tool_name: str) -> str:
     safe_server = sanitize_mcp_name_component(server_name)
     safe_tool = sanitize_mcp_name_component(tool_name)
     return f"{MCP_TOOL_NAME_PREFIX}{safe_server}{_MCP_NAME_DELIM}{safe_tool}"
-
-
-def _with_session_provenance(args: Optional[dict], session_id: Any) -> dict:
-    """Return ``args`` with the calling session stamped in.
-
-    The injected value is written LAST so it overwrites anything the model
-    supplied: provenance is the gateway's statement about where the call came
-    from, not a field the model gets to choose. With no live session id the
-    arguments pass through untouched (the tool's own schema decides whether
-    that is acceptable).
-    """
-    args = dict(args or {})
-    session_id = str(session_id or "").strip()
-    if session_id:
-        args[SESSION_PROVENANCE_ARG] = session_id
-    return args
-
-
-def _declares_session_provenance(schema: dict) -> bool:
-    """True when a converted tool schema opts into session provenance.
-
-    See :data:`SESSION_PROVENANCE_ARG`.
-    """
-    try:
-        properties = (schema.get("parameters") or {}).get("properties") or {}
-    except AttributeError:
-        return False
-    return SESSION_PROVENANCE_ARG in properties
 
 
 def _convert_mcp_schema(server_name: str, mcp_tool) -> dict:
@@ -5922,10 +5871,7 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
                 "origin": f"tool {mcp_tool.name!r}",
                 "schema": schema,
                 "handler": _make_tool_handler(
-                    name,
-                    mcp_tool.name,
-                    server.tool_timeout,
-                    injects_session_provenance=_declares_session_provenance(schema),
+                    name, mcp_tool.name, server.tool_timeout
                 ),
                 "check_fn": check_fn,
             }

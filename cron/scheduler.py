@@ -1575,6 +1575,14 @@ def _resolve_control_route(job: dict) -> tuple:
 
             with _pdb.connect_closing() as conn:
                 target = _routes.resolve_route_target(conn, token)
+                # `deliver` may name the project by UUID or in any case;
+                # publish the CANONICAL slug so downstream grouping and slug
+                # validation see one identity per project, not whichever form
+                # the job happened to be written with.
+                proj = _pdb.get_project(conn, target.project_id) or _pdb.get_project(
+                    conn, token
+                )
+                canonical = getattr(proj, "slug", "") or token
         except LookupError as e:
             logger.warning(
                 "Job '%s': no control session for project '%s' (%s) — "
@@ -1589,7 +1597,7 @@ def _resolve_control_route(job: dict) -> tuple:
                 job.get("id", "?"), token, e,
             )
             return ("", "")
-        return (token, str(target.session_id))
+        return (canonical, str(target.session_id))
     return ("", "")
 
 

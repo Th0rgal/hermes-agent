@@ -169,6 +169,26 @@ def _hmac_str_equal(provided: str, expected: str) -> bool:
     return hmac.compare_digest(provided.encode(), expected.encode())
 
 
+# Hermes session ids look like ``20260803_150605_59ab72``; platform-keyed
+# sessions (``agent:main:telegram:dm:123``) also route. Keep the shape tight —
+# this value selects which conversation a delivery is written into.
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+# How far back to look for the reference that authorises pinning. A
+# conversation that dispatched the work wrote the id when it did so.
+_PIN_LOOKBACK_MESSAGES = 400
+
+
+def _dig(payload: Any, dotted: str) -> Any:
+    """Resolve a dotted path in a decoded JSON payload, or ``None``."""
+    value: Any = payload
+    for part in dotted.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    return value
+
+
 def check_webhook_requirements() -> bool:
     """Check if webhook adapter dependencies are available."""
     return AIOHTTP_AVAILABLE
@@ -904,6 +924,22 @@ class WebhookAdapter(BasePlatformAdapter):
             raw_message=payload,
             message_id=delivery_id,
         )
+        # Opt-in routing: deliver this event into the conversation that
+        # started the work instead of a throwaway per-delivery session.
+        pinned_session_id = await self._resolve_pinned_session(
+            route_name, route_config, payload
+        )
+        if pinned_session_id:
+            event.metadata = {
+                **(getattr(event, "metadata", None) or {}),
+                "gateway_session_id": pinned_session_id,
+            }
+            logger.info(
+                "[webhook] route=%s delivery=%s pinned to session %s",
+                route_name,
+                delivery_id,
+                pinned_session_id,
+            )
 
         logger.info(
             "[webhook] %s event=%s route=%s prompt_len=%d delivery=%s",
@@ -954,8 +990,86 @@ class WebhookAdapter(BasePlatformAdapter):
         fire-and-forget; wrapping IT closes before the run even starts.)
         ``end_session()`` is first-reason-wins and no-ops on an already-ended
         row, so this never clobbers a ``compression``/``agent_close`` reason.
+
+        A pinned delivery (``session_from``) is the one exception: the run
+        landed in a long-lived conversation that the operator is still using,
+        so ending it here would close their session out from under them.
         """
+        if (getattr(event, "metadata", None) or {}).get("gateway_session_id"):
+            return
         await self._end_webhook_session(event, event.source.chat_id)
+
+    async def _resolve_pinned_session(
+        self, route_name: str, route_config: dict, payload: Any
+    ) -> Optional[str]:
+        """Session id this delivery should land in, or ``None`` for default.
+
+        Opt-in per route via ``session_from: <dot.path>`` naming the payload
+        field that carries the originating Hermes session id (sandboxed.sh
+        mission webhooks send ``origin_session``). Routing a delivery into an
+        existing conversation is a write into that conversation, so it is
+        gated three ways: the route must opt in, the value must look like a
+        session id, and — when ``session_requires`` names a payload field —
+        that field's value must actually appear in the target session's
+        recent transcript. The last check is what stops a mislabelled or
+        stale origin from injecting a turn into an unrelated conversation.
+        """
+        field = str(route_config.get("session_from") or "").strip()
+        if not field or not isinstance(payload, dict):
+            return None
+        session_id = str(_dig(payload, field) or "").strip()
+        if not session_id or not _SESSION_ID_RE.match(session_id):
+            return None
+
+        requires_field = str(route_config.get("session_requires") or "").strip()
+        if not requires_field:
+            return session_id
+        needle = str(_dig(payload, requires_field) or "").strip()
+        if not needle:
+            logger.debug(
+                "[webhook] route=%s: session_requires field %r empty; not pinning",
+                route_name,
+                requires_field,
+            )
+            return None
+        if not await self._session_mentions(session_id, needle):
+            logger.info(
+                "[webhook] route=%s: session %s never referenced %s — "
+                "falling back to a per-delivery session",
+                route_name,
+                session_id,
+                needle,
+            )
+            return None
+        return session_id
+
+    async def _session_mentions(self, session_id: str, needle: str) -> bool:
+        """Whether ``needle`` appears in the tail of a session's transcript.
+
+        Bounded to the most recent messages: the reference we are looking for
+        (a mission id the conversation dispatched) is written when the work is
+        started, and a conversation that has since moved thousands of messages
+        past it is no longer a sensible delivery target anyway.
+        """
+        runner = self.gateway_runner
+        session_db = getattr(runner, "_session_db", None) if runner else None
+        if session_db is None:
+            return False
+        try:
+            get_messages = session_db.get_messages
+            rows = get_messages(session_id, limit=_PIN_LOOKBACK_MESSAGES)
+            if asyncio.iscoroutine(rows):
+                rows = await rows
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(
+                "[webhook] transcript lookup failed for %s: %s", session_id, exc
+            )
+            return False
+        for row in rows or []:
+            for value in (row.get("content"), row.get("tool_calls")):
+                if value and needle in str(value):
+                    return True
+        return False
 
     async def _end_webhook_session(
         self, event: "MessageEvent", session_chat_id: str

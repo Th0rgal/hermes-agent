@@ -1244,10 +1244,33 @@ def _normalized_inference_axes(job: Dict[str, Any]) -> Tuple[Optional[str], Opti
 
 
 def _resolve_cron_script_path(script: str) -> Tuple[Path, Path]:
-    """Resolve a cron script against the active profile-scoped store."""
-    scripts_dir = (_current_cron_store().cron_dir.parent / "scripts").resolve()
+    """Resolve a cron script against the active profile-scoped store.
+
+    The store-derived directory is authoritative: cron storage is scoped per
+    profile, and the ambient ``HERMES_HOME`` may belong to a different one in
+    dashboard/gateway callers. The two coincide in every normal install
+    (``$HERMES_HOME/cron`` next to ``$HERMES_HOME/scripts``); they only differ
+    when a caller relocates the store, so fall back to the home-scoped
+    directory when the script actually lives there. Both are trusted roots —
+    containment is still enforced against whichever one is used.
+    """
     raw = Path(script).expanduser()
-    path = raw.resolve() if raw.is_absolute() else (scripts_dir / raw).resolve()
+    scripts_dir = (_current_cron_store().cron_dir.parent / "scripts").resolve()
+    if raw.is_absolute():
+        return raw.resolve(), scripts_dir
+
+    path = (scripts_dir / raw).resolve()
+    if path.is_file():
+        return path, scripts_dir
+
+    try:
+        from hermes_constants import get_hermes_home
+
+        home_scripts = (Path(get_hermes_home()) / "scripts").resolve()
+    except Exception:
+        return path, scripts_dir
+    if home_scripts != scripts_dir and (home_scripts / raw).resolve().is_file():
+        return (home_scripts / raw).resolve(), home_scripts
     return path, scripts_dir
 
 

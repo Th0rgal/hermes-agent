@@ -241,3 +241,47 @@ class TestRouteMigration:
         target = routes.resolve_route_target(conn, project_id, session_db=session_db)
         assert target.session_id == "gen2"
         assert routes.get_route(conn, project_id).session_id == "gen2"
+
+
+class TestBindRouteSourceOverride:
+    """The source allowlist is a heuristic; an operator may override it.
+
+    It exists to stop a project being routed at a machine-created session —
+    on the production host there are 4364 `webhook` and 5634 `cron` rows,
+    nearly all throwaway. But a human does occasionally adopt one as a real
+    working conversation, and no property of the row distinguishes that case
+    (98% of webhook sessions carry user messages, because the inbound payload
+    is itself recorded as one). Hence an explicit escape hatch rather than a
+    cleverer predicate.
+    """
+
+    def test_an_unroutable_source_is_refused_by_default(self, conn, session_db, project_id):
+        _mk_session(session_db, "sess-hook", source="webhook")
+        with pytest.raises(ValueError) as caught:
+            routes.bind_route(conn, project_id, "sess-hook", session_db=session_db)
+        assert "webhook" in str(caught.value)
+        assert "override deliberately" in str(caught.value)
+        assert routes.get_route(conn, project_id) is None
+
+    def test_the_override_binds_it(self, conn, session_db, project_id):
+        _mk_session(session_db, "sess-hook", source="webhook")
+        route = routes.bind_route(
+            conn, project_id, "sess-hook",
+            session_db=session_db, allow_unroutable_source=True,
+        )
+        assert route.session_id == "sess-hook"
+        assert routes.get_route(conn, project_id).session_id == "sess-hook"
+
+    def test_the_override_bypasses_only_the_source_check(self, conn, session_db, project_id):
+        # A missing session is still an error, or the override would become a
+        # way to bind a project to anything at all.
+        with pytest.raises(LookupError):
+            routes.bind_route(
+                conn, project_id, "no-such-session",
+                session_db=session_db, allow_unroutable_source=True,
+            )
+
+    def test_a_routable_source_needs_no_override(self, conn, session_db, project_id):
+        _mk_session(session_db, "sess-desktop", source="desktop")
+        route = routes.bind_route(conn, project_id, "sess-desktop", session_db=session_db)
+        assert route.session_id == "sess-desktop"

@@ -1373,10 +1373,11 @@ def _resolve_project_route_target(job: dict, project_token: str) -> Optional[dic
     if target.source in _TRANSCRIPT_DELIVERY_SOURCES:
         # These sessions have no live messaging adapter once their originating
         # turn ended, so their durable delivery surface is the persisted
-        # transcript. "api_server" here names the DELIVERY MODE — the
-        # local-session append in _deliver_result — not the session's origin.
+        # transcript. Carry the session's REAL source: _deliver_to_local_session
+        # asserts the target session's source matches the platform it was told,
+        # and that guard is worth keeping exact rather than loosening.
         return {
-            "platform": "api_server",
+            "platform": target.source,
             "chat_id": target.session_id,
             "thread_id": None,
         }
@@ -1906,10 +1907,10 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         # origin-scoped cron can safely append its result to that exact
         # conversation without falling back to a configured home platform
         # such as Telegram.
-        if str(platform_name).lower() == "api_server":
+        if str(platform_name).lower() in _TRANSCRIPT_DELIVERY_SOURCES:
             err = _deliver_to_local_session(
                 job,
-                "api_server",
+                str(platform_name).lower(),
                 str(chat_id),
                 content,
             )

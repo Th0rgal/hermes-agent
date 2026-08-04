@@ -42,11 +42,25 @@ class TestTranscriptDeliverySources:
         for source in ("telegram", "discord", "cron", "subagent", "tui"):
             assert source not in scheduler._TRANSCRIPT_DELIVERY_SOURCES
 
-    def test_the_delivery_branch_reads_the_set_not_a_literal(self):
-        # Guards against the branch drifting back to `== "api_server"`, which
-        # is what dropped webhook targets in the first place.
+    def test_both_branches_read_the_set_not_a_literal(self):
+        # Guards against either branch drifting back to `== "api_server"`,
+        # which is what dropped webhook targets in the first place.
         import inspect
 
-        source = inspect.getsource(scheduler._resolve_project_route_target)
-        assert "_TRANSCRIPT_DELIVERY_SOURCES" in source
-        assert 'target.source == "api_server"' not in source
+        resolve = inspect.getsource(scheduler._resolve_project_route_target)
+        assert "_TRANSCRIPT_DELIVERY_SOURCES" in resolve
+        assert 'target.source == "api_server"' not in resolve
+
+        deliver = inspect.getsource(scheduler._deliver_result)
+        assert "_TRANSCRIPT_DELIVERY_SOURCES" in deliver
+        assert 'platform_name).lower() == "api_server"' not in deliver
+
+    def test_the_resolved_target_carries_the_sessions_real_source(self):
+        # _deliver_to_local_session refuses when the session's source does not
+        # equal the platform it was handed. Passing a stand-in name made every
+        # webhook delivery fail that guard: "api_server session … has source
+        # 'webhook'". The platform must stay truthful so the guard stays exact.
+        import inspect
+
+        resolve = inspect.getsource(scheduler._resolve_project_route_target)
+        assert '"platform": target.source' in resolve

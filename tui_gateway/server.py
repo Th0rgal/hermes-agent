@@ -3078,7 +3078,7 @@ def _set_session_context(
         return set_session_vars(
             platform=source if local_session_origin else "",
             session_key=session_key,
-            session_id=session_key,
+            session_id=session_id,
             source=source,
             chat_id=session_key if local_session_origin else "",
             cwd=resolved,

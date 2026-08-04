@@ -3623,6 +3623,30 @@ _CIRCUIT_BREAKER_THRESHOLD = 3
 _CIRCUIT_BREAKER_COOLDOWN_SEC = 60.0
 
 
+#: HTTP statuses that mean the MCP server *answered* and said no. A server
+#: that replies "404 Mission not found" is healthy — it is doing its job.
+#: Excludes 401/403 (handled by the auth-recovery path above), 429 (the server
+#: is refusing load, which the breaker should back off from) and every 5xx.
+_APPLICATION_ERROR_STATUSES = (400, 404, 405, 409, 410, 422)
+
+
+def _is_application_error(exc: BaseException) -> bool:
+    """True when the failure is the server answering, not the server dying.
+
+    The circuit breaker exists to stop the model hammering an *unreachable*
+    server. Counting application-level answers toward it is how a benign 404
+    took the whole sandboxed.sh MCP offline for 60s on 2026-08-04 — three
+    `get_mission_digest` calls for a mission that did not exist tripped the
+    breaker, and `start_mission` went down with it, so an autonomous
+    controller reported "MCP unreachable, cannot dispatch" and did nothing for
+    hours while the server was in perfect health.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    if "McpError" not in type(exc).__name__ and "McpError" not in text:
+        return False
+    return any(str(status) in text for status in _APPLICATION_ERROR_STATUSES)
+
+
 def _bump_server_error(server_name: str) -> None:
     """Increment the consecutive-failure count for ``server_name``.
 
@@ -5047,11 +5071,14 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             result = _call_once()
             # Check if the MCP tool itself returned an error
             try:
-                parsed = json.loads(result)
-                if "error" in parsed:
-                    _bump_server_error(server_name)
-                else:
-                    _reset_server_error(server_name)  # success — reset
+                json.loads(result)
+                # Reached only when the call returned, so the server answered —
+                # including when the tool reports a domain error in its result.
+                # A responding server is not an unreachable one, and counting
+                # its answers toward the breaker makes the breaker's own
+                # message ("unreachable") false. Transport failures still bump,
+                # on the exception path below.
+                _reset_server_error(server_name)
             except (json.JSONDecodeError, TypeError):
                 _reset_server_error(server_name)  # non-JSON = success
             return result
@@ -5078,7 +5105,13 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             if recovered is not None:
                 return recovered
 
-            _bump_server_error(server_name)
+            # An application-level answer (404, 409, 422 …) means the server
+            # is healthy and said no. Counting it toward the breaker takes the
+            # whole server down for every other tool, including start_mission.
+            if not _is_application_error(exc):
+                _bump_server_error(server_name)
+            else:
+                _reset_server_error(server_name)
             logger.error(
                 "MCP tool %s/%s call failed: %s",
                 server_name, tool_name, exc,

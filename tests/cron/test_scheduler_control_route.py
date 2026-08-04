@@ -17,9 +17,10 @@ from cron import scheduler
 
 
 class _Target:
-    def __init__(self, session_id, source="desktop"):
+    def __init__(self, session_id, source="desktop", project_id="p_verity"):
         self.session_id = session_id
         self.source = source
+        self.project_id = project_id
 
 
 @contextlib.contextmanager
@@ -34,10 +35,13 @@ def _resolve_returns(target):
     from hermes_cli import project_routes as routes
     from hermes_cli import projects_db as pdb
 
-    def _resolve(_conn, _token):
+    def _resolve(_conn, _token, **_kw):
         if isinstance(target, Exception):
             raise target
         return target
+
+    class _Project:
+        slug = "verity"
 
     @contextlib.contextmanager
     def _conn():
@@ -45,7 +49,7 @@ def _resolve_returns(target):
 
     with patch.object(routes, "resolve_route_target", _resolve), patch.object(
         pdb, "connect_closing", _conn
-    ):
+    ), patch.object(pdb, "get_project", lambda _c, _t: _Project()):
         yield
 
 
@@ -84,3 +88,65 @@ def test_resolution_failure_is_not_fatal():
     job = {"id": "j1", "deliver": "project:verity"}
     with _resolve_returns(RuntimeError("db gone")):
         assert scheduler._resolve_control_route(job) == ("", "")
+
+
+class TestAgainstTheRealRouteStore:
+    """Exercise the actual projects.db / SessionDB, not a mocked resolver.
+
+    A mock cannot show that `deliver=project:<uuid>` and
+    `deliver=project:<MixedCase>` both publish the SAME canonical slug — and
+    that is exactly the identity downstream grouping keys on.
+    """
+
+    @staticmethod
+    def _patch_store(monkeypatch, conn):
+        import contextlib
+
+        from hermes_cli import projects_db as pdb
+
+        @contextlib.contextmanager
+        def _conn():
+            yield conn
+
+        monkeypatch.setattr(pdb, "connect_closing", _conn)
+
+    def test_uuid_and_mixed_case_both_publish_the_canonical_slug(
+        self, monkeypatch, tmp_path
+    ):
+        import pytest as _pytest  # noqa: F401  (fixtures come from the module)
+        from hermes_cli import project_routes as routes
+        from hermes_cli import projects_db as pdb
+        from hermes_state import SessionDB
+
+        conn = pdb.connect(db_path=tmp_path / "projects.db")
+        session_db = SessionDB(db_path=tmp_path / "state.db")
+        try:
+            project_id = pdb.create_project(conn, name="Verity", folders=[])
+            proj = pdb.get_project(conn, project_id)
+            session_db.create_session(
+                session_id="20260804_103847_86ca5c", source="desktop"
+            )
+            routes.bind_route(
+                conn, project_id, "20260804_103847_86ca5c", session_db=session_db
+            )
+            self._patch_store(monkeypatch, conn)
+            # resolve_route_target opens the default state.db unless handed one;
+            # pin it to this test's SessionDB.
+            _real_resolve = routes.resolve_route_target
+            monkeypatch.setattr(
+                routes,
+                "resolve_route_target",
+                lambda c, t, **kw: _real_resolve(c, t, session_db=session_db),
+            )
+
+            for token in (project_id, proj.slug, proj.slug.upper()):
+                slug, session = scheduler._resolve_control_route(
+                    {"id": "j", "deliver": f"project:{token}"}
+                )
+                assert session == "20260804_103847_86ca5c", token
+                assert slug == proj.slug, (
+                    f"token {token!r} must publish the canonical slug, got {slug!r}"
+                )
+        finally:
+            session_db.close()
+            conn.close()

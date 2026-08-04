@@ -57,6 +57,7 @@ import { useComposerScope } from './composer/scope'
 import type { ChatBarState } from './composer/types'
 import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-actions'
 import { type DragKind, useFileDropZone } from './hooks/use-file-drop-zone'
+import { MissionTag, useSessionMissions } from './mission-tag'
 import { ProfileTag } from './profile-tag'
 import { useRuntimeMessageRepository } from './runtime-repository'
 import { ScrollToBottomButton } from './scroll-to-bottom-button'
@@ -121,6 +122,13 @@ function ChatHeader({
   // (#66003). Single-profile users see the unchanged header.
   const showProfileTag = profiles.length > 1 && Boolean(activeStoredSession)
 
+  // Missions this conversation spawned. Null while loading, and also when the
+  // gateway has no sandboxed.sh to ask — the tag simply does not appear.
+  const sessionMissions = useSessionMissions(
+    selectedSessionId || activeSessionId,
+    activeStoredSession?.profile
+  )
+
   // Pins live on the durable lineage-root id, but selectedSessionId is the live
   // (tip) id — resolve through the loaded row so the menu reflects the pin
   // state after auto-compression rotates the id.
@@ -147,6 +155,7 @@ function ChatHeader({
         }}
       >
         {showProfileTag && <ProfileTag className="pointer-events-auto mr-1.5" profile={activeStoredSession?.profile} />}
+        <MissionTag className="pointer-events-auto mr-1.5" missions={sessionMissions} />
         <SessionActionsMenu
           align="start"
           onDelete={selectedSessionId ? onDeleteSelectedSession : undefined}

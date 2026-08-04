@@ -4793,6 +4793,12 @@ def _strip_session_list_rows(sessions: List[Dict[str, Any]]) -> List[Dict[str, A
 from hermes_cli.web_routers import sessions as _sessions_routes  # noqa: E402
 
 app.include_router(_sessions_routes.list_router)
+# Registered next to the session routes it extends. Read-only proxy to the
+# sandboxed.sh mission inventory so desktop clients need no backend credential
+# of their own.
+from hermes_cli.web_routers import missions as _missions_routes  # noqa: E402
+
+app.include_router(_missions_routes.router)
 from hermes_cli.web_routers.sessions import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
     get_sessions,
 )

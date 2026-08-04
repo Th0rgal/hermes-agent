@@ -1244,33 +1244,23 @@ def _normalized_inference_axes(job: Dict[str, Any]) -> Tuple[Optional[str], Opti
 
 
 def _resolve_cron_script_path(script: str) -> Tuple[Path, Path]:
-    """Resolve a cron script against the active profile-scoped store.
+    """Resolve a cron script against the profile that owns the job.
 
-    The store-derived directory is authoritative: cron storage is scoped per
-    profile, and the ambient ``HERMES_HOME`` may belong to a different one in
-    dashboard/gateway callers. The two coincide in every normal install
-    (``$HERMES_HOME/cron`` next to ``$HERMES_HOME/scripts``); they only differ
-    when a caller relocates the store, so fall back to the home-scoped
-    directory when the script actually lives there. Both are trusted roots —
-    containment is still enforced against whichever one is used.
+    Under an explicit :func:`use_cron_store` override the job belongs to that
+    profile, and only that profile's ``scripts/`` may authorize it — a
+    same-named script in another profile must never stand in. Without an
+    override the owning profile is simply the active home, so resolve against
+    ``get_hermes_home()`` rather than the store's parent directory: the two
+    coincide in a normal install, but a caller that re-points only the cron
+    constants (dashboard, tests) still keeps its own scripts directory.
     """
+    override = _cron_store_override.get()
+    if override is not None:
+        scripts_dir = (override.cron_dir.parent / "scripts").resolve()
+    else:
+        scripts_dir = (get_hermes_home() / "scripts").resolve()
     raw = Path(script).expanduser()
-    scripts_dir = (_current_cron_store().cron_dir.parent / "scripts").resolve()
-    if raw.is_absolute():
-        return raw.resolve(), scripts_dir
-
-    path = (scripts_dir / raw).resolve()
-    if path.is_file():
-        return path, scripts_dir
-
-    try:
-        from hermes_constants import get_hermes_home
-
-        home_scripts = (Path(get_hermes_home()) / "scripts").resolve()
-    except Exception:
-        return path, scripts_dir
-    if home_scripts != scripts_dir and (home_scripts / raw).resolve().is_file():
-        return (home_scripts / raw).resolve(), home_scripts
+    path = raw.resolve() if raw.is_absolute() else (scripts_dir / raw).resolve()
     return path, scripts_dir
 
 

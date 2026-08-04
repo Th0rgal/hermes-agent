@@ -1288,6 +1288,15 @@ def cron_delivery_targets() -> list[dict]:
 # They must never reach ``gateway.config.Platform(...)``. Tag their targets so
 # ``_deliver_result`` can split them out before the messaging-adapter loop.
 _LOCAL_SESSION_PLATFORMS = frozenset({"desktop", "webui"})
+
+#: Sources whose delivery surface is the persisted transcript rather than a
+#: live adapter. `webhook` is here because a human can adopt a webhook-created
+#: session as a working conversation — "Audit formel Lean de Lido #20" is one —
+#: and project routes may be bound to those deliberately
+#: (project_routes.bind_route(allow_unroutable_source=True)). Without this the
+#: route binds and resolves, then every delivery is dropped as "unsupported
+#: source": the controller reports success, the operator sees nothing.
+_TRANSCRIPT_DELIVERY_SOURCES = frozenset({"api_server", "webhook"})
 _LOCAL_SESSION_TARGET_KIND = "local_session"
 
 
@@ -1361,9 +1370,11 @@ def _resolve_project_route_target(job: dict, project_token: str) -> Optional[dic
 
     if target.source in _LOCAL_SESSION_PLATFORMS:
         return _local_session_delivery_target(target.source, target.session_id)
-    if target.source == "api_server":
-        # _deliver_result routes api_server targets through the same durable
-        # local-session append; it just isn't tagged as a local platform.
+    if target.source in _TRANSCRIPT_DELIVERY_SOURCES:
+        # These sessions have no live messaging adapter once their originating
+        # turn ended, so their durable delivery surface is the persisted
+        # transcript. "api_server" here names the DELIVERY MODE — the
+        # local-session append in _deliver_result — not the session's origin.
         return {
             "platform": "api_server",
             "chat_id": target.session_id,

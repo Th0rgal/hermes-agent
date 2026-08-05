@@ -3627,24 +3627,51 @@ _CIRCUIT_BREAKER_COOLDOWN_SEC = 60.0
 #: that replies "404 Mission not found" is healthy — it is doing its job.
 #: Excludes 401/403 (handled by the auth-recovery path above), 429 (the server
 #: is refusing load, which the breaker should back off from) and every 5xx.
-_APPLICATION_ERROR_STATUSES = (400, 404, 405, 409, 410, 422)
+#: Conditions where the server answered but backing off is still right: it is
+#: overloaded, rate-limited, its upstream is broken, or it will not authorise
+#: us. Auth has its own recovery pass earlier in the handler; reaching here
+#: means that pass already failed, and a persistently unauthorised server is
+#: not usefully callable. Everything else an McpError carries is an
+#: application answer.
+_BACKOFF_MARKERS = (
+    "401",
+    "403",
+    "unauthorized",
+    "forbidden",
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "rate limit",
+    "too many requests",
+    "overloaded",
+    "service unavailable",
+    "internal server error",
+)
 
 
 def _is_application_error(exc: BaseException) -> bool:
     """True when the failure is the server answering, not the server dying.
 
-    The circuit breaker exists to stop the model hammering an *unreachable*
-    server. Counting application-level answers toward it is how a benign 404
-    took the whole sandboxed.sh MCP offline for 60s on 2026-08-04 — three
-    `get_mission_digest` calls for a mission that did not exist tripped the
-    breaker, and `start_mission` went down with it, so an autonomous
-    controller reported "MCP unreachable, cannot dispatch" and did nothing for
-    hours while the server was in perfect health.
+    `McpError` is the protocol's error *response* type: receiving one proves
+    the server was reachable and replied. Transport failures surface as
+    TimeoutError, ConnectionError and friends instead. So the test is a
+    denylist, not an allowlist — anything McpError carries is an application
+    answer unless it names a condition worth backing off from.
+
+    It was an allowlist of HTTP statuses first, and that shape kept being
+    wrong. A benign 404 took the whole sandboxed.sh MCP offline for 60s on
+    2026-08-04 (`start_mission` went down with it, and an autonomous
+    controller reported "MCP unreachable, cannot dispatch" for hours). The
+    status allowlist fixed that case and missed the next: `Invalid UUID:
+    e594d751447d` carries no status at all, so three argument-validation
+    errors tripped the breaker again at 03:07 the following morning.
     """
-    text = f"{type(exc).__name__}: {exc}"
-    if "McpError" not in type(exc).__name__ and "McpError" not in text:
+    if "McpError" not in type(exc).__name__:
         return False
-    return any(str(status) in text for status in _APPLICATION_ERROR_STATUSES)
+    text = f"{exc}".lower()
+    return not any(marker in text for marker in _BACKOFF_MARKERS)
 
 
 def _bump_server_error(server_name: str) -> None:

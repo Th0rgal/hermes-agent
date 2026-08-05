@@ -35,6 +35,11 @@ class TestIsApplicationError:
             "Bad request: 400",
             "Conflict: 409 already exists",
             "Unprocessable: 422",
+            # No HTTP status at all — the shape that slipped through the
+            # status allowlist and tripped the breaker at 03:07 on 2026-08-05.
+            "Invalid UUID: e594d751447d",
+            "mission_id is required",
+            "unknown tool: frobnicate",
         ],
     )
     def test_a_server_that_answered_is_not_a_failure(self, message):
@@ -47,6 +52,12 @@ class TestIsApplicationError:
             "Bad gateway: 502",
             "Service unavailable: 503",
             "Rate limited: 429",
+            "upstream is overloaded, retry later",
+            "too many requests",
+            # Auth has its own recovery pass earlier; reaching the classifier
+            # means it already failed, and hammering on is pointless.
+            "Unauthorized: 401",
+            "Forbidden: 403",
         ],
     )
     def test_a_server_in_trouble_still_counts(self, message):
@@ -59,11 +70,13 @@ class TestIsApplicationError:
         assert mcp_tool._is_application_error(TimeoutError("timed out")) is False
         assert mcp_tool._is_application_error(ConnectionError("refused")) is False
 
-    def test_auth_errors_are_left_to_the_auth_path(self):
-        # 401/403 have their own recovery flow upstream; they must not be
-        # reclassified as benign here.
-        assert mcp_tool._is_application_error(_McpError("Unauthorized: 401")) is False
-        assert mcp_tool._is_application_error(_McpError("Forbidden: 403")) is False
+    def test_an_argument_validation_error_is_an_answer(self):
+        # The regression that motivated inverting the allowlist: a controller
+        # passed cron job ids to get_workspace_job, the server rejected them
+        # correctly, and three rejections took the whole MCP offline.
+        assert mcp_tool._is_application_error(
+            _McpError("Invalid UUID: e594d751447d")
+        ) is True
 
 
 class TestBreakerAccounting:

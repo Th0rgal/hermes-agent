@@ -430,7 +430,6 @@ class CLIAgentSetupMixin:
                     f"transcript.[/dim]"
                 )
                 self.session_id = resolved_id
-            _publish_active_session_id(self.session_id)
                 _publish_active_session_id(self.session_id)
                 resolved_meta = self._session_db.get_session(self.session_id)
                 if resolved_meta:
@@ -642,6 +641,7 @@ class CLIAgentSetupMixin:
                 f"{resolved_id}; resuming the descendant with your transcript.[/]"
             )
             self.session_id = resolved_id
+            _publish_active_session_id(self.session_id)
             resolved_meta = self._session_db.get_session(self.session_id)
             if resolved_meta:
                 session_meta = resolved_meta

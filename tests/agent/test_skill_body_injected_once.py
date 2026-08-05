@@ -165,3 +165,51 @@ class TestTheContinuationChain:
         db = self._ChainDB([], [])
         with patch("hermes_state.SessionDB", return_value=db):
             assert not skill_commands._skill_already_loaded("child", "sandboxed-sh-missions")
+
+
+class TestTheGuardAnnouncesItsOwnBlindness:
+    """A guard that cannot run must say so.
+
+    Measured 2026-08-05: 12 full injections of `sandboxed-sh-missions` in four
+    hours across 11 sessions — 1.1 MB, roughly 271k tokens on one document.
+    Seven of those sessions were ephemeral (`cron_…` ticks and subagents), where
+    a per-conversation guard cannot help by construction. The rest showed a
+    guard that had simply never had anything to search.
+
+    Nothing in the logs said "I could not check". Silence read as "checked,
+    nothing found" — the same failure shape as a controller ticking
+    `last_status: ok` while dispatching nothing.
+    """
+
+    def test_a_missing_session_id_is_logged(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger=skill_commands.logger.name):
+            assert not skill_commands._skill_already_loaded(None, "sandboxed-sh-missions")
+        assert "guard disabled" in caplog.text
+        assert "sandboxed-sh-missions" in caplog.text
+
+    def test_an_empty_session_id_is_logged_too(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger=skill_commands.logger.name):
+            assert not skill_commands._skill_already_loaded("", "x")
+        assert "guard disabled" in caplog.text
+
+    def test_a_missing_skill_name_is_not_worth_a_warning(self, caplog):
+        # No skill name means no injection is happening at all. Warning here
+        # would be noise, and noise is what makes a real warning invisible.
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger=skill_commands.logger.name):
+            assert not skill_commands._skill_already_loaded("s1", "")
+        assert caplog.text == ""
+
+    def test_a_working_guard_stays_quiet(self, caplog):
+        import logging
+
+        db = _DB([_body_message("sandboxed-sh-missions")])
+        with caplog.at_level(logging.WARNING, logger=skill_commands.logger.name):
+            with patch("hermes_state.SessionDB", return_value=db):
+                assert skill_commands._skill_already_loaded("s1", "sandboxed-sh-missions")
+        assert "guard disabled" not in caplog.text

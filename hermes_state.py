@@ -2081,6 +2081,11 @@ def quarantine_zeroed_state_db(path: Path) -> Optional[Path]:
             handle.close()
 
 
+# Mirrors ``run_agent._DB_PERSISTED_MARKER`` and the copy in
+# ``agent/context_compressor``. Spelled out here rather than imported so
+# hermes_state keeps no agent-layer import; a test asserts the three agree.
+_DB_PERSISTED_MARKER = "_db_persisted"
+
 # A cron delivery is stored as an ``observed`` ASSISTANT row prefixed with this
 # sentinel (see ``cron/scheduler.py``). The role is right for the surfaces that
 # read the transcript — the dashboard watcher, the desktop divider pill and the
@@ -7663,6 +7668,33 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     except (json.JSONDecodeError, TypeError):
                         logger.warning("Failed to deserialize codex_message_items, falling back to None")
                         msg["codex_message_items"] = None
+            # Every row here came OUT of the database, so it is already
+            # persisted by construction. Say so, or the turn flush writes it
+            # again.
+            #
+            # `_flush_messages_to_session_db` (run_agent.py) writes any message
+            # not carrying this marker, reusing the message's own `timestamp`.
+            # A cold resume seeds conversation_history from this loader, so
+            # without the marker every restored row looks new.
+            #
+            # Measured 2026-08-05 on session 20260803_161851_073bb5: 259
+            # messages, of which 127 were the transcript re-appended whole --
+            # all 69 tool_call_ids duplicated at a constant offset of 127, and
+            # ts[127] == ts[0] exactly. The copied timestamps are what prove
+            # these were rewrites of loaded rows rather than fresh calls. The
+            # session then passed the context limit and could no longer
+            # compress: an absorbing state.
+            #
+            # agent/conversation_compression.py documents this same failure for
+            # the preflight-compression path and fixes it there with a
+            # conversation_history boundary (#68196). One boundary per caller
+            # enumerates the paths already seen; marking at the single loader
+            # covers the CLI, the gateway, the TUI and ACP at once.
+            #
+            # Direction of risk: marking a row that IS in the database can only
+            # prevent a duplicate write. Leaving it unmarked is what produced
+            # this bug.
+            msg[_DB_PERSISTED_MARKER] = True
             _reframe_delivery_as_input(msg)
             if include_ancestors and self._is_duplicate_replayed_user_message(messages, msg):
                 continue

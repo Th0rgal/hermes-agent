@@ -50,8 +50,25 @@ def _contents(rows):
     return [r.get("content") for r in rows]
 
 
-def test_rotation_flush_without_history_boundary_duplicates(tmp_path: Path) -> None:
-    """Control: bare flush of unstamped cold-resume rows double-writes (#68454)."""
+def test_rotation_flush_without_history_boundary_no_longer_duplicates(
+    tmp_path: Path,
+) -> None:
+    """The boundary is now a belt, not the only brace.
+
+    This asserted the *bug* -- a bare flush of cold-resumed rows double-wrote,
+    and only a ``conversation_history=`` boundary at each caller prevented it.
+    Passing that boundary everywhere is an enumeration of the callers already
+    known, and session 20260803_161851_073bb5 proved one was missing: 259
+    messages, 127 of them the transcript re-appended whole, all 69 tool_call_ids
+    duplicated at a constant offset and ``ts[127] == ts[0]`` exactly.
+
+    ``_rows_to_conversation`` now stamps ``_DB_PERSISTED_MARKER`` on every row it
+    returns -- a row loaded from the database is persisted by construction -- so
+    the flush skips them whether or not the caller remembered the boundary.
+
+    The companion test below keeps the boundary path covered: it is still the
+    right call shape, and it must stay a no-op.
+    """
     db = SessionDB(db_path=tmp_path / "state.db")
     sid = "COLD_ROTATE_DUP"
     db.create_session(sid, source="cli")
@@ -60,10 +77,12 @@ def test_rotation_flush_without_history_boundary_duplicates(tmp_path: Path) -> N
 
     loaded = db.get_messages_as_conversation(sid)
     agent = _make_flush_agent(db, sid)
-    agent._flush_messages_to_session_db(loaded)  # missing conversation_history=
+    agent._flush_messages_to_session_db(loaded)  # no conversation_history=
 
     rows = db.get_messages_as_conversation(sid, include_inactive=True)
-    assert _contents(rows).count("persisted question") == 2
+    assert _contents(rows).count("persisted question") == 1, (
+        "a row read out of the database was written back into it"
+    )
 
 
 def test_rotation_flush_with_history_boundary_is_noop(tmp_path: Path) -> None:

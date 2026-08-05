@@ -147,9 +147,17 @@ def test_spool_preserves_observed_delivery_provenance(tmp_path, monkeypatch):
 
     verify = SessionDB(path)
     try:
-        [message] = verify.get_messages_as_conversation("desktop-1")
-        assert message["role"] == "assistant"
-        assert message["observed"] is True
+        # Storage keeps the assistant role: the dashboard delivery watcher
+        # filters on it in SQL, and the desktop divider checks it too.
+        [stored] = verify.get_messages("desktop-1")
+        assert stored["role"] == "assistant"
+        assert stored["observed"]
+
+        # The replay projection reframes it as input, because the model must
+        # not read another conversation's report as its own turn.
+        [replayed] = verify.get_messages_as_conversation("desktop-1")
+        assert replayed["role"] == "user"
+        assert replayed["observed"] is True
     finally:
         verify.close()
 

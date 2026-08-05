@@ -958,8 +958,16 @@ def scoped_deferrable_names(tool_defs: List[Dict[str, Any]]) -> frozenset[str]:
     names: set[str] = set()
     for td in tool_defs:
         name = (td.get("function") or {}).get("name", "")
-        if name and is_deferrable_tool_name(name):
-            names.add(name)
+        if not name or name in BRIDGE_TOOL_NAMES:
+            continue
+        # Every tool in the session's own scope, not only the deferrable
+        # subset. The gate exists to stop a restricted session reaching a tool
+        # it was never granted -- and a tool sitting in this very list was
+        # granted. Excluding the directly-available ones did not add safety
+        # (the model can call them straight), it only made the bridge refuse
+        # work it was allowed to do. Bridge tools stay out: tool_call must not
+        # recurse into itself.
+        names.add(name)
     return frozenset(names)
 
 
@@ -1028,7 +1036,17 @@ def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[s
     """
     name = str(args.get("name") or "").strip()
     if not name:
-        return None, {}, "tool_call requires a 'name' argument"
+        # 13 occurrences in three hours on 2026-08-05, the single most common
+        # tool error on the box. The model puts the target's arguments at the
+        # top level and omits the wrapper. Echoing the keys it did send is what
+        # makes that visible on the first try instead of the third.
+        keys = ", ".join(sorted(str(k) for k in args)) if args else "none"
+        return None, {}, (
+            "tool_call requires a 'name' argument naming the tool to invoke. "
+            f"Received keys: {keys}. Call it as "
+            'tool_call(name="<tool>", arguments={...}), or invoke the tool '
+            "directly if it is already in your tools list."
+        )
     if name in BRIDGE_TOOL_NAMES:
         return None, {}, f"tool_call cannot invoke '{name}' (it is itself a bridge tool)"
     raw_args = args.get("arguments")
@@ -1041,11 +1059,13 @@ def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[s
             return None, {}, f"tool_call 'arguments' is not valid JSON: {e}"
     if not isinstance(raw_args, dict):
         return None, {}, "tool_call 'arguments' must be an object"
-    if not is_deferrable_tool_name(name):
-        return None, {}, (
-            f"'{name}' is not a deferrable tool. If it appears in the model-facing tools "
-            "list already, call it directly instead of via tool_call."
-        )
+    # Deliberately NOT gated on is_deferrable_tool_name here. This function
+    # parses; the callers authorise, each against the session's own scope
+    # (scoped_deferrable_names / _tool_search_scoped_names). Refusing a
+    # directly-available tool at parse time cost a whole turn and taught
+    # nothing: measured 2026-08-05, controllers spent turns bouncing off this
+    # branch instead of dispatching missions, and the sessions ticked
+    # `last_status: ok` with no mission movement for hours.
     return name, raw_args, None
 
 

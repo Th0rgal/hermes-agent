@@ -2188,6 +2188,71 @@ def _elide_superseded_deliveries(messages: List[Dict[str, Any]]) -> int:
     return len(superseded)
 
 
+# A skill body is injected as a user message opening with this prefix and
+# carrying the loaded-below marker. Both are spelled out here rather than
+# imported from ``agent.skill_commands`` to keep this module's import surface
+# flat; a test asserts the three copies agree.
+_SKILL_BODY_RE = re.compile(
+    r'^\[IMPORTANT: The user has invoked the "([^"]{1,200})" skill'
+)
+_SKILL_BODY_MARKER = "The full skill content is loaded below.]"
+
+
+def _elide_superseded_skill_bodies(messages: List[Dict[str, Any]]) -> int:
+    """Replay the LAST copy of each skill body, and only that one.
+
+    A skill body is a static document — ``sandboxed-sh-missions`` is 94 KB —
+    and a second copy of it teaches the model nothing the first did not. But
+    copies accumulate: measured on production 2026-08-05, five injections in
+    one Verity session (~435 KB), four in a Lido session where three copies
+    were 75% of the whole context, and two in "Audit formel Lean de Lido #27"
+    where one was 46% of an 85-message conversation.
+
+    ``agent.skill_commands`` already declines to re-send a body it can see in
+    the conversation, and that guard now spans the continuation chain. This is
+    the read-side counterpart: it repairs sessions that already carry copies,
+    and it covers whatever path produced a duplicate anyway — one did on
+    2026-08-05 and the cause is still unidentified.
+
+    The last copy is the one kept, not the first: it is the version the model
+    most recently agreed to follow, and if the skill file changed between
+    invocations it is also the current text.
+
+    Only the replayed text changes. The stored rows keep every copy, so the
+    guard in ``skill_commands`` still finds them and the operator still reads
+    what actually happened.
+
+    Returns the number of copies elided.
+    """
+    positions: Dict[str, List[int]] = {}
+    for index, message in enumerate(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or _SKILL_BODY_MARKER not in content:
+            continue
+        match = _SKILL_BODY_RE.match(content)
+        if match:
+            positions.setdefault(match.group(1), []).append(index)
+
+    elided = 0
+    for skill_name, indexes in positions.items():
+        for rank, index in enumerate(indexes[:-1]):
+            later = len(indexes) - rank - 1
+            messages[index]["content"] = (
+                f'[IMPORTANT: The user has invoked the "{skill_name}" skill. '
+                "Its full instructions appear later in this conversation, in "
+                f"the most recent of {len(indexes)} invocations — follow those. "
+                f"This earlier copy is elided from replay; {later} later "
+                f"cop{'ies follow' if later != 1 else 'y follows'}.]"
+            )
+            # The body is gone, so a sidecar holding the old bytes would put it
+            # straight back at transport time.
+            messages[index].pop("api_content", None)
+            elided += 1
+    return elided
+
+
 def _reframe_delivery_as_input(msg: Dict[str, Any]) -> None:
     """Replay a cron delivery as input with provenance, not as the model's turn.
 
@@ -7807,6 +7872,14 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         messages = _strip_stale_tool_call_markers(messages)
         # Bound the controller-report history the model replays. Storage is
         # untouched; only this projection shrinks.
+        _elided_bodies = _elide_superseded_skill_bodies(messages)
+        if _elided_bodies:
+            logger.debug(
+                "Elided %d superseded skill body/bodies from the replay of "
+                "session %s",
+                _elided_bodies,
+                session_id,
+            )
         _elided = _elide_superseded_deliveries(messages)
         if _elided:
             logger.debug(

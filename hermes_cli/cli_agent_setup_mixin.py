@@ -19,6 +19,35 @@ import sys
 from rich.markup import escape as _escape
 
 
+def _publish_active_session_id(session_id: str) -> None:
+    """Publish a newly-selected session id to the process session context.
+
+    ``set_current_session_id`` exists for exactly this: "long-lived
+    single-process entrypoints like the CLI can rotate sessions via /new,
+    /resume, /branch". The CLI reassigned ``self.session_id`` in four places
+    without ever calling it, so ``HERMES_SESSION_ID`` kept the pre-resume value
+    (or none at all) for the rest of the process.
+
+    Measured 2026-08-05: missions dispatched from a resumed CLI session landed
+    with ``origin_session_id=None``, so the sandboxed.sh server could not infer
+    their project from the conversation binding either -- mission
+    57c1dfb4 ("Phase 2 A.3") ran ACTIVE with project=None, track=None, invisible
+    to every project inventory and to the board. The controller reported a
+    dispatch; the inventory showed none.
+
+    Best-effort by design: a session that cannot publish its id is still a
+    usable session, and this must never be the reason a resume fails.
+    """
+    if not session_id:
+        return
+    try:
+        from gateway.session_context import set_current_session_id
+
+        set_current_session_id(session_id)
+    except Exception:
+        logger.debug("could not publish active session id", exc_info=True)
+
+
 class CLIAgentSetupMixin:
     """Agent construction + session-resume display methods for ``HermesCLI``."""
 
@@ -401,6 +430,8 @@ class CLIAgentSetupMixin:
                     f"transcript.[/dim]"
                 )
                 self.session_id = resolved_id
+            _publish_active_session_id(self.session_id)
+                _publish_active_session_id(self.session_id)
                 resolved_meta = self._session_db.get_session(self.session_id)
                 if resolved_meta:
                     session_meta = resolved_meta

@@ -40,6 +40,9 @@ from hermes_cli.browser_connect import (
 )
 
 
+from hermes_cli.cli_agent_setup_mixin import _publish_active_session_id
+
+
 class CLICommandsMixin:
     """Mixin holding the interactive-CLI slash-command handlers.
 
@@ -974,6 +977,7 @@ class CLICommandsMixin:
 
         # Switch to the target session
         self.session_id = target_id
+        _publish_active_session_id(self.session_id)
         self._resumed = True
         self._pending_title = None
         _sync_process_session_id(target_id)
@@ -1207,6 +1211,7 @@ class CLICommandsMixin:
         # Switch to the new session
         self._transfer_session_yolo(self.session_id, new_session_id)
         self.session_id = new_session_id
+        _publish_active_session_id(self.session_id)
         self.session_start = now
         self._pending_title = None
         self._resumed = True  # Prevents auto-title generation

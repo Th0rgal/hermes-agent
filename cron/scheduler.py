@@ -856,6 +856,16 @@ def _deliver_to_local_session(
                 delivery_content,
                 observed=True,
                 delivery_id=delivery_id,
+                # The `[Cron delivery: …]` prefix is provenance for the reader.
+                # The model must not see it: a project conversation is mostly
+                # controller reports — 132 of them against a handful of human
+                # turns in one measured session — so a model whose context is
+                # a wall of `[Cron delivery: …]` openers learns that the next
+                # message is one too. It then answers a direct question by
+                # reproducing old reports verbatim instead of replying.
+                # `api_content` is the persist-override sidecar: stored text
+                # keeps the label, replayed text does not.
+                api_content=text,
             )
             logger.info(
                 "Job '%s': delivered to %s session %s",

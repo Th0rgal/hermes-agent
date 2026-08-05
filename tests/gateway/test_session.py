@@ -475,6 +475,11 @@ class TestSessionStoreSwitchSession:
         )
         current_entry = store.get_or_create_session(source)
         current_session_id = current_entry.session_id
+        # Give the outgoing session content: an EMPTY outgoing session is now
+        # deleted on switch rather than ended (see
+        # test_switch_deletes_empty_shells.py). This test's subject is the
+        # used-session path: promote to session_switch and reopen the target.
+        db.append_message(current_session_id, "user", "some real turn")
 
         target_session_id = "old_session_abc"
         db.create_session(target_session_id, source="feishu", user_id="user-1")

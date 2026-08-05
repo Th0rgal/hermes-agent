@@ -2145,17 +2145,31 @@ def _reframe_delivery_as_input(msg: Dict[str, Any]) -> None:
         return
 
     label = (match.group(1) or "").strip() or "cron"
-    body = content[match.end():]
+
+    # An operator (or a future trimmer) may have elided this delivery for the
+    # model by writing a short `api_content` while leaving the stored report
+    # intact for the reader. Honour it: use the sidecar as the body.
+    #
+    # Discarding it was a real loss of a lever. Measured 2026-08-05 on "Verity
+    # dev #32": 22 controller reports were 43% of the conversation -- 75 513 of
+    # 175 200 characters -- and it could no longer accept a message. Because a
+    # delivery's sidecar was thrown away, the only way to shrink it was to
+    # deactivate those rows, which takes them out of the operator's transcript
+    # too. Eliding is the non-destructive lever and it has to work here.
+    sidecar = msg.get("api_content")
+    if isinstance(sidecar, str) and sidecar.strip():
+        body = sidecar
+    else:
+        body = content[match.end():]
     msg["role"] = "user"
     # The sentinel stays at the front: the TUI's own delivery divider matches on
     # it, and it is the provenance a human reader looks for.
     msg["content"] = (
         f"[Cron delivery: {label}] {_DELIVERY_PROVENANCE.format(label=label)}\n{body}"
     )
-    # The sidecar holds the exact bytes previously sent for this row. The
-    # content is now rewritten, so those bytes are stale — keeping them would
-    # substitute the unframed text straight back in at transport time and undo
-    # everything above.
+    # Drop the sidecar either way: its bytes are now *inside* `content` above,
+    # framed. Leaving it would substitute the unframed text straight back in at
+    # transport time and undo the reframing.
     msg.pop("api_content", None)
     for field in _ASSISTANT_ONLY_REPLAY_FIELDS:
         msg.pop(field, None)

@@ -313,8 +313,35 @@ SILENT_MARKER = "[SILENT]"
 # autonomous lanes cannot drift apart.
 
 _CRON_SILENCE_TOKENS = frozenset({"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY"})
+# `[STATE_SIGNATURE: …]` is a machine token: the first field routes, the rest
+# describes state, and a background ingestor folds it into a timeline. It is not
+# for the reader.
+#
+# The previous pattern anchored the marker to a whole line, starting with `[`,
+# with no `]` inside and at most 512 characters. Measured 2026-08-05 on two live
+# project conversations, the model emitted it four other ways, and every one
+# reached the operator's screen verbatim:
+#
+#   `[STATE_SIGNATURE: verity|phase1k|…]`         wrapped in backticks
+#   **Status signature:** `[STATE_SIGNATURE: …]`  introduced by a bold label
+#   [STATE_SIGNATURE: …|next-tick [blocked]]      a bracket inside the payload
+#   [STATE_SIGNATURE: …]                          longer than 512 characters
+#
+# So the token is now matched wherever it appears, with its usual markdown
+# wrappers, rather than only as a bare whole line. That is safe because the
+# token is unambiguous — no prose contains `[STATE_SIGNATURE:` — and the failure
+# direction matters: a marker that survives is read by a human as noise, while a
+# stray strip only loses a line the reader was never meant to see.
+#
+# The payload match is GREEDY so it runs to the LAST `]` on the line, which is
+# what handles a nested `[blocked]`. Lazy matching would stop at the first `]`
+# and leave the remainder stranded in the text.
 _STATE_SIGNATURE_RE = re.compile(
-    r"(?im)^[ \t]*\[STATE_SIGNATURE:\s*([^\]\r\n]{1,512})\][ \t]*$"
+    r"(?i)"
+    r"(?:\*\*[^*\r\n]{0,64}?\*\*[ \t]*:?[ \t]*)?"   # optional bold label
+    r"`?"                                            # optional code span
+    r"\[STATE_SIGNATURE:[ \t]*([^\r\n]{1,4096})\]"
+    r"`?"
 )
 
 
@@ -331,7 +358,10 @@ def _extract_state_signature(text: str) -> tuple[str, Optional[str]]:
     if not matches:
         return text, None
     normalized = " ".join(matches[-1].split())
-    cleaned = _STATE_SIGNATURE_RE.sub("", text).strip()
+    cleaned = _STATE_SIGNATURE_RE.sub("", text)
+    # Removing a marker that sat on its own line leaves that line blank, and a
+    # run of blank lines renders as a gap the reader has no explanation for.
+    cleaned = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", cleaned).strip()
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return cleaned, digest
 

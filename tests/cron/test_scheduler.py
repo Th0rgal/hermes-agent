@@ -2310,7 +2310,11 @@ class TestDeliverToLocalSession:
 
         verify = SessionDB()
         try:
-            messages = verify.get_messages_as_conversation("desktop-session")
+            # The stored row is what idempotence is about, so read it raw.
+            # get_messages_as_conversation is the replay projection and
+            # deliberately reframes a delivery as input (see
+            # tests/test_delivery_reframed_as_input.py).
+            messages = verify.get_messages("desktop-session")
         finally:
             verify.close()
         assert [message["content"] for message in messages] == [

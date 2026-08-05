@@ -48,7 +48,7 @@ class TestTheHelperContract:
         # A title is user intent: "Verity Phase A2 Mission Acknowledged" was
         # among the day's webhook sessions and must survive.
         db.create_session("titled-1", source="webhook")
-        db.update_session_title("titled-1", "Verity Phase A2 Mission Acknowledged")
+        db.set_session_title("titled-1", "Verity Phase A2 Mission Acknowledged")
         assert db.delete_session_if_empty("titled-1") is False
 
     def test_a_parent_of_a_child_is_kept(self, db):

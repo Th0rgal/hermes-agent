@@ -42,6 +42,24 @@ export type ChatMessage = {
  * and shows only the payload. */
 const CRON_DELIVERY_SENTINEL_RE = /^\s*\[Cron delivery:\s*([^\]]*)\]\s*/
 
+/** `[STATE_SIGNATURE: …]` is a routing/state token for the ingestor, never for
+ * the reader: the first field routes, the rest describes state. The scheduler
+ * strips it before delivery, but four emission shapes defeated its matcher and
+ * reached the operator verbatim (backticks, a bold label, a bracket inside the
+ * payload, an over-long payload). Messages persisted while that was true still
+ * carry the marker, so stripping here is what clears the transcripts that
+ * already exist — the server fix only helps new deliveries.
+ *
+ * Greedy up to the LAST `]` on the line so a nested `[blocked]` is consumed
+ * whole; lazy matching stops at the first `]` and strands the remainder. */
+const STATE_SIGNATURE_RE = /[ \t]*(?:\*\*[^*\n]{0,64}?\*\*[ \t]*:?[ \t]*)?`?\[STATE_SIGNATURE:[^\n]{1,4096}\]`?/gi
+
+/** Remove the marker and the blank line it leaves behind. */
+export function stripStateSignature<T extends string | undefined>(text: T): T {
+  if (!text || !text.includes('[STATE_SIGNATURE:')) return text
+  return text.replace(STATE_SIGNATURE_RE, '').replace(/\n[ \t]*\n[ \t]*\n+/g, '\n\n').trim() as T
+}
+
 export type GatewayEventPayload = {
   text?: string
   rendered?: string
@@ -1058,8 +1076,9 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     )
 
     // The sentinel is provenance, not prose — the divider carries the label.
-    const sentinelStrippedContent =
+    const sentinelStrippedContent = stripStateSignature(
       delivery && rawDisplayContent ? rawDisplayContent.replace(CRON_DELIVERY_SENTINEL_RE, '') : rawDisplayContent
+    )
 
     // Persisted user turns carry `@image:<path>` directive lines inline in
     // the text (see tui_gateway/server.py's persist-time rewrite). The

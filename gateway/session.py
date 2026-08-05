@@ -3033,15 +3033,33 @@ class SessionStore:
 
         if self._db and db_end_session_id:
             try:
-                # Promote (not plain end_session): a stale agent_close /
-                # ws_orphan_reap end on the outgoing session must be upgraded
-                # to the explicit switch boundary, or recovery can resurrect
-                # it over the user's /resume choice (#61220 bug class).
-                _promote = getattr(self._db, "promote_to_session_reset", None)
-                if callable(_promote):
-                    _promote(db_end_session_id, "session_switch")
+                # An outgoing session that never gained content is deleted
+                # rather than ended. Measured 2026-08-05: pinned webhook
+                # deliveries (session_from) mint a per-delivery row and switch
+                # away from it before any message lands — 109 empty
+                # `session_switch` shells in one day, all 0 messages, no
+                # title. The same helper the CLI uses at exit guards this in
+                # one transaction: a title, a concurrent message flush, or a
+                # child session all veto the delete, so a deliberately opened
+                # /new session the user has typed nothing into yet is only
+                # removed if it is truly abandoned-blank.
+                _delete_if_empty = getattr(self._db, "delete_session_if_empty", None)
+                if callable(_delete_if_empty) and _delete_if_empty(db_end_session_id):
+                    logger.debug(
+                        "Deleted empty outgoing session %s on switch",
+                        db_end_session_id,
+                    )
                 else:
-                    self._db.end_session(db_end_session_id, "session_switch")
+                    # Promote (not plain end_session): a stale agent_close /
+                    # ws_orphan_reap end on the outgoing session must be
+                    # upgraded to the explicit switch boundary, or recovery can
+                    # resurrect it over the user's /resume choice (#61220 bug
+                    # class).
+                    _promote = getattr(self._db, "promote_to_session_reset", None)
+                    if callable(_promote):
+                        _promote(db_end_session_id, "session_switch")
+                    else:
+                        self._db.end_session(db_end_session_id, "session_switch")
             except Exception as e:
                 logger.debug("Session DB end_session failed: %s", e)
 

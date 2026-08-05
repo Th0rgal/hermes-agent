@@ -18,6 +18,7 @@ new and has no earlier copy to point at.
 """
 
 import inspect
+from unittest.mock import patch
 
 from gateway.platforms import webhook as webhook_module
 
@@ -65,41 +66,44 @@ class TestTheGuardFindsTheWebhookBodies:
     """End-to-end against a real DB: the exact rows this lane writes are the
     rows the guard must find on the next callback."""
 
-    def test_a_previous_callback_body_counts_as_loaded(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        monkeypatch.setenv("HOME", str(tmp_path))
+    def _db(self, tmp_path, name):
+        # The guard opens SessionDB() with no path — it resolves HERMES_HOME at
+        # call time, which another test in the same process may have pinned
+        # elsewhere. Point the guard at this test's database explicitly, the
+        # same way the guard's own unit tests do.
         from hermes_state import SessionDB
+
+        return SessionDB(db_path=tmp_path / name)
+
+    def test_a_previous_callback_body_counts_as_loaded(self, tmp_path):
         from agent.skill_commands import (
             _SINGLE_SKILL_MARKER,
             _SKILL_INVOCATION_PREFIX,
             _skill_already_loaded,
         )
 
-        db = SessionDB(db_path=tmp_path / "state.db")
+        db = self._db(tmp_path, "loaded.db")
+        db.create_session("pinned-1", source="webhook")
+        db.append_message(
+            "pinned-1",
+            "user",
+            f'{_SKILL_INVOCATION_PREFIX}"sandboxed-sh-missions" skill, '
+            f"indicating they want you to follow its instructions. "
+            f"{_SINGLE_SKILL_MARKER}\n\nthe 94 KB body",
+        )
         try:
-            db.create_session("pinned-1", source="webhook")
-            db.append_message(
-                "pinned-1",
-                "user",
-                f'{_SKILL_INVOCATION_PREFIX}"sandboxed-sh-missions" skill, '
-                f"indicating they want you to follow its instructions. "
-                f"{_SINGLE_SKILL_MARKER}\n\nthe 94 KB body",
-            )
+            with patch("hermes_state.SessionDB", return_value=db):
+                assert _skill_already_loaded("pinned-1", "sandboxed-sh-missions")
         finally:
             db.close()
 
-        assert _skill_already_loaded("pinned-1", "sandboxed-sh-missions")
-
-    def test_a_fresh_pinned_session_still_gets_the_body(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        monkeypatch.setenv("HOME", str(tmp_path))
-        from hermes_state import SessionDB
+    def test_a_fresh_pinned_session_still_gets_the_body(self, tmp_path):
         from agent.skill_commands import _skill_already_loaded
 
-        db = SessionDB(db_path=tmp_path / "state.db")
+        db = self._db(tmp_path, "fresh.db")
+        db.create_session("pinned-2", source="webhook")
         try:
-            db.create_session("pinned-2", source="webhook")
+            with patch("hermes_state.SessionDB", return_value=db):
+                assert not _skill_already_loaded("pinned-2", "sandboxed-sh-missions")
         finally:
             db.close()
-
-        assert not _skill_already_loaded("pinned-2", "sandboxed-sh-missions")

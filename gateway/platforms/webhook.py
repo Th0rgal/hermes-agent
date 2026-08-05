@@ -781,14 +781,34 @@ class WebhookAdapter(BasePlatformAdapter):
             prompt_template, payload, event_type, route_name
         )
 
+        # Opt-in routing: deliver this event into the conversation that
+        # started the work instead of a throwaway per-delivery session.
+        # Resolved BEFORE skill injection so the injection below can ask that
+        # conversation whether it already holds the skill body.
+        pinned_session_id = await self._resolve_pinned_session(
+            route_name, route_config, payload
+        )
+
         # Inject skill content if configured.
         # We call build_skill_invocation_message() directly rather than
         # using /skill-name slash commands — the gateway's command parser
         # would intercept those and break the flow.
+        #
+        # A pinned delivery consults the same already-loaded guard the slash
+        # path uses. This lane was the unguarded injection site: every
+        # mission-complete callback re-sent the full body into the pinned
+        # conversation — measured 2026-08-05, three 94 KB copies into one
+        # session in five minutes (17:10/17:13/17:15), 19 injections between
+        # 16:00 and 18:23, and not one "guard disabled" warning because the
+        # guard was simply never called from here. An unpinned delivery keeps
+        # the body: its per-delivery session is brand new and has no earlier
+        # copy to point at.
         skills = route_config.get("skills", [])
         if skills:
             try:
                 from agent.skill_commands import (
+                    _SKILL_ALREADY_LOADED_TEMPLATE,
+                    _skill_already_loaded,
                     build_skill_invocation_message,
                     get_skill_commands,
                 )
@@ -796,17 +816,28 @@ class WebhookAdapter(BasePlatformAdapter):
                 skill_cmds = get_skill_commands()
                 for skill_name in skills:
                     cmd_key = f"/{skill_name}"
-                    if cmd_key in skill_cmds:
-                        skill_content = build_skill_invocation_message(
-                            cmd_key, user_instruction=prompt
-                        )
-                        if skill_content:
-                            prompt = skill_content
-                            break  # Load the first matching skill
-                    else:
+                    if cmd_key not in skill_cmds:
                         logger.warning(
                             "[webhook] Skill '%s' not found", skill_name
                         )
+                        continue
+                    if pinned_session_id and _skill_already_loaded(
+                        pinned_session_id, skill_name
+                    ):
+                        # The reference keeps the invocation visible and the
+                        # webhook's own prompt intact; only the 94 KB body is
+                        # not repeated.
+                        reference = _SKILL_ALREADY_LOADED_TEMPLATE.format(
+                            skill_name=skill_name
+                        )
+                        prompt = f"{reference}\n\n{prompt}"
+                        break
+                    skill_content = build_skill_invocation_message(
+                        cmd_key, user_instruction=prompt
+                    )
+                    if skill_content:
+                        prompt = skill_content
+                        break  # Load the first matching skill
             except Exception as e:
                 logger.warning("[webhook] Skill loading failed: %s", e)
 
@@ -923,11 +954,6 @@ class WebhookAdapter(BasePlatformAdapter):
             source=source,
             raw_message=payload,
             message_id=delivery_id,
-        )
-        # Opt-in routing: deliver this event into the conversation that
-        # started the work instead of a throwaway per-delivery session.
-        pinned_session_id = await self._resolve_pinned_session(
-            route_name, route_config, payload
         )
         if pinned_session_id:
             event.metadata = {

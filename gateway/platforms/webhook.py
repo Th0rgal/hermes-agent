@@ -1021,9 +1021,59 @@ class WebhookAdapter(BasePlatformAdapter):
         landed in a long-lived conversation that the operator is still using,
         so ending it here would close their session out from under them.
         """
-        if (getattr(event, "metadata", None) or {}).get("gateway_session_id"):
+        pinned_session_id = str(
+            (getattr(event, "metadata", None) or {}).get("gateway_session_id") or ""
+        )
+        if pinned_session_id:
+            # The pinned conversation itself must never be closed from here.
+            # But the per-delivery row minted BEFORE the pin switch may still
+            # exist: when the run errors before the switch happens, the switch
+            # path's empty-shell deletion never runs, and the row leaks with
+            # end_reason=None — measured 2026-08-05, four such rows in ninety
+            # minutes, all webhook, all zero messages. Delete it only if it is
+            # provably empty and is NOT the pinned conversation; the guarded
+            # helper refuses anything with content, a title, or children.
+            await self._reap_abandoned_delivery_row(event, pinned_session_id)
             return
         await self._end_webhook_session(event, event.source.chat_id)
+
+    async def _reap_abandoned_delivery_row(
+        self, event: "MessageEvent", pinned_session_id: str
+    ) -> None:
+        """Delete the pre-switch per-delivery session row if it leaked empty."""
+        runner = self.gateway_runner
+        if runner is None:
+            return
+        session_db = getattr(runner, "_session_db", None)
+        store = getattr(runner, "session_store", None)
+        if session_db is None or store is None:
+            return
+        try:
+            key_fn = getattr(runner, "_session_key_for_source", None)
+            if key_fn is None:
+                return
+            session_key = key_fn(event.source)
+            peek = getattr(store, "peek_session_id", None)
+            session_id = peek(session_key) if callable(peek) else None
+            if not session_id or session_id == pinned_session_id:
+                # The switch happened (entry re-pointed at the pinned
+                # conversation) — the shell was already deleted there.
+                return
+            delete = getattr(session_db, "delete_session_if_empty", None)
+            if not callable(delete):
+                return
+            result = delete(session_id)
+            if asyncio.iscoroutine(result):
+                result = await result
+            if result:
+                logger.debug(
+                    "[webhook] Reaped abandoned empty delivery row %s",
+                    session_id,
+                )
+        except Exception:
+            logger.debug(
+                "[webhook] Abandoned-row reap failed", exc_info=True
+            )
 
     async def _resolve_pinned_session(
         self, route_name: str, route_config: dict, payload: Any

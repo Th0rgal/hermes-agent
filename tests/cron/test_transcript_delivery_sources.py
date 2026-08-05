@@ -24,8 +24,8 @@ class TestTranscriptDeliverySources:
     def test_webhook_is_a_transcript_delivery_source(self):
         # The property under test, independent of the resolution plumbing:
         # a webhook session delivers into its transcript, like api_server.
-        assert "webhook" in scheduler._TRANSCRIPT_DELIVERY_SOURCES
-        assert "api_server" in scheduler._TRANSCRIPT_DELIVERY_SOURCES
+        assert "webhook" in scheduler._transcript_delivery_sources()
+        assert "api_server" in scheduler._transcript_delivery_sources()
 
     def test_desktop_and_webui_stay_on_the_local_platform_path(self):
         # They have their own adapter handling and must not be folded into the
@@ -33,14 +33,16 @@ class TestTranscriptDeliverySources:
         assert "desktop" in scheduler._LOCAL_SESSION_PLATFORMS
         assert "webui" in scheduler._LOCAL_SESSION_PLATFORMS
         assert not (
-            scheduler._LOCAL_SESSION_PLATFORMS & scheduler._TRANSCRIPT_DELIVERY_SOURCES
+            scheduler._LOCAL_SESSION_PLATFORMS & scheduler._transcript_delivery_sources()
         )
 
-    def test_a_messaging_source_is_not_a_transcript_source(self):
+    def test_a_messaging_or_ephemeral_source_is_not_a_transcript_source(self):
         # telegram/discord have live adapters and their own origin routing;
         # folding them in would let a project route re-target a chat thread.
-        for source in ("telegram", "discord", "cron", "subagent", "tui"):
-            assert source not in scheduler._TRANSCRIPT_DELIVERY_SOURCES
+        # cron/subagent are per-run and die with their work, so delivering
+        # there files a report in a session nobody will read again.
+        for source in ("telegram", "discord", "cron", "subagent"):
+            assert source not in scheduler._transcript_delivery_sources()
 
     def test_both_branches_read_the_set_not_a_literal(self):
         # Guards against either branch drifting back to `== "api_server"`,
@@ -48,11 +50,11 @@ class TestTranscriptDeliverySources:
         import inspect
 
         resolve = inspect.getsource(scheduler._resolve_project_route_target)
-        assert "_TRANSCRIPT_DELIVERY_SOURCES" in resolve
+        assert "_transcript_delivery_sources" in resolve
         assert 'target.source == "api_server"' not in resolve
 
         deliver = inspect.getsource(scheduler._deliver_result)
-        assert "_TRANSCRIPT_DELIVERY_SOURCES" in deliver
+        assert "_transcript_delivery_sources" in deliver
         assert 'platform_name).lower() == "api_server"' not in deliver
 
     def test_the_resolved_target_carries_the_sessions_real_source(self):
@@ -64,3 +66,38 @@ class TestTranscriptDeliverySources:
 
         resolve = inspect.getsource(scheduler._resolve_project_route_target)
         assert '"platform": target.source' in resolve
+
+
+class TestContinuationSourcesStayDeliverable:
+    """A routed conversation's continuation inherits the resumer's source.
+
+    Measured on the production host, continuations carry: desktop 150, tui 96,
+    webhook 45, cli 4. An allowlist naming two sources therefore drops
+    deliveries the moment an operator touches the conversation from a
+    different surface — which is exactly what happened after a `hermes chat
+    --resume` rolled the Lido conversation into a `cli` continuation.
+    """
+
+    def test_every_local_surface_a_continuation_can_carry_is_deliverable(self):
+        sources = scheduler._transcript_delivery_sources()
+        for source in ("cli", "tui", "webhook", "api_server", "codex", "gateway"):
+            assert source in sources, source
+
+    def test_messaging_platforms_are_still_excluded(self):
+        # A project route must never re-target a chat thread: those have live
+        # adapters and their own origin routing.
+        sources = scheduler._transcript_delivery_sources()
+        for source in ("telegram", "discord", "slack", "whatsapp", "signal"):
+            assert source not in sources, source
+
+    def test_an_unknown_source_is_not_deliverable(self):
+        # The gateway registry is default-deny, and that property is the whole
+        # safety argument for deriving from it.
+        assert "some-new-chat-platform" not in scheduler._transcript_delivery_sources()
+
+    def test_the_local_platform_path_keeps_its_own_sources(self):
+        sources = scheduler._transcript_delivery_sources()
+        assert not (sources & scheduler._LOCAL_SESSION_PLATFORMS)
+
+    def test_the_empty_source_identifies_nothing(self):
+        assert "" not in scheduler._transcript_delivery_sources()

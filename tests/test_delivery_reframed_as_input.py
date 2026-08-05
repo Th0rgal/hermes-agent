@@ -143,3 +143,61 @@ class TestTheMeasuredIncident:
         assert msg["role"] == "user", "the model must not own the report"
         assert "api_content" not in msg, "the unframed bytes must not survive"
         assert "Patches landed correctly." in msg["content"], "payload preserved"
+
+
+class TestAnElidedDeliveryStaysElided:
+    """The sidecar is how a delivery gets shrunk without hiding it.
+
+    Measured 2026-08-05, session `20260805_152329_6058d9` ("Verity dev #32"):
+
+        cron deliveries      22 msg   75 513 ch   43%
+        compaction reference  1 msg   22 916 ch   13%
+        tool results         73 msg   39 007 ch   22%
+
+    The conversation could no longer accept a message, and its mass was
+    controller reports. Reframing threw the sidecar away, so eliding a delivery
+    for the model was impossible — the only remaining lever was deactivating
+    those rows, which removes them from the operator's transcript as well.
+    """
+
+    def test_the_sidecar_becomes_the_body(self):
+        msg = _delivery(
+            "[Cron delivery: watcher]\n" + "the full 8 KB report " * 400,
+            api_content="[report elided]",
+        )
+        _reframe_delivery_as_input(msg)
+        assert "[report elided]" in msg["content"]
+        assert "the full 8 KB report" not in msg["content"]
+
+    def test_the_provenance_still_wraps_it(self):
+        # Eliding must not cost the framing: the model still has to know this
+        # is a controller report and not its own words.
+        msg = _delivery("[Cron delivery: watcher]\nlong…", api_content="[elided]")
+        _reframe_delivery_as_input(msg)
+        assert msg["role"] == "user"
+        assert msg["content"].startswith("[Cron delivery: watcher]")
+        assert "did not write this" in msg["content"]
+
+    def test_the_sidecar_is_still_dropped_afterwards(self):
+        # Its bytes are inside `content` now. Leaving it would substitute the
+        # unframed text back in at transport time.
+        msg = _delivery("[Cron delivery: watcher]\nlong…", api_content="[elided]")
+        _reframe_delivery_as_input(msg)
+        assert "api_content" not in msg
+
+    def test_a_blank_sidecar_falls_back_to_the_stored_body(self):
+        # An empty sidecar is not an elision request; treating it as one would
+        # silently delete a report.
+        msg = _delivery("[Cron delivery: watcher]\nDone.", api_content="   ")
+        _reframe_delivery_as_input(msg)
+        assert msg["content"].endswith("Done.")
+
+    def test_a_non_string_sidecar_falls_back(self):
+        msg = _delivery("[Cron delivery: watcher]\nDone.", api_content={"a": 1})
+        _reframe_delivery_as_input(msg)
+        assert msg["content"].endswith("Done.")
+
+    def test_no_sidecar_behaves_exactly_as_before(self):
+        msg = _delivery("[Cron delivery: watcher]\nDone.")
+        _reframe_delivery_as_input(msg)
+        assert msg["content"].endswith("Done.")

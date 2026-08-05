@@ -45,7 +45,11 @@ def _publish_active_session_id(session_id: str) -> None:
 
         set_current_session_id(session_id)
     except Exception:
-        logger.debug("could not publish active session id", exc_info=True)
+        import logging
+
+        logging.getLogger(__name__).debug(
+            "could not publish active session id", exc_info=True
+        )
 
 
 class CLIAgentSetupMixin:

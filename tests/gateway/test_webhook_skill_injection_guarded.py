@@ -27,7 +27,7 @@ class TestTheLaneIsWired:
     gateway, so assert the wiring the fix consists of."""
 
     def _handler_source(self):
-        return inspect.getsource(webhook_module.WebhookPlatform._handle_webhook)
+        return inspect.getsource(webhook_module.WebhookAdapter._handle_webhook)
 
     def test_the_guard_is_consulted(self):
         assert "_skill_already_loaded" in self._handler_source()

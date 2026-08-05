@@ -1289,14 +1289,27 @@ def cron_delivery_targets() -> list[dict]:
 # ``_deliver_result`` can split them out before the messaging-adapter loop.
 _LOCAL_SESSION_PLATFORMS = frozenset({"desktop", "webui"})
 
-#: Sources whose delivery surface is the persisted transcript rather than a
-#: live adapter. `webhook` is here because a human can adopt a webhook-created
-#: session as a working conversation — "Audit formel Lean de Lido #20" is one —
-#: and project routes may be bound to those deliberately
-#: (project_routes.bind_route(allow_unroutable_source=True)). Without this the
-#: route binds and resolves, then every delivery is dropped as "unsupported
-#: source": the controller reports success, the operator sees nothing.
-_TRANSCRIPT_DELIVERY_SOURCES = frozenset({"api_server", "webhook"})
+def _transcript_delivery_sources() -> frozenset:
+    """Sources delivered into their persisted transcript, not a live adapter.
+
+    Derived from the gateway's own registry rather than a second hand-kept
+    list, because a hand-kept list is what kept breaking this. A routed
+    conversation's continuation inherits the source of whoever resumed it —
+    measured on this host: desktop 150, tui 96, webhook 45, cli 4 — so an
+    allowlist naming two or three sources drops deliveries every time an
+    operator touches the conversation from a different surface.
+
+    NON_MESSAGING_SESSION_SURFACES is default-deny: an unrecognised source
+    counts as messaging and is not delivered here, so a newly added chat
+    platform can never be mistaken for a transcript. desktop/webui are removed
+    because they are handled earlier by the local-platform path, and the empty
+    source is removed because it identifies nothing.
+    """
+    try:
+        from gateway.session_context import NON_MESSAGING_SESSION_SURFACES
+    except Exception:  # pragma: no cover - gateway import is optional
+        return frozenset({"api_server", "webhook"})
+    return frozenset(NON_MESSAGING_SESSION_SURFACES) - _LOCAL_SESSION_PLATFORMS - {""}
 _LOCAL_SESSION_TARGET_KIND = "local_session"
 
 
@@ -1370,7 +1383,7 @@ def _resolve_project_route_target(job: dict, project_token: str) -> Optional[dic
 
     if target.source in _LOCAL_SESSION_PLATFORMS:
         return _local_session_delivery_target(target.source, target.session_id)
-    if target.source in _TRANSCRIPT_DELIVERY_SOURCES:
+    if target.source in _transcript_delivery_sources():
         # These sessions have no live messaging adapter once their originating
         # turn ended, so their durable delivery surface is the persisted
         # transcript. Carry the session's REAL source: _deliver_to_local_session
@@ -1907,7 +1920,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         # origin-scoped cron can safely append its result to that exact
         # conversation without falling back to a configured home platform
         # such as Telegram.
-        if str(platform_name).lower() in _TRANSCRIPT_DELIVERY_SOURCES:
+        if str(platform_name).lower() in _transcript_delivery_sources():
             err = _deliver_to_local_session(
                 job,
                 str(platform_name).lower(),

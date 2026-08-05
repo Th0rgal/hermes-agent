@@ -131,9 +131,12 @@ class TestWhatTheSummarySays:
         assert "4 later reports" in messages[0]["content"]
         assert "3 later reports" in messages[1]["content"]
 
-    def test_it_gets_the_singular_right(self):
-        messages = [_delivery("watcher") for _ in range(4)]
-        _elide_superseded_deliveries(messages)
+    def test_it_gets_the_singular_right(self, monkeypatch):
+        # Unreachable at the default cap of 3 -- a superseded report always has
+        # at least three successors there -- so exercise it at a lower cap.
+        monkeypatch.setenv("HERMES_DELIVERY_REPLAY_KEEP", "1")
+        messages = [_delivery("watcher") for _ in range(2)]
+        assert _elide_superseded_deliveries(messages) == 1
         assert "1 later report from" in messages[0]["content"]
 
     def test_the_summary_is_far_smaller_than_a_report(self):

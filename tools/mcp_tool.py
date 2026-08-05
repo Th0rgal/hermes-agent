@@ -6594,6 +6594,53 @@ def is_mcp_tool_parallel_safe(tool_name: str) -> bool:
         return bool(server_name and server_name in _parallel_safe_servers)
 
 
+def unavailable_mcp_notice() -> str:
+    """One line per configured MCP server that is not answering, for the model.
+
+    Every consumer of :func:`get_mcp_status` is human-facing — the CLI banner,
+    the startup check, the TUI info panel. The agent itself is told nothing,
+    so a server that fails to connect presents to it as an ordinary absence of
+    tools, indistinguishable from a server that was never configured.
+
+    Measured 2026-08-05: the ``notion`` server failed its handshake on every
+    session for days (``npx`` re-resolving the package under the service HOME
+    took 89s against a 60s ``connect_timeout``). The agent, seeing no Notion
+    tools, concluded it had none and improvised a workaround through the
+    terminal. It was never wrong about the absence — only about the cause, and
+    it had nothing to reason from.
+
+    An agent told "notion is configured but did not connect" reports a blocker.
+    One told nothing invents an explanation. Returns "" when everything that is
+    configured is either connected or deliberately disabled, so the healthy
+    case costs nothing in the prompt.
+    """
+    try:
+        statuses = get_mcp_status() or []
+    except Exception:  # pragma: no cover - status must never break a turn
+        return ""
+
+    broken = [
+        entry
+        for entry in statuses
+        if not entry.get("connected")
+        and not entry.get("disabled")
+        and entry.get("status") not in {"connecting", None}
+    ]
+    if not broken:
+        return ""
+
+    lines = [
+        "Configured MCP servers that are NOT available this session. Their "
+        "tools are absent for this reason, not because they do not exist. "
+        "Report this as a blocker rather than working around it silently:"
+    ]
+    for entry in broken:
+        name = entry.get("name", "?")
+        detail = str(entry.get("error") or entry.get("status") or "unavailable").strip()
+        lines.append(f"- {name}: {detail}")
+    return "\n".join(lines)
+
+
 def get_mcp_status() -> List[dict]:
     """Return status of all configured MCP servers for banner display.
 

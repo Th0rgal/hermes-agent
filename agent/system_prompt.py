@@ -549,6 +549,18 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         timestamp_line += f"\nProvider: {agent.provider}"
     if agent.platform:
         timestamp_line += f"\nPlatform: {agent.platform}"
+    # A configured-but-unreachable MCP server is invisible to the model
+    # otherwise: it sees an absence of tools and cannot tell a broken server
+    # from one that was never configured. Empty (and free) when all is well.
+    try:
+        from tools.mcp_tool import unavailable_mcp_notice
+
+        _mcp_notice = unavailable_mcp_notice()
+    except Exception:
+        _mcp_notice = ""
+    if _mcp_notice:
+        volatile_parts.append(_mcp_notice)
+
     volatile_parts.append(timestamp_line)
 
     return {

@@ -102,3 +102,66 @@ class TestReferenceForm:
             skill_name="sandboxed-sh-missions"
         )
         assert len(reference) < 300, "the point is that it is tiny"
+
+
+class TestTheContinuationChain:
+    """A rollover must not undo the repair.
+
+    Measured 2026-08-05. "Audit formel Lean de Lido #26" was repaired by hand at
+    14:56; its continuation #27 was 85 messages old at 15:19 and already
+    reporting "Context length exceeded. Cannot compress further." — the 94 345
+    character `sandboxed-sh-missions` body was 46% of it.
+
+    A continuation is a new session id and the same conversation. Checking one
+    session row let the body back in at full size on every rollover, which is
+    every few hours on an active project.
+    """
+
+    class _ChainDB:
+        """SessionDB stand-in: ancestors carry the body, the tip does not."""
+
+        def __init__(self, ancestor_messages, own_messages):
+            self._ancestors = ancestor_messages
+            self._own = own_messages
+            self.closed = False
+            self.asked_for_ancestors = False
+
+        def get_messages_as_conversation(self, session_id, include_ancestors=False):
+            if include_ancestors:
+                self.asked_for_ancestors = True
+                return self._ancestors + self._own
+            return self._own
+
+        def get_messages(self, session_id):
+            return self._own
+
+        def close(self):
+            self.closed = True
+
+    def test_a_body_in_an_ancestor_counts_as_loaded(self):
+        db = self._ChainDB([_body_message("sandboxed-sh-missions")], [])
+        with patch("hermes_state.SessionDB", return_value=db):
+            assert skill_commands._skill_already_loaded("child", "sandboxed-sh-missions")
+        assert db.asked_for_ancestors, "the chain must be walked, not just the tip"
+        assert db.closed
+
+    def test_an_ancestor_carrying_a_different_skill_does_not_count(self):
+        db = self._ChainDB([_body_message("paloma-projects")], [])
+        with patch("hermes_state.SessionDB", return_value=db):
+            assert not skill_commands._skill_already_loaded("child", "sandboxed-sh-missions")
+
+    def test_it_falls_back_to_the_current_session(self):
+        # An ancestor walk is a nicety; losing it must not lose the
+        # within-session protection that already shipped.
+        class _NoAncestors(self._ChainDB.__mro__[0]):
+            def get_messages_as_conversation(self, session_id, include_ancestors=False):
+                raise RuntimeError("no chain support")
+
+        db = _NoAncestors([], [_body_message("sandboxed-sh-missions")])
+        with patch("hermes_state.SessionDB", return_value=db):
+            assert skill_commands._skill_already_loaded("s", "sandboxed-sh-missions")
+
+    def test_an_empty_chain_still_sends_the_body(self):
+        db = self._ChainDB([], [])
+        with patch("hermes_state.SessionDB", return_value=db):
+            assert not skill_commands._skill_already_loaded("child", "sandboxed-sh-missions")

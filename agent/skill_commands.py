@@ -290,6 +290,15 @@ def _skill_already_loaded(session_id: str | None, skill_name: str) -> bool:
     75% of the whole context. Compression then times out, and the session
     reaches a state it cannot leave.
 
+    The check spans the whole continuation CHAIN, not one session row. Hermes
+    compresses a long conversation and forks a continuation, and to the operator
+    that continuation is the same conversation — but it is a new session id, so
+    a per-session check let the body back in at full size on every rollover.
+    Measured 2026-08-05 on "Audit formel Lean de Lido #27", 85 messages old:
+    the 94 345-character body was 46% of the session, and it reported
+    "Context length exceeded. Cannot compress further." Its predecessor #26 had
+    been repaired hours earlier; the rollover undid the repair.
+
     Fails open: any error means we send the body, because a redundant copy is
     recoverable and a missing skill body is not.
     """
@@ -301,7 +310,16 @@ def _skill_already_loaded(session_id: str | None, skill_name: str) -> bool:
 
         db = SessionDB()
         try:
-            for message in db.get_messages(session_id) or []:
+            # include_ancestors walks parent_session_id to the root, which is
+            # exactly the span the operator calls "this conversation".
+            try:
+                messages = db.get_messages_as_conversation(
+                    session_id, include_ancestors=True
+                )
+            except Exception:
+                # An ancestor walk is a nicety; the current session is the floor.
+                messages = db.get_messages(session_id)
+            for message in messages or []:
                 if str(message.get("role") or "") != "user":
                     continue
                 content = str(message.get("content") or "")

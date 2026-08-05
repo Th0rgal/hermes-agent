@@ -1299,9 +1299,39 @@ def _build_gateway_agent_history(
     return agent_history, observed_context
 
 
+def _session_was_deliberately_trimmed(session_db: Any, session_id: str) -> bool:
+    """Whether this session holds soft-deleted rows.
+
+    A rewind, or an operator trimming an oversized conversation, sets
+    ``active = 0``. Both make the persisted transcript legitimately SHORTER
+    than a cached agent's in-memory copy — which is indistinguishable, by
+    length alone, from the FTS write corruption the guard below exists for.
+
+    Measured 2026-08-05 on "Verity dev #32": 19 controller reports were
+    deactivated to bring the conversation from 43k to 27k tokens, and the
+    desktop kept reporting ``Context length exceeded (70,870 tokens)`` because
+    a cached agent held all 177 rows and the guard preferred them. Only a
+    service restart cleared it.
+
+    Returns False on any error: the corruption guard is the safe default, and
+    losing a conversation to amnesia is worse than a turn that is too large.
+    """
+    if session_db is None or not session_id:
+        return False
+    try:
+        rows = session_db.get_messages_as_conversation(
+            session_id, include_inactive=True
+        )
+        active = session_db.get_messages_as_conversation(session_id)
+    except Exception:
+        return False
+    return len(rows) > len(active)
+
+
 def _select_cached_agent_history(
     persisted_history: List[Dict[str, Any]],
     live_history: Any,
+    persisted_is_authoritative: bool = False,
 ) -> List[Dict[str, Any]]:
     """Prefer a cached agent's live in-memory transcript over a shorter
     persisted one.
@@ -1313,9 +1343,17 @@ def _select_cached_agent_history(
     transcript with that shorter persisted copy causes immediate same-session
     amnesia. When the live transcript is strictly longer, keep it.
 
+    ``persisted_is_authoritative`` turns the guard off. Set it when the
+    shortness is EXPLAINED — the session holds soft-deleted rows, so a rewind
+    or a deliberate trim accounts for the gap and there is no corruption to
+    guard against. Without it, a trim is undone on the next turn by a cached
+    agent that still remembers everything.
+
     Returns ``persisted_history`` unchanged unless the live copy is a longer
     list, in which case a copy of the live transcript is returned.
     """
+    if persisted_is_authoritative:
+        return persisted_history
     if isinstance(live_history, list) and len(live_history) > len(persisted_history):
         return list(live_history)
     return persisted_history
@@ -5004,7 +5042,11 @@ class TurnRunner:
         # cached agent bound to this exact session_id.
         if reused_cached_agent and getattr(agent, "session_id", None) == ctx.session_id:
             _selected = _select_cached_agent_history(
-                agent_history, getattr(agent, "_session_messages", None)
+                agent_history,
+                getattr(agent, "_session_messages", None),
+                persisted_is_authoritative=_session_was_deliberately_trimmed(
+                    getattr(agent, "_session_db", None), ctx.session_id
+                ),
             )
             if _selected is not agent_history:
                 logger.warning(

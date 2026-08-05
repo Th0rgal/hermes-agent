@@ -2223,12 +2223,16 @@ class TestDeliverToLocalSession:
             )
 
         assert result is None
+        # Stored content keeps the label (provenance for the reader); the
+        # model-facing sidecar drops it, so a conversation dominated by
+        # controller reports does not teach the model to answer with one.
         mock_db.append_message.assert_called_once_with(
             "sess-1",
             "assistant",
             "[Cron delivery: daily-report]\nHere is the report.",
             observed=True,
             delivery_id=ANY,
+            api_content="Here is the report.",
         )
         mock_db.close.assert_called_once()
 

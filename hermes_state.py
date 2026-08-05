@@ -2114,6 +2114,80 @@ _ASSISTANT_ONLY_REPLAY_FIELDS = (
 )
 
 
+# How many of the most recent controller reports a conversation replays in full.
+#
+# A project conversation is mostly controller reports: measured 2026-08-05 on
+# "Verity dev #32", 22 of them were 43% of the transcript -- 75 513 of 175 200
+# characters -- and the conversation could no longer accept a message. Nothing
+# bounded that growth, so every project session filled up again a few hours
+# after being repaired by hand.
+#
+# Old reports are superseded by newer ones from the same controller: the point
+# of a status report is the current status. Three keeps the recent state plus
+# enough history to see a trend, and is what the manual repairs converged on.
+# Raise it with HERMES_DELIVERY_REPLAY_KEEP; 0 elides every one of them.
+_DELIVERY_REPLAY_KEEP_DEFAULT = 3
+
+
+def _delivery_replay_keep() -> int:
+    """The configured number of recent deliveries to replay in full."""
+    raw = os.environ.get("HERMES_DELIVERY_REPLAY_KEEP")
+    if raw is None or not str(raw).strip():
+        return _DELIVERY_REPLAY_KEEP_DEFAULT
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "HERMES_DELIVERY_REPLAY_KEEP=%r is not an integer; using %d",
+            raw,
+            _DELIVERY_REPLAY_KEEP_DEFAULT,
+        )
+        return _DELIVERY_REPLAY_KEEP_DEFAULT
+    # A negative cap has no sensible reading, and guessing one is how a typo
+    # becomes a silently empty conversation.
+    return max(0, value)
+
+
+def _elide_superseded_deliveries(messages: List[Dict[str, Any]]) -> int:
+    """Summarise every controller report but the most recent few.
+
+    Runs after :func:`_reframe_delivery_as_input`, so a delivery is a user
+    message whose content opens with the sentinel. Only the replayed text
+    changes; the stored row keeps the full report, which is what the operator
+    reads in the desktop (it loads through ``get_messages``, not this
+    projection).
+
+    The summary keeps the sentinel at the front, so the TUI's delivery divider
+    still matches, and it names what was elided rather than deleting silently:
+    a reader who sees "superseded" knows a report existed and where to find it.
+
+    Returns the number of reports elided.
+    """
+    keep = _delivery_replay_keep()
+    positions = [
+        index
+        for index, message in enumerate(messages)
+        if message.get("role") == "user"
+        and isinstance(message.get("content"), str)
+        and _CRON_DELIVERY_SENTINEL_RE.match(message["content"])
+    ]
+    if len(positions) <= keep:
+        return 0
+
+    superseded = positions[: len(positions) - keep] if keep else positions
+    for rank, index in enumerate(superseded):
+        message = messages[index]
+        match = _CRON_DELIVERY_SENTINEL_RE.match(message["content"])
+        label = (match.group(1) or "").strip() or "cron" if match else "cron"
+        later = len(positions) - rank - 1
+        message["content"] = (
+            f"[Cron delivery: {label}] (superseded automated report, elided from "
+            f"replay; {later} later report{'s' if later != 1 else ''} from this "
+            "conversation follow, and the most recent ones are shown in full)"
+        )
+    return len(superseded)
+
+
 def _reframe_delivery_as_input(msg: Dict[str, Any]) -> None:
     """Replay a cron delivery as input with provenance, not as the model's turn.
 
@@ -7731,6 +7805,16 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         # content on load so replaying history doesn't re-teach the model
         # to keep emitting the marker. No-op for unaffected sessions.
         messages = _strip_stale_tool_call_markers(messages)
+        # Bound the controller-report history the model replays. Storage is
+        # untouched; only this projection shrinks.
+        _elided = _elide_superseded_deliveries(messages)
+        if _elided:
+            logger.debug(
+                "Elided %d superseded controller report(s) from the replay of "
+                "session %s",
+                _elided,
+                session_id,
+            )
         if repair_alternation and messages:
             # Lazy import: hermes_state already depends on agent.* (see
             # sanitize_context above), but keep this optional path from

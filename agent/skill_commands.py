@@ -302,7 +302,21 @@ def _skill_already_loaded(session_id: str | None, skill_name: str) -> bool:
     Fails open: any error means we send the body, because a redundant copy is
     recoverable and a missing skill body is not.
     """
-    if not session_id or not skill_name:
+    if not skill_name:
+        return False
+    if not session_id:
+        # Without a session id there is nothing to search, so the guard is off
+        # and a full body goes out. That was invisible: measured 2026-08-05,
+        # 12 full injections of `sandboxed-sh-missions` in four hours across 11
+        # sessions -- 1.1 MB, roughly 271k tokens on one document -- and the
+        # transcripts showed a guard that had simply never had anything to say.
+        # A guard that cannot run must announce it; silence reads as "checked,
+        # nothing found".
+        logger.warning(
+            "skill body guard disabled for %r: no session id, sending the full "
+            "body (a large skill will be re-sent on every invocation)",
+            skill_name,
+        )
         return False
     marker = f'{_SKILL_INVOCATION_PREFIX}"{skill_name}" skill'
     try:

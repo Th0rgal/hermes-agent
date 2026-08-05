@@ -2081,6 +2081,81 @@ def quarantine_zeroed_state_db(path: Path) -> Optional[Path]:
             handle.close()
 
 
+# A cron delivery is stored as an ``observed`` ASSISTANT row prefixed with this
+# sentinel (see ``cron/scheduler.py``). The role is right for the surfaces that
+# read the transcript — the dashboard watcher, the desktop divider pill and the
+# TUI all key on assistant + sentinel — but it is wrong for the model, and the
+# transcript is what the model replays.
+_CRON_DELIVERY_SENTINEL_RE = re.compile(r"^\s*\[Cron delivery:\s*([^\]]*)\]\s*")
+
+# Reframing needs the model to learn two things the bare text cannot say: the
+# words are not its own, and they are not the operator's either. Without the
+# first it repeats them; without the second it cannot tell a controller report
+# from a human instruction, and a project conversation is mostly reports.
+_DELIVERY_PROVENANCE = (
+    '(automated report delivered by the "{label}" controller — you did not '
+    "write this, and it is not from the operator)"
+)
+
+# Assistant-only replay fields. A row reframed as input must shed them, or a
+# provider is handed reasoning attached to a user message.
+_ASSISTANT_ONLY_REPLAY_FIELDS = (
+    "finish_reason",
+    "reasoning",
+    "reasoning_content",
+    "reasoning_details",
+    "codex_reasoning_items",
+    "codex_message_items",
+)
+
+
+def _reframe_delivery_as_input(msg: Dict[str, Any]) -> None:
+    """Replay a cron delivery as input with provenance, not as the model's turn.
+
+    Measured, 2026-08-05. A project conversation held 4 deliveries against 11
+    human turns. The operator asked a direct question; the model answered by
+    reproducing the immediately preceding delivery — 2 933 characters against
+    the delivery's 2 990, the difference being exactly the 57-character
+    sentinel that the model-facing sidecar had already stripped.
+
+    That is the predictable consequence of storing another conversation's
+    report as this one's assistant turn: the model reads its own last utterance
+    and continues it. Stripping the sentinel from the model's view (the earlier
+    fix) removed the pattern cue and left the authorship error, which made the
+    echo *more* natural, not less.
+
+    Mutates ``msg`` in place; a row without the sentinel is left untouched.
+    """
+    if msg.get("role") != "assistant" or not msg.get("observed"):
+        return
+    content = msg.get("content")
+    if not isinstance(content, str):
+        return
+    # A tool-call row is part of an assistant→tool sequence. Rewriting its role
+    # would break that adjacency and earn an HTTP 400; no delivery has one.
+    if msg.get("tool_calls") or msg.get("tool_call_id"):
+        return
+    match = _CRON_DELIVERY_SENTINEL_RE.match(content)
+    if not match:
+        return
+
+    label = (match.group(1) or "").strip() or "cron"
+    body = content[match.end():]
+    msg["role"] = "user"
+    # The sentinel stays at the front: the TUI's own delivery divider matches on
+    # it, and it is the provenance a human reader looks for.
+    msg["content"] = (
+        f"[Cron delivery: {label}] {_DELIVERY_PROVENANCE.format(label=label)}\n{body}"
+    )
+    # The sidecar holds the exact bytes previously sent for this row. The
+    # content is now rewritten, so those bytes are stale — keeping them would
+    # substitute the unframed text straight back in at transport time and undo
+    # everything above.
+    msg.pop("api_content", None)
+    for field in _ASSISTANT_ONLY_REPLAY_FIELDS:
+        msg.pop(field, None)
+
+
 class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin):
     """
     SQLite-backed session storage with FTS5 search.
@@ -7588,6 +7663,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     except (json.JSONDecodeError, TypeError):
                         logger.warning("Failed to deserialize codex_message_items, falling back to None")
                         msg["codex_message_items"] = None
+            _reframe_delivery_as_input(msg)
             if include_ancestors and self._is_duplicate_replayed_user_message(messages, msg):
                 continue
             messages.append(msg)

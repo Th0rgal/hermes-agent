@@ -1016,6 +1016,31 @@ def validate_deferred_call_args(name: str, args: Dict[str, Any]) -> Optional[str
         return None
 
 
+def _closest_tool_name(name: str) -> Optional[str]:
+    """The registered tool name closest to ``name``, or None if none is close.
+
+    A misspelt tool name is indistinguishable from an unavailable one in the
+    error text, so an agent that typos cannot tell it typo'd. The cutoff is
+    deliberately high: a wrong suggestion sends the next attempt somewhere else
+    wrong, which is worse than no suggestion at all.
+    """
+    try:
+        import difflib
+        from tools.registry import registry
+
+        candidates = [
+            entry.name
+            for entry in registry._snapshot_entries()
+            if entry.name not in BRIDGE_TOOL_NAMES
+        ]
+    except Exception:  # pragma: no cover - a hint must never break a call
+        return None
+    if not candidates:
+        return None
+    matches = difflib.get_close_matches(name, candidates, n=1, cutoff=0.8)
+    return matches[0] if matches else None
+
+
 def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
     """Parse a ``tool_call`` invocation into (underlying_name, args, error_msg).
 
@@ -1028,7 +1053,17 @@ def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[s
     """
     name = str(args.get("name") or "").strip()
     if not name:
-        return None, {}, "tool_call requires a 'name' argument"
+        # The single most common tool error on prod: 13 occurrences in three
+        # hours on 2026-08-05. The model puts the target's arguments at the top
+        # level and omits the wrapper. Echoing the keys it did send makes that
+        # visible on the first attempt instead of the third.
+        keys = ", ".join(sorted(str(k) for k in args)) if args else "none"
+        return None, {}, (
+            "tool_call requires a 'name' argument naming the tool to invoke. "
+            f"Received keys: {keys}. Call it as "
+            'tool_call(name="<tool>", arguments={...}), or invoke the tool '
+            "directly if it is already in your tools list."
+        )
     if name in BRIDGE_TOOL_NAMES:
         return None, {}, f"tool_call cannot invoke '{name}' (it is itself a bridge tool)"
     raw_args = args.get("arguments")
@@ -1042,9 +1077,18 @@ def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[s
     if not isinstance(raw_args, dict):
         return None, {}, "tool_call 'arguments' must be an object"
     if not is_deferrable_tool_name(name):
+        # Measured 2026-08-05: the name that hit this branch was
+        # `mcp_sandboxed_assistant__get_mission` -- one underscore after `mcp`
+        # where the real tool has two. The refusal was correct; the message was
+        # not actionable, because it described a category ("not a deferrable
+        # tool") when the actual fault was a typo. The agent retried, failed the
+        # same way, and tripped the same-tool loop guard.
+        suggestion = _closest_tool_name(name)
+        hint = f' Did you mean "{suggestion}"?' if suggestion else ""
         return None, {}, (
-            f"'{name}' is not a deferrable tool. If it appears in the model-facing tools "
-            "list already, call it directly instead of via tool_call."
+            f"'{name}' is not a deferrable tool.{hint} If it appears in the "
+            "model-facing tools list already, call it directly instead of via "
+            "tool_call."
         )
     return name, raw_args, None
 

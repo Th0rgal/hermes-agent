@@ -268,6 +268,54 @@ def _inject_skill_config(loaded_skill: dict[str, Any], parts: list[str]) -> None
         pass  # Non-critical — skill still loads without config injection
 
 
+#: Reference emitted instead of a skill body that is already in the session.
+#:
+#: Keeps `_SKILL_INVOCATION_PREFIX` and the quoted name so the display
+#: projection (`apps/shared/src/skill-scaffold.ts`, `_skill_scaffold_projection`)
+#: still renders the invocation the user typed rather than raw scaffolding.
+_SKILL_ALREADY_LOADED_TEMPLATE = (
+    '[IMPORTANT: The user has invoked the "{skill_name}" skill again. Its full '
+    "content is already loaded earlier in this conversation — follow those "
+    "instructions. It is not repeated here.]"
+)
+
+
+def _skill_already_loaded(session_id: str | None, skill_name: str) -> bool:
+    """Whether this session already carries the full body of ``skill_name``.
+
+    A skill body is large — `sandboxed-sh-missions` is 87 KB — and re-sending
+    it on every invocation is what pushed real conversations past the context
+    limit. Measured on production: five injections in one Verity session
+    (435 KB) and four in a Lido session, where three of them accounted for
+    75% of the whole context. Compression then times out, and the session
+    reaches a state it cannot leave.
+
+    Fails open: any error means we send the body, because a redundant copy is
+    recoverable and a missing skill body is not.
+    """
+    if not session_id or not skill_name:
+        return False
+    marker = f'{_SKILL_INVOCATION_PREFIX}"{skill_name}" skill'
+    try:
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            for message in db.get_messages(session_id) or []:
+                if str(message.get("role") or "") != "user":
+                    continue
+                content = str(message.get("content") or "")
+                # The reference form carries the same prefix, so require the
+                # loaded-below marker: only a real body counts as loaded.
+                if marker in content and _SINGLE_SKILL_MARKER in content:
+                    return True
+        finally:
+            db.close()
+    except Exception:
+        return False
+    return False
+
+
 def _build_skill_message(
     loaded_skill: dict[str, Any],
     skill_dir: Path | None,
@@ -598,6 +646,18 @@ def build_skill_invocation_message(
         bump_use(skill_name)
     except Exception:
         pass  # Non-critical — skill invocation proceeds regardless
+
+    # Re-invoking a skill must not re-send its body. See
+    # `_skill_already_loaded`: the bodies are tens of kilobytes and repeat
+    # invocations are what pushed real sessions past the context limit.
+    if _skill_already_loaded(task_id, skill_name):
+        reference = _SKILL_ALREADY_LOADED_TEMPLATE.format(skill_name=skill_name)
+        if user_instruction:
+            reference += (
+                "\n\nThe user has provided the following instruction alongside "
+                f"the skill invocation: {user_instruction}"
+            )
+        return reference
 
     activation_note = (
         f'[IMPORTANT: The user has invoked the "{skill_name}" skill, indicating they want '

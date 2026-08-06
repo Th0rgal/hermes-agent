@@ -360,6 +360,35 @@ class TestClassifyApiError:
         assert result.should_fallback is True
         assert result.retryable is False
 
+    def test_400_codex_model_not_supported(self):
+        # ChatGPT-account Codex rejects chain slugs like "builtin/smart"
+        # with a FastAPI-style {"detail": ...} body.  On a long session this
+        # used to fall through to the generic-400 + large-session heuristic
+        # and misclassify as context_overflow, sending the session into
+        # compress -> same 400 -> "Cannot compress further" instead of
+        # failing over to the next provider.
+        detail = (
+            "The 'builtin/smart' model is not supported when using Codex "
+            "with a ChatGPT account."
+        )
+        e = MockAPIError(
+            "Error code: 400 - {'detail': %r}" % detail,
+            status_code=400,
+            body={"detail": detail},
+        )
+        result = classify_api_error(
+            e,
+            provider="openai-codex",
+            model="builtin/smart",
+            approx_tokens=92000,
+            context_length=256000,
+            num_messages=287,
+        )
+        assert result.reason == FailoverReason.model_not_found
+        assert result.should_fallback is True
+        assert result.retryable is False
+        assert result.should_compress is False
+
     def test_404_generic(self):
         # Generic 404 with no "model not found" signal — common for local
         # llama.cpp/Ollama/vLLM endpoints with slightly wrong paths.  Treat

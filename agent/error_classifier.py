@@ -328,6 +328,15 @@ _MODEL_NOT_FOUND_PATTERNS = [
     "no such model",
     "unknown model",
     "unsupported model",
+    # ChatGPT-account Codex rejects non-Codex model slugs with HTTP 400
+    # {"detail": "The 'X' model is not supported when using Codex with a
+    # ChatGPT account."}.  Without this entry the message matches nothing,
+    # falls through to the generic-400 + large-session heuristic, and a
+    # long healthy session is misclassified as context_overflow — it then
+    # compresses, retries the same deterministic 400, and dies with
+    # "Context length exceeded ... Cannot compress further" instead of
+    # failing over to the next provider.
+    "model is not supported",
     # OpenRouter returns 404 with this message when none of the candidate
     # endpoints for the selected model support tool/function calling.
     # Classifying this as model_not_found triggers fallback to a different
@@ -668,6 +677,10 @@ def classify_api_error(
                         pass
         if not _body_msg:
             _body_msg = str(body.get("message") or "").lower()
+        if not _body_msg:
+            # FastAPI-style bodies (ChatGPT-account Codex) carry the message
+            # under "detail" with no "error"/"message" envelope.
+            _body_msg = str(body.get("detail") or "").lower()
     # Combine all message sources for pattern matching
     parts = [_raw_msg]
     if _body_msg and _body_msg not in _raw_msg:
@@ -1425,6 +1438,9 @@ def _classify_400(
             _args = body.get("errorArgs")
             if isinstance(_args, dict):
                 err_body_msg = str(_args.get("reason") or "").strip().lower()
+        if not err_body_msg:
+            # FastAPI-style {"detail": "..."} bodies (ChatGPT-account Codex).
+            err_body_msg = str(body.get("detail") or "").strip().lower()
     is_generic = len(err_body_msg) < 30 or err_body_msg in {"error", ""}
     # Absolute token/message-count thresholds are only a proxy for smaller
     # context windows.  Large-context sessions can have many messages while

@@ -59,6 +59,12 @@ const delta = (text: string) => act(() => handleEvent!({ payload: { text }, sess
 const interim = (text: string) =>
   act(() => handleEvent!({ payload: { text, already_streamed: true }, session_id: SID, type: 'message.interim' }))
 
+const toolRound = (name: string, toolId: string) =>
+  act(() => {
+    handleEvent!({ payload: { name, tool_id: toolId }, session_id: SID, type: 'tool.start' })
+    handleEvent!({ payload: { name, tool_id: toolId }, session_id: SID, type: 'tool.complete' })
+  })
+
 const complete = (text: string) =>
   act(() => handleEvent!({ payload: { text }, session_id: SID, type: 'message.complete' }))
 
@@ -153,6 +159,43 @@ describe('useMessageStream interim text sealing', () => {
     const texts = assistantMessages()
     expect(texts).not.toContain('Let me check the files.Let me check the files.')
     expect(texts.some(t => t.includes('Let me check the files. Everything looks good.'))).toBe(true)
+  })
+
+  it('does not repaint a sealed answer when a tool round reopens the bubble', async () => {
+    // verify-on-stop: the drafted answer is sealed as an interim, the
+    // verification loop runs tools (which reopen a stream bubble), and the
+    // same text comes back as the final response. It must settle onto the
+    // sealed draft, not appear a second time in the tool bubble.
+    await mountStream()
+    await start()
+
+    const answer = 'Voici le point precis: la mission est bloquee.'
+
+    await delta(answer)
+    await interim(answer)
+    await toolRound('terminal', 'tool-1')
+    await complete(answer)
+
+    const texts = assistantMessages()
+    expect(texts.filter(t => t.includes('Voici le point precis'))).toHaveLength(1)
+
+    const assistants = getState().messages.filter(m => m.role === 'assistant' && !m.hidden)
+    expect(assistants.every(m => !m.pending)).toBe(true)
+    expect(assistants.find(m => chatMessageText(m) === answer)?.interim).toBeFalsy()
+  })
+
+  it('still appends a final reply that differs from the sealed interim', async () => {
+    await mountStream()
+    await start()
+
+    await delta('Let me check the files.')
+    await interim('Let me check the files.')
+    await toolRound('terminal', 'tool-2')
+    await complete('All checks passed.')
+
+    const texts = assistantMessages()
+    expect(texts).toContain('Let me check the files.')
+    expect(texts.some(t => t.includes('All checks passed.'))).toBe(true)
   })
 
   it('clears interimBoundaryPending at turn end so the next turn starts clean', async () => {

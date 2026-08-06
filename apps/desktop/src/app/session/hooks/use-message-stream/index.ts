@@ -601,7 +601,49 @@ export function useMessageStream({
         const prev = state.messages
         let nextMessages = prev
 
-        if (streamId && prev.some(m => m.id === streamId)) {
+        // Index of a sealed interim bubble that already shows this exact
+        // answer. verify-on-stop emits the drafted final answer as
+        // `message.interim` (agent/conversation_loop.py), runs its
+        // verification loop, then — when the continuation budget is spent —
+        // returns the SAME text as the turn's final response. The loop's tool
+        // events reopen a stream bubble via mutateStream in the meantime, so
+        // without this check the answer is painted a second time into that
+        // bubble while the DB holds a single row. Continuity, not exact
+        // equality: the final may extend the sealed draft. (#63679 fixed only
+        // the fallback branch below; the streamId branch had the same hole.)
+        const sealedInterimIndex = prev.findIndex(message => {
+          if (message.role !== 'assistant' || !message.interim || message.hidden) {
+            return false
+          }
+
+          if (streamId && message.id === streamId) {
+            return false
+          }
+
+          const interimText = chatMessageText(message).trim()
+
+          return Boolean(interimText) && (finalText === interimText || finalText.startsWith(interimText))
+        })
+
+        const alreadyPreviewed =
+          interimBoundaryPending && Boolean(finalText) && !completionError && sealedInterimIndex >= 0
+
+        if (alreadyPreviewed) {
+          // Settle the sealed draft into the turn's real reply and seal the
+          // live bubble WITHOUT injecting the answer into it — it keeps
+          // whatever tool parts and narration of its own it already holds.
+          nextMessages = prev.map((message, messageIndex) => {
+            if (messageIndex === sealedInterimIndex) {
+              return completeMessage(message)
+            }
+
+            if (streamId && message.id === streamId) {
+              return { ...message, pending: false }
+            }
+
+            return message
+          })
+        } else if (streamId && prev.some(m => m.id === streamId)) {
           nextMessages = prev.map(m => (m.id === streamId ? completeMessage(m) : m))
         } else {
           const fallbackIndex = [...prev]

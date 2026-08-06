@@ -2197,6 +2197,15 @@ _SKILL_BODY_RE = re.compile(
 )
 _SKILL_BODY_MARKER = "The full skill content is loaded below.]"
 
+# A `skill_view` tool result opens with success + the hub-qualified skill name.
+# The size floor keeps error payloads and tiny views out: only a body large
+# enough to matter (the measured ones are 90 KB) is worth counting as a copy —
+# and a single copy is NEVER elided, whatever its size.
+_SKILL_VIEW_RESULT_MIN_CHARS = 40_000
+_SKILL_VIEW_RESULT_RE = re.compile(
+    r'"success"\s*:\s*true\s*,\s*"name"\s*:\s*"([^"]{1,200})"'
+)
+
 
 def _elide_superseded_skill_bodies(messages: List[Dict[str, Any]]) -> int:
     """Replay the LAST copy of each skill body, and only that one.
@@ -2224,31 +2233,55 @@ def _elide_superseded_skill_bodies(messages: List[Dict[str, Any]]) -> int:
 
     Returns the number of copies elided.
     """
+    # A skill body reaches a conversation in TWO guises: injected as a user
+    # message (the slash/cron/webhook lanes) and returned as a `skill_view`
+    # TOOL result. Both carry the same static document; both count as copies.
+    # Measured 2026-08-06 on "Lean Silicon #9": a 90 545-character skill body
+    # lived in a tool row — 37% of the conversation — where the user-role-only
+    # scan could not see it.
     positions: Dict[str, List[int]] = {}
     for index, message in enumerate(messages):
-        if message.get("role") != "user":
-            continue
         content = message.get("content")
-        if not isinstance(content, str) or _SKILL_BODY_MARKER not in content:
+        if not isinstance(content, str):
             continue
-        match = _SKILL_BODY_RE.match(content)
-        if match:
-            positions.setdefault(match.group(1), []).append(index)
+        role = message.get("role")
+        if role == "user" and _SKILL_BODY_MARKER in content:
+            match = _SKILL_BODY_RE.match(content)
+            if match:
+                positions.setdefault(match.group(1), []).append(index)
+        elif role == "tool" and len(content) > _SKILL_VIEW_RESULT_MIN_CHARS:
+            match = _SKILL_VIEW_RESULT_RE.search(content[:300])
+            if match:
+                # skill_view names are hub-qualified ("autonomous-ai-agents/
+                # sandboxed-sh-missions"); the user-message form uses the bare
+                # name. Key on the trailing segment so the two guises of one
+                # skill land in one bucket.
+                name = match.group(1).rsplit("/", 1)[-1]
+                positions.setdefault(name, []).append(index)
 
     elided = 0
     for skill_name, indexes in positions.items():
         for rank, index in enumerate(indexes[:-1]):
             later = len(indexes) - rank - 1
-            messages[index]["content"] = (
-                f'[IMPORTANT: The user has invoked the "{skill_name}" skill. '
-                "Its full instructions appear later in this conversation, in "
-                f"the most recent of {len(indexes)} invocations — follow those. "
-                f"This earlier copy is elided from replay; {later} later "
-                f"cop{'ies follow' if later != 1 else 'y follows'}.]"
-            )
+            message = messages[index]
+            if message.get("role") == "tool":
+                # Stay a plausible tool result: JSON, success, and a pointer.
+                message["content"] = (
+                    '{"success": true, "name": "%s", "note": "superseded skill '
+                    "body elided from replay; the most recent copy appears "
+                    'later in this conversation"}' % skill_name
+                )
+            else:
+                message["content"] = (
+                    f'[IMPORTANT: The user has invoked the "{skill_name}" skill. '
+                    "Its full instructions appear later in this conversation, in "
+                    f"the most recent of {len(indexes)} invocations — follow those. "
+                    f"This earlier copy is elided from replay; {later} later "
+                    f"cop{'ies follow' if later != 1 else 'y follows'}.]"
+                )
             # The body is gone, so a sidecar holding the old bytes would put it
             # straight back at transport time.
-            messages[index].pop("api_content", None)
+            message.pop("api_content", None)
             elided += 1
     return elided
 

@@ -167,3 +167,68 @@ class TestItTouchesNothingElse:
 
     def test_an_empty_conversation_is_fine(self):
         assert _elide_superseded_skill_bodies([]) == 0
+
+
+class TestSkillViewToolResults:
+    """The tool-result guise of the same document.
+
+    Measured 2026-08-06 on "Lean Silicon #9": a 90 545-character
+    `sandboxed-sh-missions` body lived in a TOOL row — `skill_view`'s JSON
+    result — 37% of a conversation that could no longer accept a message.
+    The user-role-only scan could not see it.
+    """
+
+    def _view(self, name="autonomous-ai-agents/sandboxed-sh-missions", size=90_000):
+        return {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": '{"success": true, "name": "%s", "content": "%s"}'
+            % (name, "x" * size),
+        }
+
+    def test_a_lone_tool_copy_is_never_elided(self):
+        # In the measured session the tool result was the ONLY copy — the
+        # agent's instructions. Eliding the only copy breaks the skill.
+        messages = [self._view()]
+        assert _elide_superseded_skill_bodies(messages) == 0
+        assert len(messages[0]["content"]) > 50_000
+
+    def test_a_tool_copy_superseded_by_a_user_body_is_elided(self):
+        messages = [self._view(), _body()]
+        assert _elide_superseded_skill_bodies(messages) == 1
+        assert "superseded skill body elided" in messages[0]["content"]
+        assert "the 94 KB body" in messages[1]["content"]
+
+    def test_a_user_body_superseded_by_a_tool_copy_is_elided(self):
+        # Last copy wins regardless of role: the tool result carries the full
+        # document too, so the instructions survive.
+        messages = [_body(), self._view()]
+        assert _elide_superseded_skill_bodies(messages) == 1
+        assert "appear later in this conversation" in messages[0]["content"]
+        assert len(messages[1]["content"]) > 50_000
+
+    def test_the_elided_tool_row_stays_a_plausible_tool_result(self):
+        messages = [self._view(), self._view()]
+        _elide_superseded_skill_bodies(messages)
+        import json
+
+        parsed = json.loads(messages[0]["content"])
+        assert parsed["success"] is True
+        assert parsed["name"] == "sandboxed-sh-missions"
+
+    def test_hub_qualified_and_bare_names_are_one_skill(self):
+        # skill_view says "autonomous-ai-agents/sandboxed-sh-missions"; the
+        # injected body says "sandboxed-sh-missions". Two buckets would mean
+        # neither ever reaches two copies and nothing is ever elided.
+        messages = [self._view("autonomous-ai-agents/sandboxed-sh-missions"), _body()]
+        assert _elide_superseded_skill_bodies(messages) == 1
+
+    def test_a_small_tool_result_is_not_a_copy(self):
+        # Error payloads and tiny views share the JSON shape; only a body
+        # large enough to matter counts.
+        messages = [self._view(size=1_000), _body()]
+        assert _elide_superseded_skill_bodies(messages) == 0
+
+    def test_a_different_skill_view_is_its_own_bucket(self):
+        messages = [self._view("hub/paloma-projects"), _body()]
+        assert _elide_superseded_skill_bodies(messages) == 0

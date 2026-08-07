@@ -146,10 +146,14 @@ export function needsAttention(project: ProjectRow): MissionChip[] {
 export function projectMode(project: ProjectRow): { base: string; cause: string | null } | null {
   const raw = project.latest_update?.mode
 
-  if (!raw) {return null}
+  if (!raw) {
+    return null
+  }
   const [base, ...rest] = raw.trim().toLowerCase().split(':')
 
-  if (base !== 'active' && base !== 'blocked' && base !== 'paused') {return null}
+  if (base !== 'active' && base !== 'blocked' && base !== 'paused') {
+    return null
+  }
   const cause = rest.join(':').trim()
 
   return { base, cause: cause.length > 0 ? cause : null }

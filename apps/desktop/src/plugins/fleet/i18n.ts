@@ -13,8 +13,6 @@ export const FLEET_LOCALES = {
     steerPlaceholder: 'Nudge this agent…',
     steer: 'Send',
     countTip: (active: number, attention: number) =>
-      attention > 0
-        ? `${active} agents running · ${attention} need you`
-        : `${active} agents running`
+      attention > 0 ? `${active} agents running · ${attention} need you` : `${active} agents running`
   }
 }

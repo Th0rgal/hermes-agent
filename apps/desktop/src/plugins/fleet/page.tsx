@@ -27,7 +27,9 @@ const t = FLEET_LOCALES.en
 function ModeChip({ project }: { project: ProjectRow }) {
   const mode = projectMode(project)
 
-  if (!mode) {return null}
+  if (!mode) {
+    return null
+  }
   const label = mode.cause ? `${mode.base}: ${mode.cause}` : mode.base
 
   return (
@@ -62,7 +64,9 @@ function MissionRow({ mission }: { mission: MissionChip }) {
   async function send() {
     const content = draft.trim()
 
-    if (!content || !mission.id) {return}
+    if (!content || !mission.id) {
+      return
+    }
     setSending(true)
 
     try {
@@ -76,11 +80,7 @@ function MissionRow({ mission }: { mission: MissionChip }) {
 
   return (
     <div className="rounded-md border border-white/[0.06] bg-white/[0.02] px-2.5 py-1.5">
-      <button
-        className="flex w-full items-center gap-2 text-left"
-        onClick={() => setOpen(o => !o)}
-        type="button"
-      >
+      <button className="flex w-full items-center gap-2 text-left" onClick={() => setOpen(o => !o)} type="button">
         <span
           className={cn(
             'h-1.5 w-1.5 shrink-0 rounded-full',
@@ -93,14 +93,8 @@ function MissionRow({ mission }: { mission: MissionChip }) {
         <span className="min-w-0 flex-1 truncate text-[12px] text-white/80">
           {mission.title ?? mission.id?.slice(0, 8) ?? 'mission'}
         </span>
-        {attention && (
-          <span className="shrink-0 text-[10px] uppercase tracking-wide text-amber-400/80">
-            needs you
-          </span>
-        )}
-        {mission.github_pr && (
-          <span className="shrink-0 text-[10px] text-white/40">{mission.github_pr}</span>
-        )}
+        {attention && <span className="shrink-0 text-[10px] uppercase tracking-wide text-amber-400/80">needs you</span>}
+        {mission.github_pr && <span className="shrink-0 text-[10px] text-white/40">{mission.github_pr}</span>}
       </button>
       {open && (
         <div className="mt-1.5 flex items-center gap-1.5">
@@ -108,7 +102,9 @@ function MissionRow({ mission }: { mission: MissionChip }) {
             className="min-w-0 flex-1 rounded border border-white/[0.08] bg-white/[0.03] px-2 py-1 text-[12px] text-white/85 outline-none placeholder:text-white/30"
             onChange={e => setDraft(e.target.value)}
             onKeyDown={e => {
-              if (e.key === 'Enter') {void send()}
+              if (e.key === 'Enter') {
+                void send()
+              }
             }}
             placeholder={t.steerPlaceholder}
             value={draft}
@@ -132,10 +128,7 @@ function ProjectCard({ project }: { project: ProjectRow }) {
   const attention = needsAttention(project)
 
   // Attention missions first, then the rest of the live ones.
-  const ordered = [
-    ...attention,
-    ...live.filter(m => m.status !== 'awaiting_user')
-  ]
+  const ordered = [...attention, ...live.filter(m => m.status !== 'awaiting_user')]
 
   return (
     <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3">

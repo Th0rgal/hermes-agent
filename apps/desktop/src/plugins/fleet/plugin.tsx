@@ -47,12 +47,16 @@ function FleetCount() {
     refetchInterval: 60_000
   })
 
-  if (!data) {return null}
+  if (!data) {
+    return null
+  }
   const projects = data.projects.filter(p => p.bucket !== 'archived')
   const active = projects.reduce((n, p) => n + liveMissions(p).length, 0)
   const attention = projects.reduce((n, p) => n + needsAttention(p).length, 0)
 
-  if (active === 0 && attention === 0) {return null}
+  if (active === 0 && attention === 0) {
+    return null
+  }
   const FleetIcon = icons.Activity
 
   return (

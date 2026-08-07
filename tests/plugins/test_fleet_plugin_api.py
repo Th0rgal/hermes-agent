@@ -3,17 +3,36 @@
 These forward to sandboxed.sh through `_sandboxed_request`; the tests stub that
 one seam so they exercise the route logic (shaping, validation, the single
 write) without a live backend.
+
+The plugin backend lives at ``plugins/fleet/dashboard/plugin_api.py``, which is
+not an importable package — load it by file path, exactly like the kanban
+dashboard plugin test does.
 """
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+from pathlib import Path
+from types import ModuleType
 from typing import Any, Dict, Optional
 
 import pytest
 from fastapi import HTTPException
 
-import importlib
-fleet_api = importlib.import_module('plugins.fleet.dashboard.plugin_api')
+
+def _load_fleet_api() -> ModuleType:
+    repo_root = Path(__file__).resolve().parents[2]
+    plugin_file = repo_root / "plugins" / "fleet" / "dashboard" / "plugin_api.py"
+    spec = importlib.util.spec_from_file_location("fleet_plugin_api_under_test", plugin_file)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+fleet_api = _load_fleet_api()
 
 
 def _stub_backend(monkeypatch: pytest.MonkeyPatch, responder) -> list[Dict[str, Any]]:

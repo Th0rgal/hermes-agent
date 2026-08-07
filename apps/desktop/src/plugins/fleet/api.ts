@@ -9,7 +9,7 @@
  * — the surface hides itself; a 502 means the backend is unreachable.
  */
 
-import type { PluginRestOptions } from '@hermes/plugin-sdk'
+import { type PluginRestOptions, queryClient } from '@hermes/plugin-sdk'
 
 export type MissionStatus = string
 
@@ -78,15 +78,31 @@ export interface ProjectDetail {
 }
 
 type Rest = <T>(path: string, opts?: PluginRestOptions) => Promise<T>
+type Socket = (path: string, onMessage: (data: unknown) => void) => () => void
 
 let rest: null | Rest = null
 
-/** Wire the plugin's REST door in from `plugin.register(ctx)`. */
-export function bindApi(restFn: Rest): () => void {
+/** One `{invalidate, mission_id}` frame from the backend relay → refresh the
+ *  roster. The 8s poll stays as the fallback; the socket just makes a mission
+ *  flipping to `awaiting_user` (or done) show up at once instead of on the next
+ *  poll. */
+function onEventFrame(data: unknown): void {
+  const frame = data as { type?: string } | null
+
+  if (frame?.type === 'invalidate') {
+    void queryClient.invalidateQueries({ queryKey: projectsKey })
+  }
+}
+
+/** Wire the plugin's REST door (and, when available, its live socket) in from
+ *  `plugin.register(ctx)`. Returns a disposer that unbinds both. */
+export function bindApi(restFn: Rest, socket?: Socket): () => void {
   rest = restFn
+  const unsubscribe = socket ? socket('/events', onEventFrame) : null
 
   return () => {
     rest = null
+    unsubscribe?.()
   }
 }
 

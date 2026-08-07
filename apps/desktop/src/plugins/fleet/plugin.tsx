@@ -79,7 +79,7 @@ const plugin: HermesPlugin = {
   defaultEnabled: false,
   register(ctx) {
     ctx.i18n.register(FLEET_LOCALES)
-    bindApi(ctx.rest)
+    bindApi(ctx.rest, ctx.socket)
     $bound.set(true)
 
     ctx.registerMany([

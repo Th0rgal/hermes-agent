@@ -1,0 +1,7 @@
+/* Fleet plugin styles. The surface leans on the app's Tailwind tokens
+ * (--ui-*, white/NN opacity scale) so it themes automatically; this file only
+ * holds the handful of rules that do not map cleanly to utilities. */
+
+.fleet-scroll {
+  scrollbar-width: thin;
+}

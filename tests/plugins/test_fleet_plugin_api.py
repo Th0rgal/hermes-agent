@@ -12,7 +12,8 @@ from typing import Any, Dict, Optional
 import pytest
 from fastapi import HTTPException
 
-from hermes_cli.web_routers import missions as missions_mod
+import importlib
+fleet_api = importlib.import_module('plugins.fleet.dashboard.plugin_api')
 
 
 def _stub_backend(monkeypatch: pytest.MonkeyPatch, responder) -> list[Dict[str, Any]]:
@@ -29,7 +30,7 @@ def _stub_backend(monkeypatch: pytest.MonkeyPatch, responder) -> list[Dict[str, 
         calls.append({"method": method, "path": path, "params": params, "body": body})
         return responder(method, path)
 
-    monkeypatch.setattr(missions_mod, "_sandboxed_request", fake_request)
+    monkeypatch.setattr(fleet_api, "_sandboxed_request", fake_request)
     return calls
 
 
@@ -38,7 +39,7 @@ async def test_list_projects_forwards_the_overview(monkeypatch: pytest.MonkeyPat
     overview = {"projects": [{"slug": "verity", "bucket": "active"}], "archived": []}
     calls = _stub_backend(monkeypatch, lambda m, p: overview)
 
-    result = await missions_mod.list_projects()
+    result = await fleet_api.list_projects()
 
     assert result == {"projects": [{"slug": "verity", "bucket": "active"}]}
     assert calls == [{"method": "GET", "path": "/api/projects/overview", "params": None, "body": None}]
@@ -47,7 +48,7 @@ async def test_list_projects_forwards_the_overview(monkeypatch: pytest.MonkeyPat
 @pytest.mark.asyncio
 async def test_list_projects_tolerates_a_missing_list(monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_backend(monkeypatch, lambda m, p: {"unexpected": True})
-    assert await missions_mod.list_projects() == {"projects": []}
+    assert await fleet_api.list_projects() == {"projects": []}
 
 
 @pytest.mark.asyncio
@@ -55,7 +56,7 @@ async def test_get_project_forwards_the_slug(monkeypatch: pytest.MonkeyPatch) ->
     project = {"project": {"slug": "verity", "mode": "active"}, "grant": {"merge_authority": "full"}}
     calls = _stub_backend(monkeypatch, lambda m, p: project)
 
-    result = await missions_mod.get_project("verity")
+    result = await fleet_api.get_project("verity")
 
     assert result["project"]["mode"] == "active"
     assert calls[0]["path"] == "/api/projects/verity"
@@ -65,7 +66,7 @@ async def test_get_project_forwards_the_slug(monkeypatch: pytest.MonkeyPatch) ->
 async def test_get_project_rejects_a_blank_slug(monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_backend(monkeypatch, lambda m, p: {})
     with pytest.raises(HTTPException) as excinfo:
-        await missions_mod.get_project("   ")
+        await fleet_api.get_project("   ")
     assert excinfo.value.status_code == 400
 
 
@@ -73,7 +74,7 @@ async def test_get_project_rejects_a_blank_slug(monkeypatch: pytest.MonkeyPatch)
 async def test_steer_mission_posts_content(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _stub_backend(monkeypatch, lambda m, p: None)
 
-    result = await missions_mod.steer_mission("abc-123", {"content": "keep going"})
+    result = await fleet_api.steer_mission("abc-123", {"content": "keep going"})
 
     assert result == {"ok": True, "mission_id": "abc-123"}
     assert calls[0] == {
@@ -88,5 +89,5 @@ async def test_steer_mission_posts_content(monkeypatch: pytest.MonkeyPatch) -> N
 async def test_steer_mission_requires_content(monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_backend(monkeypatch, lambda m, p: None)
     with pytest.raises(HTTPException) as excinfo:
-        await missions_mod.steer_mission("abc-123", {"content": "   "})
+        await fleet_api.steer_mission("abc-123", {"content": "   "})
     assert excinfo.value.status_code == 400

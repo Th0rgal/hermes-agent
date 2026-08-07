@@ -7,12 +7,11 @@ second place to rotate and revoke. Hermes already holds those credentials in
 order to run the assistant MCP, so the gateway answers on the client's behalf
 and the desktop stays credential-free.
 
-The mission listing (`/api/sessions/{id}/missions`) is read-only. The project
-routes added for the desktop "fleet" surface are read-only too, with one
-deliberate exception: `POST /api/missions/{id}/message` lets the operator steer
-a running mission from that surface. Steering is the whole point of a
-background-agents view, so it is an explicit decision, not an accident — and it
-is the only write this module exposes.
+Deliberately read-only: nothing here can start, cancel or modify a mission. The
+fleet plugin's own router (`plugins/fleet/dashboard/plugin_api.py`) reuses this
+module's `_sandboxed_request` helper for the projects roster and for the one
+write it needs (steering) — so there is still exactly one place that mints a
+sandboxed.sh token.
 """
 
 import base64
@@ -25,7 +24,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, HTTPException
 
 _log = logging.getLogger("hermes_cli.web_server")
 
@@ -180,54 +179,3 @@ async def get_session_missions(session_id: str, limit: int = 50) -> Dict[str, An
         "session_id": session_id,
         "missions": [_summarize(m) for m in missions if isinstance(m, dict)],
     }
-
-
-# --- Fleet surface: projects and their live missions ------------------------
-
-
-@router.get("/api/projects")
-async def list_projects() -> Dict[str, Any]:
-    """The project roster for the fleet surface: one entry per project with its
-    mode, health, and mission chips. Forwards the backend's board overview so
-    the desktop renders projects -> live mission-agents without a second call
-    per project.
-    """
-    body = await _sandboxed_request("GET", "/api/projects/overview")
-    projects = body.get("projects") if isinstance(body, dict) else None
-    if not isinstance(projects, list):
-        projects = []
-    return {"projects": projects}
-
-
-@router.get("/api/projects/{slug}")
-async def get_project(slug: str) -> Dict[str, Any]:
-    """One project's structured object: record (mode/blocker), autonomy grant,
-    tracks, open decisions, and its bound control conversation.
-    """
-    slug = (slug or "").strip()
-    if not slug:
-        raise HTTPException(status_code=400, detail="slug is required")
-    body = await _sandboxed_request("GET", f"/api/projects/{slug}")
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=502, detail="sandboxed.sh returned an unexpected project shape")
-    return body
-
-
-@router.post("/api/missions/{mission_id}/message")
-async def steer_mission(mission_id: str, payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
-    """Send a steering message to a running mission — the one write the fleet
-    surface needs, so the operator can nudge a background agent inline.
-    """
-    mission_id = (mission_id or "").strip()
-    if not mission_id:
-        raise HTTPException(status_code=400, detail="mission_id is required")
-    content = (payload.get("content") or payload.get("message") or "").strip()
-    if not content:
-        raise HTTPException(status_code=400, detail="content is required")
-
-    await _sandboxed_request(
-        "POST",
-        "/api/control/message",
-        body={"mission_id": mission_id, "content": content},
-    )
-    return {"ok": True, "mission_id": mission_id}

@@ -1,6 +1,7 @@
-import { computed } from 'nanostores'
+import { atom, computed } from 'nanostores'
 
 import { sessionProjectColor } from '@/app/chat/sidebar/projects/workspace-groups'
+import { getSession } from '@/hermes'
 import { Codecs, persistentAtom } from '@/lib/persisted'
 import { $projects } from '@/store/projects'
 import { $sessions, sessionMatchesStoredId, sessionPinId } from '@/store/session'
@@ -47,12 +48,56 @@ function resolveSessionColor(
   return overrides[sessionPinId(session)] ?? sessionProjectColor(session, projects) ?? undefined
 }
 
+// Sessions fetched INDIVIDUALLY to bridge ids the loaded lists don't carry —
+// a LIVE conversation chain's tip (a backend binding hands us the newest
+// continuation id) is often newer than anything in the paginated recents page,
+// so its lineage root is unknowable from `$sessions` alone. `ensureSessionLineage`
+// resolves such an id through `GET /api/sessions/:id` once and caches the row
+// here; the color map below folds these in, so every subscriber repaints when
+// a resolution lands.
+export const $fetchedSessionsById = atom<Record<string, SessionInfo>>({})
+
+const lineageFetchState = new Map<string, 'failed' | 'pending'>()
+
+/** Resolve an id the loaded lists don't know (fire-and-forget, deduped).
+ *  Success feeds `$fetchedSessionsById` → the color map recomputes. A failure
+ *  is remembered so an unknown id never turns into a fetch loop. */
+export function ensureSessionLineage(sessionId: string): void {
+  if (lineageFetchState.has(sessionId) || sessionId in $fetchedSessionsById.get()) {
+    return
+  }
+
+  lineageFetchState.set(sessionId, 'pending')
+
+  // The gateway door can throw SYNCHRONOUSLY where no desktop bridge exists
+  // (plain browser, jsdom) — this runs during render, so contain it.
+  try {
+    getSession(sessionId)
+      .then(info => {
+        lineageFetchState.delete(sessionId)
+        $fetchedSessionsById.set({ ...$fetchedSessionsById.get(), [sessionId]: info })
+      })
+      .catch(() => {
+        lineageFetchState.set(sessionId, 'failed')
+      })
+  } catch {
+    lineageFetchState.set(sessionId, 'failed')
+  }
+}
+
+/** Test seam: forget fetch outcomes (the cache atom is reset separately). */
+export function resetLineageFetchState(): void {
+  lineageFetchState.clear()
+}
+
 export const $sessionColorById = computed(
-  [$sessions, $projects, $sessionColorOverrides],
-  (sessions, projects, overrides) => {
+  [$sessions, $projects, $sessionColorOverrides, $fetchedSessionsById],
+  (sessions, projects, overrides, fetched) => {
     const map: Record<string, string> = {}
 
-    for (const session of sessions) {
+    // Fetched rows first, then the loaded lists — a session present in both
+    // resolves through the fresher list row.
+    for (const session of [...Object.values(fetched), ...sessions]) {
       const color = resolveSessionColor(session, projects, overrides)
 
       if (color) {
@@ -85,18 +130,35 @@ export function sessionColorForId(sessionId: null | string | undefined): string 
     return direct
   }
 
-  const session = $sessions.get().find(candidate => sessionMatchesStoredId(candidate, sessionId))
+  const session = idToSession(sessionId)
 
-  return session ? resolveSessionColor(session, $projects.get(), $sessionColorOverrides.get()) : undefined
+  if (session) {
+    return resolveSessionColor(session, $projects.get(), $sessionColorOverrides.get())
+  }
+
+  // A LIVE chain's tip that no loaded list carries: fetch its row once — the
+  // arrival recomputes `$sessionColorById`, which subscribers already watch.
+  ensureSessionLineage(sessionId)
+
+  return undefined
 }
 
 /** The DURABLE id a color override for `sessionId` should be stored under —
  *  the matched session's lineage root when it's loaded, else the id itself
  *  (which is the root for a session outside the loaded page). */
 export function sessionDurableId(sessionId: string): string {
-  const session = $sessions.get().find(candidate => sessionMatchesStoredId(candidate, sessionId))
+  const session = idToSession(sessionId)
 
   return session ? sessionPinId(session) : sessionId
+}
+
+/** The loaded (or individually fetched) session a stored/tip id resolves to. */
+function idToSession(sessionId: string): SessionInfo | undefined {
+  return (
+    $sessions.get().find(candidate => sessionMatchesStoredId(candidate, sessionId)) ??
+    $fetchedSessionsById.get()[sessionId] ??
+    Object.values($fetchedSessionsById.get()).find(candidate => sessionMatchesStoredId(candidate, sessionId))
+  )
 }
 
 export function sessionColorFor(session: null | SessionInfo | undefined): string | undefined {

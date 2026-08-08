@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ProjectInfo, SessionInfo } from '@/types/hermes'
 
 import { $projects } from './projects'
-import { $sessions } from './session'
+import { $cronSessions, $messagingSessions, $sessions } from './session'
 import {
   $fetchedSessionsById,
   $sessionColorById,
@@ -63,6 +63,8 @@ function makeProject(id: string, folders: string[], color: null | string): Proje
 
 afterEach(() => {
   $sessions.set([])
+  $cronSessions.set([])
+  $messagingSessions.set([])
   $projects.set([])
   $sessionColorOverrides.set({})
 })
@@ -195,5 +197,43 @@ describe('sessionColorForId — live conversation chains', () => {
     expect(sessionColorForId('ghost')).toBeUndefined()
 
     expect(getSession).toHaveBeenCalledTimes(1)
+  })
+})
+
+// The invariant: any id whose Pinned row shows color X must resolve to X from
+// the id ALONE. Pinned rows come from $sessions ∪ $cronSessions ∪
+// $messagingSessions (buildSessionByAnyId), so id-only resolution must see all
+// three slices — an INHERITED project color needs the row's cwd, which no
+// override lookup can substitute for.
+describe('sessionColorForId — inherited colors across the sidebar slices', () => {
+  it('resolves an inherited project color with NO override (row in $sessions)', () => {
+    const a = makeSession('/www/app', { git_repo_root: '/www/app', id: 'lean-silicon' })
+
+    $projects.set([makeProject('p_lean', ['/www/app'], '#e11d48')])
+    $sessions.set([a])
+
+    expect(sessionColorForId('lean-silicon')).toBe('#e11d48')
+  })
+
+  it('resolves an inherited color for a row that lives ONLY in the messaging slice', () => {
+    // A controller/webhook conversation: pinned (so its row is on screen, in
+    // color) but absent from the recents page.
+    const a = makeSession('/www/verity', { git_repo_root: '/www/verity', id: 'verity-core' })
+
+    $projects.set([makeProject('p_verity', ['/www/verity'], '#14b8a6')])
+    $messagingSessions.set([a])
+
+    expect(sessionColorForId('verity-core')).toBe('#14b8a6')
+    // And through the shared map, so SessionStatusDot subscribers repaint.
+    expect($sessionColorById.get()['verity-core']).toBe('#14b8a6')
+  })
+
+  it('resolves an inherited color for a cron-slice row', () => {
+    const a = makeSession('/www/bench', { git_repo_root: '/www/bench', id: 'verity-benchmark' })
+
+    $projects.set([makeProject('p_bench', ['/www/bench'], '#d946ef')])
+    $cronSessions.set([a])
+
+    expect(sessionColorForId('verity-benchmark')).toBe('#d946ef')
   })
 })

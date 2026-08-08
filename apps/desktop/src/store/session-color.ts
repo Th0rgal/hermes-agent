@@ -4,7 +4,7 @@ import { sessionProjectColor } from '@/app/chat/sidebar/projects/workspace-group
 import { getSession } from '@/hermes'
 import { Codecs, persistentAtom } from '@/lib/persisted'
 import { $projects } from '@/store/projects'
-import { $sessions, sessionMatchesStoredId, sessionPinId } from '@/store/session'
+import { $cronSessions, $messagingSessions, $sessions, sessionMatchesStoredId, sessionPinId } from '@/store/session'
 import type { ProjectInfo, SessionInfo } from '@/types/hermes'
 
 // Per-session color OVERRIDES — a user-picked color that wins over the inherited
@@ -90,14 +90,22 @@ export function resetLineageFetchState(): void {
   lineageFetchState.clear()
 }
 
+// EVERY slice a sidebar row can come from — recents, cron, messaging — the
+// same union the Pinned section indexes (buildSessionByAnyId). The invariant
+// is that an id whose Pinned row shows color X resolves to X from the id
+// alone, and Pinned rows hold rows from all three slices: a controller/webhook
+// conversation typically lives ONLY in the cron/messaging slice, and its
+// INHERITED project color needs that row's cwd/git_repo_root — an override
+// resolves without the row (direct key hit), which is why override'd sessions
+// worked while inherited ones went grey.
 export const $sessionColorById = computed(
-  [$sessions, $projects, $sessionColorOverrides, $fetchedSessionsById],
-  (sessions, projects, overrides, fetched) => {
+  [$sessions, $cronSessions, $messagingSessions, $projects, $sessionColorOverrides, $fetchedSessionsById],
+  (sessions, cron, messaging, projects, overrides, fetched) => {
     const map: Record<string, string> = {}
 
     // Fetched rows first, then the loaded lists — a session present in both
     // resolves through the fresher list row.
-    for (const session of [...Object.values(fetched), ...sessions]) {
+    for (const session of [...Object.values(fetched), ...sessions, ...cron, ...messaging]) {
       const color = resolveSessionColor(session, projects, overrides)
 
       if (color) {
@@ -152,10 +160,14 @@ export function sessionDurableId(sessionId: string): string {
   return session ? sessionPinId(session) : sessionId
 }
 
-/** The loaded (or individually fetched) session a stored/tip id resolves to. */
+/** The loaded (or individually fetched) session a stored/tip id resolves to —
+ *  searched across every slice the sidebar renders rows from, so id-only
+ *  resolution sees exactly the rows the Pinned section holds. */
 function idToSession(sessionId: string): SessionInfo | undefined {
+  const loaded = [...$sessions.get(), ...$cronSessions.get(), ...$messagingSessions.get()]
+
   return (
-    $sessions.get().find(candidate => sessionMatchesStoredId(candidate, sessionId)) ??
+    loaded.find(candidate => sessionMatchesStoredId(candidate, sessionId)) ??
     $fetchedSessionsById.get()[sessionId] ??
     Object.values($fetchedSessionsById.get()).find(candidate => sessionMatchesStoredId(candidate, sessionId))
   )

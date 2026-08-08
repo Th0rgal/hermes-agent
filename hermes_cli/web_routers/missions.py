@@ -1,17 +1,13 @@
-"""Proxy to the sandboxed.sh mission & project surface.
+"""Read-only proxy to the sandboxed.sh mission inventory.
 
-A conversation's missions — and the projects that group them — live in
-sandboxed.sh, not in Hermes. The desktop could fetch them directly, but that
-would mean shipping a sandboxed.sh credential inside a desktop app and having a
-second place to rotate and revoke. Hermes already holds those credentials in
-order to run the assistant MCP, so the gateway answers on the client's behalf
-and the desktop stays credential-free.
+A conversation's missions live in sandboxed.sh, not in Hermes. The desktop
+could fetch them directly, but that would mean shipping a sandboxed.sh
+credential inside a desktop app and having a second place to rotate and revoke.
+Hermes already holds those credentials in order to run the assistant MCP, so
+the gateway answers on the client's behalf and the desktop stays credential-free.
 
-Deliberately read-only: nothing here can start, cancel or modify a mission. The
-fleet plugin's own router (`plugins/fleet/dashboard/plugin_api.py`) reuses this
-module's `_sandboxed_request` helper for the projects roster and for the one
-write it needs (steering) — so there is still exactly one place that mints a
-sandboxed.sh token.
+Deliberately read-only: nothing here can start, cancel or modify a mission.
+Widening it later is a decision, not an accident.
 """
 
 import base64
@@ -24,7 +20,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 
 _log = logging.getLogger("hermes_cli.web_server")
 
@@ -82,6 +78,87 @@ def _sandboxed_config() -> tuple[str, str, str]:
     return base_url, secret, subject
 
 
+def _summarize(mission: Dict[str, Any]) -> Dict[str, Any]:
+    """Only the fields a conversation view needs.
+
+    Forwarding the whole record would hand the desktop mission internals it has
+    no use for, and would make every future backend field a de-facto part of
+    this endpoint's contract.
+    """
+    return {
+        "id": mission.get("id"),
+        "status": mission.get("status"),
+        "title": mission.get("title"),
+        "short_description": mission.get("short_description"),
+        "project": mission.get("project"),
+        "track": mission.get("track"),
+        "created_at": mission.get("created_at"),
+        "updated_at": mission.get("updated_at"),
+    }
+
+
+@router.get("/api/sessions/{session_id}/missions")
+async def get_session_missions(session_id: str, limit: int = 50) -> Dict[str, Any]:
+    """Missions started from this conversation, newest first.
+
+    Filtered by the backend on `origin_session_id`. That matters: the unfiltered
+    listing is capped, so filtering client-side made a conversation whose
+    workers had aged out of the window show none at all — silently.
+    """
+    session_id = (session_id or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    base_url, secret, subject = _sandboxed_config()
+    # FastAPI already supplies the default, so clamp rather than re-defaulting:
+    # `limit or 50` would silently turn an explicit 0 into 50.
+    limit = max(1, min(int(limit), _MAX_LIMIT))
+    token = _mint_token(secret, subject)
+
+    try:
+        async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
+            response = await client.get(
+                f"{base_url}/api/control/missions",
+                params={"origin_session_id": session_id, "limit": limit},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except httpx.HTTPError as error:
+        # The backend being unreachable is an availability problem, not a
+        # client error — say so rather than returning an empty list, which
+        # would read as "this conversation has no missions".
+        _log.warning("sandboxed.sh mission lookup failed: %s", error)
+        raise HTTPException(status_code=502, detail="sandboxed.sh is unreachable") from error
+
+    if response.status_code >= 400:
+        _log.warning(
+            "sandboxed.sh mission lookup returned %s: %s",
+            response.status_code,
+            response.text[:200],
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"sandboxed.sh returned {response.status_code}",
+        )
+
+    try:
+        body = response.json()
+    except ValueError as error:
+        raise HTTPException(status_code=502, detail="sandboxed.sh returned invalid JSON") from error
+
+    missions: Optional[List[Dict[str, Any]]]
+    if isinstance(body, dict):
+        missions = body.get("missions")
+    else:
+        missions = body
+    if not isinstance(missions, list):
+        missions = []
+
+    return {
+        "session_id": session_id,
+        "missions": [_summarize(m) for m in missions if isinstance(m, dict)],
+    }
+
+
 async def _sandboxed_request(
     method: str,
     path: str,
@@ -132,50 +209,52 @@ async def _sandboxed_request(
         raise HTTPException(status_code=502, detail="sandboxed.sh returned invalid JSON") from error
 
 
-def _summarize(mission: Dict[str, Any]) -> Dict[str, Any]:
-    """Only the fields a conversation view needs."""
-    return {
-        "id": mission.get("id"),
-        "status": mission.get("status"),
-        "title": mission.get("title"),
-        "short_description": mission.get("short_description"),
-        "project": mission.get("project"),
-        "track": mission.get("track"),
-        "created_at": mission.get("created_at"),
-        "updated_at": mission.get("updated_at"),
-    }
+# --- Fleet surface: projects and their live missions ------------------------
 
 
-@router.get("/api/sessions/{session_id}/missions")
-async def get_session_missions(session_id: str, limit: int = 50) -> Dict[str, Any]:
-    """Missions started from this conversation, newest first.
-
-    Filtered by the backend on `origin_session_id`. That matters: the unfiltered
-    listing is capped, so filtering client-side made a conversation whose
-    workers had aged out of the window show none at all — silently.
+@router.get("/api/projects")
+async def list_projects() -> Dict[str, Any]:
+    """The project roster for the fleet surface: one entry per project with its
+    mode, health, and mission chips. Forwards the backend's board overview so
+    the desktop renders projects -> live mission-agents without a second call
+    per project.
     """
-    session_id = (session_id or "").strip()
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id is required")
+    body = await _sandboxed_request("GET", "/api/projects/overview")
+    projects = body.get("projects") if isinstance(body, dict) else None
+    if not isinstance(projects, list):
+        projects = []
+    return {"projects": projects}
 
-    # FastAPI already supplies the default, so clamp rather than re-defaulting:
-    # `limit or 50` would silently turn an explicit 0 into 50.
-    limit = max(1, min(int(limit), _MAX_LIMIT))
-    body = await _sandboxed_request(
-        "GET",
-        "/api/control/missions",
-        params={"origin_session_id": session_id, "limit": limit},
+
+@router.get("/api/projects/{slug}")
+async def get_project(slug: str) -> Dict[str, Any]:
+    """One project's structured object: record (mode/blocker), autonomy grant,
+    tracks, open decisions, and its bound control conversation.
+    """
+    slug = (slug or "").strip()
+    if not slug:
+        raise HTTPException(status_code=400, detail="slug is required")
+    body = await _sandboxed_request("GET", f"/api/projects/{slug}")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=502, detail="sandboxed.sh returned an unexpected project shape")
+    return body
+
+
+@router.post("/api/missions/{mission_id}/message")
+async def steer_mission(mission_id: str, payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
+    """Send a steering message to a running mission — the one write the fleet
+    surface needs, so the operator can nudge a background agent inline.
+    """
+    mission_id = (mission_id or "").strip()
+    if not mission_id:
+        raise HTTPException(status_code=400, detail="mission_id is required")
+    content = (payload.get("content") or payload.get("message") or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content is required")
+
+    await _sandboxed_request(
+        "POST",
+        "/api/control/message",
+        body={"mission_id": mission_id, "content": content},
     )
-
-    missions: Optional[List[Dict[str, Any]]]
-    if isinstance(body, dict):
-        missions = body.get("missions")
-    else:
-        missions = body
-    if not isinstance(missions, list):
-        missions = []
-
-    return {
-        "session_id": session_id,
-        "missions": [_summarize(m) for m in missions if isinstance(m, dict)],
-    }
+    return {"ok": True, "mission_id": mission_id}

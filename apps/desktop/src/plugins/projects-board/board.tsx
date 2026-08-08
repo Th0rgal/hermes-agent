@@ -279,7 +279,7 @@ function Card({
               <SessionStatusDot storedSessionId={project.conversation.session_id} />
             )}
             <span className="min-w-0 flex-1 truncate text-[0.75rem] font-medium leading-snug text-foreground">
-              {project.slug}
+              {project.title?.trim() || project.slug}
             </span>
             {project.conversation?.session_id && (
               <UnreadBadge count={unreadCounts[project.conversation.session_id] ?? 0} />

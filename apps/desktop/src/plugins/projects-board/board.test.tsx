@@ -175,15 +175,15 @@ describe('debounceAttentionNotifications', () => {
 describe('projectPaletteRows', () => {
   it('emits a card row per project and a chat row only when bound, skipping archived', () => {
     const rows = projectPaletteRows([
-      { ...row('verity', 'active'), conversation: { session_id: 's1', source: 'controller' } },
+      { ...row('verity', 'active'), conversation: { session_id: 's1', source: 'controller' }, title: 'Verity Core' },
       row('paloma', 'paused'),
       { ...row('old', 'archived'), conversation: { session_id: 's2', source: 'controller' } }
     ])
 
     expect(rows).toEqual([
-      { kind: 'chat', sessionId: 's1', slug: 'verity' },
-      { kind: 'card', slug: 'verity' },
-      { kind: 'card', slug: 'paloma' }
+      { kind: 'chat', label: 'Verity Core', sessionId: 's1', slug: 'verity' },
+      { kind: 'card', label: 'Verity Core', slug: 'verity' },
+      { kind: 'card', label: 'paloma', slug: 'paloma' }
     ])
   })
 
@@ -228,6 +228,7 @@ describe('the board page', () => {
     const { dispose } = renderBoard([
       {
         ...row('verity', 'attention'),
+        title: 'Verity Core',
         attention_reasons: ['controller blocked on CI'],
         missions: [{ github_pr: null, id: 'm1', status: 'awaiting_user', title: 'Fix CI', updated_at: null }]
       },
@@ -249,8 +250,9 @@ describe('the board page', () => {
       row('paloma', 'paused')
     ])
 
-    // Cards land in their columns.
-    expect(await screen.findByText('verity')).toBeTruthy()
+    // Cards land in their columns; a served title beats the slug.
+    expect(await screen.findByText('Verity Core')).toBeTruthy()
+    expect(screen.queryByText('verity')).toBeNull()
     expect(screen.getByText('hermes')).toBeTruthy()
     expect(screen.getByText('paloma')).toBeTruthy()
 

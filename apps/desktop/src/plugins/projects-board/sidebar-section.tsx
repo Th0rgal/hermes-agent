@@ -151,7 +151,7 @@ function ProjectRowItem({ project }: { project: BoundRow }) {
           >
             {/* Same dot the sidebar's own rows render — same resolved color. */}
             <SessionStatusDot storedSessionId={sessionId} />
-            <span className="min-w-0 flex-1 truncate">{project.slug}</span>
+            <span className="min-w-0 flex-1 truncate">{project.title?.trim() || project.slug}</span>
             <UnreadBadge count={unread} />
             {project.bucket === 'attention' && (
               <Tip label={project.attention_reasons[0] ?? b.col.attention.label}>

@@ -83,10 +83,27 @@ export function pluginActive(id: string, defaultEnabled = true): boolean {
 }
 
 function saveDecisions(next: Record<string, boolean>) {
-  $pluginDecisions.set(next)
+  // Merge over what's on disk before writing: `next` is built from THIS
+  // window's in-memory map, and persisting it verbatim would clobber any
+  // decision another window wrote (or one made before this window loaded).
+  // A silently dropped `kanban: true` hides an opt-in plugin with no trace.
+  // Per-key, `next` still wins — toggles apply; absent keys are preserved.
+  let merged = next
 
   try {
-    window.localStorage.setItem(DECISIONS_KEY, JSON.stringify(next))
+    const raw = window.localStorage.getItem(DECISIONS_KEY)
+
+    if (raw) {
+      merged = { ...(JSON.parse(raw) as Record<string, boolean>), ...next }
+    }
+  } catch {
+    // Unreadable store — write what we have.
+  }
+
+  $pluginDecisions.set(merged)
+
+  try {
+    window.localStorage.setItem(DECISIONS_KEY, JSON.stringify(merged))
   } catch {
     // Nonfatal.
   }

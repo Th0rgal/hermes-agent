@@ -7700,10 +7700,20 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         include_inactive: bool = False,
         repair_alternation: bool = False,
         include_row_ids: bool = False,
+        mark_persisted: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Load messages in the OpenAI conversation format (role + content dicts).
         Used by the gateway to restore conversation history.
+
+        ``mark_persisted=True`` stamps every returned message with
+        ``_DB_PERSISTED_MARKER`` so ``_flush_messages_to_session_db``
+        (run_agent.py) never writes a loaded row back to the database it was
+        just read from. OPT-IN, like ``include_row_ids``: only live-replay
+        callers — the ones whose loaded list becomes an agent's working
+        conversation_history and therefore reaches the turn flush — should
+        pass it. Default consumers (ACP restore, export, inspection) get the
+        transcript in its historical shape with no synthetic ``_``-keys.
 
         By default only active messages are returned. Pass
         ``include_inactive=True`` to load soft-deleted (rewound) rows
@@ -7747,6 +7757,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             include_ancestors=include_ancestors,
             repair_alternation=repair_alternation,
             include_row_ids=include_row_ids,
+            mark_persisted=mark_persisted,
         )
 
     # Columns every conversation projection decodes. Shared by
@@ -7767,6 +7778,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         include_ancestors: bool,
         repair_alternation: bool,
         include_row_ids: bool = False,
+        mark_persisted: bool = False,
     ) -> List[Dict[str, Any]]:
         """Decode fetched message rows into the OpenAI conversation format.
 
@@ -7855,8 +7867,12 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                         logger.warning("Failed to deserialize codex_message_items, falling back to None")
                         msg["codex_message_items"] = None
             # Every row here came OUT of the database, so it is already
-            # persisted by construction. Say so, or the turn flush writes it
-            # again.
+            # persisted by construction. For live-replay consumers
+            # (mark_persisted=True), say so — or the turn flush writes it
+            # again. OPT-IN so default consumers (ACP restore, export,
+            # inspection) keep the transcript in its historical shape:
+            # no synthetic ``_``-prefixed keys besides the requested
+            # ``_row_id`` ever leak to them.
             #
             # `_flush_messages_to_session_db` (run_agent.py) writes any message
             # not carrying this marker, reusing the message's own `timestamp`.
@@ -7880,7 +7896,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             # Direction of risk: marking a row that IS in the database can only
             # prevent a duplicate write. Leaving it unmarked is what produced
             # this bug.
-            msg[_DB_PERSISTED_MARKER] = True
+            if mark_persisted:
+                msg[_DB_PERSISTED_MARKER] = True
             _reframe_delivery_as_input(msg)
             if include_ancestors and self._is_duplicate_replayed_user_message(messages, msg):
                 continue
@@ -7979,6 +7996,10 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             include_ancestors=False,
             repair_alternation=True,
             include_row_ids=True,
+            # The model projection becomes the resumed session's working
+            # conversation, which reaches the turn flush — mark it so loaded
+            # rows are never written back (see mark_persisted).
+            mark_persisted=True,
         )
         display_history = self._rows_to_conversation(
             rows,

@@ -18,6 +18,15 @@ the reason it had to be abandoned rather than repaired.
 The flush writes anything not carrying `_DB_PERSISTED_MARKER`. A cold resume
 seeds the conversation from `get_messages_as_conversation`, whose rows carried
 no marker, so every one of them looked new.
+
+The marker is OPT-IN (`mark_persisted=True`), mirroring `include_row_ids`:
+every live-replay caller — the ones whose loaded list becomes an agent's
+working conversation_history and therefore reaches the flush — passes it,
+while default consumers (ACP restore, export, inspection) get the transcript
+in its historical shape with no synthetic underscore keys (see
+test_message_reactions.test_row_id_is_opt_in_and_never_reaches_the_provider
+and tests/acp/test_session.py::test_assistant_reasoning_fields_persisted,
+which pin that clean default shape).
 """
 
 import pytest
@@ -53,16 +62,24 @@ class TestTheMarker:
 
 
 class TestRestoredRows:
-    def test_a_restored_message_is_marked(self, db):
+    def test_default_consumers_see_the_historical_shape(self, db):
+        # The marker is opt-in: without mark_persisted=True the loader must
+        # not attach it (nor any other synthetic underscore key) — ACP
+        # restore, export and inspection get the transcript verbatim.
         db.append_message("s1", "user", "hello")
         [restored] = db.get_messages_as_conversation("s1")
+        assert _DB_PERSISTED_MARKER not in restored
+
+    def test_a_restored_message_is_marked(self, db):
+        db.append_message("s1", "user", "hello")
+        [restored] = db.get_messages_as_conversation("s1", mark_persisted=True)
         assert restored.get(_DB_PERSISTED_MARKER) is True
 
     def test_every_role_is_marked(self, db):
         db.append_message("s1", "user", "hello")
         db.append_message("s1", "assistant", "hi")
         db.append_message("s1", "tool", "result", tool_call_id="call_1")
-        restored = db.get_messages_as_conversation("s1")
+        restored = db.get_messages_as_conversation("s1", mark_persisted=True)
         assert len(restored) == 3
         assert all(m.get(_DB_PERSISTED_MARKER) is True for m in restored), restored
 
@@ -72,7 +89,9 @@ class TestRestoredRows:
         # the ones still duplicating.
         db.append_message("s1", "user", "one")
         db.append_message("s1", "user", "two")
-        restored = db.get_messages_as_conversation("s1", repair_alternation=True)
+        restored = db.get_messages_as_conversation(
+            "s1", repair_alternation=True, mark_persisted=True
+        )
         assert restored
         assert all(m.get(_DB_PERSISTED_MARKER) is True for m in restored), restored
 
@@ -83,7 +102,7 @@ class TestRestoredRows:
         db.append_message(
             "s1", "assistant", "[Cron delivery: watcher]\nDone.", observed=True
         )
-        [restored] = db.get_messages_as_conversation("s1")
+        [restored] = db.get_messages_as_conversation("s1", mark_persisted=True)
         assert restored["role"] == "user"
         assert restored.get(_DB_PERSISTED_MARKER) is True
 
@@ -94,7 +113,9 @@ class TestRestoredRows:
         db.append_message("s1", "user", "parent turn")
         db.create_session("s2", source="cli", parent_session_id="s1")
         db.append_message("s2", "user", "child turn")
-        restored = db.get_messages_as_conversation("s2", include_ancestors=True)
+        restored = db.get_messages_as_conversation(
+            "s2", include_ancestors=True, mark_persisted=True
+        )
         assert len(restored) >= 2
         assert all(m.get(_DB_PERSISTED_MARKER) is True for m in restored), restored
 
@@ -112,7 +133,9 @@ class TestTheIncidentShape:
             db.append_message("s1", "user", f"turn {i}")
             db.append_message("s1", "assistant", f"reply {i}")
 
-        reloaded = db.get_messages_as_conversation("s1", repair_alternation=True)
+        reloaded = db.get_messages_as_conversation(
+            "s1", repair_alternation=True, mark_persisted=True
+        )
         unwritten = [m for m in reloaded if not m.get(_DB_PERSISTED_MARKER)]
 
         assert len(reloaded) == 20

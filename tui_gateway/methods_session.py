@@ -420,7 +420,9 @@ def _(rid, params: dict) -> dict:
             # history becomes the resumed session record's working conversation),
             # so heal a durable ``user;user`` violation once here instead of
             # re-firing the pre-request repair on every subsequent turn.
-            history = db.get_messages_as_conversation(target, repair_alternation=True)
+            history = db.get_messages_as_conversation(
+                target, repair_alternation=True, mark_persisted=True
+            )
         except Exception as e:
             if lease is not None:
                 lease.release()
@@ -502,7 +504,7 @@ def _(rid, params: dict) -> dict:
             # inspection/export must show what is actually stored.
             if omit_messages:
                 raw_history = db.get_messages_as_conversation(
-                    target, repair_alternation=True
+                    target, repair_alternation=True, mark_persisted=True
                 )
                 display_history = []
             else:
@@ -588,7 +590,7 @@ def _(rid, params: dict) -> dict:
         # display copy stays verbatim.
         if omit_messages:
             raw_history = db.get_messages_as_conversation(
-                target, repair_alternation=True
+                target, repair_alternation=True, mark_persisted=True
             )
             display_history = []
         else:

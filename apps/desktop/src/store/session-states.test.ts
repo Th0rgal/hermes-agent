@@ -2,17 +2,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ClientSessionState } from '@/app/types'
 import { findGroupOfPane, group, split } from '@/components/pane-shell/tree/model'
-import { createClientSessionState } from '@/lib/chat-runtime'
 import { $layoutTree } from '@/components/pane-shell/tree/store'
-import { $selectedStoredSessionId, setSelectedStoredSessionId, $unreadFinishedSessionIds } from '@/store/session'
+import { createClientSessionState } from '@/lib/chat-runtime'
+import { $selectedStoredSessionId, $unreadFinishedSessionIds, setSelectedStoredSessionId } from '@/store/session'
 import type { SessionTile } from '@/store/session-states'
 import {
   blankDraftTile,
+  clearAllSessionStates,
   focusedSessionNeedsRoute,
   markSelectionRestore,
-  orderTilesByTree,
-  clearAllSessionStates,
   markSilentSessionActivity,
+  orderTilesByTree,
   publishSessionState,
   selectionHomesToWorkspace
 } from '@/store/session-states'

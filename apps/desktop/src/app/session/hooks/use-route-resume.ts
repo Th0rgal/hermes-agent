@@ -265,7 +265,9 @@ export function useRouteResume({
       const rearm = () => {
         setResumeExhaustedSessionId(current => (current === routedSessionId ? null : current))
       }
+
       window.addEventListener('online', rearm)
+
       return () => window.removeEventListener('online', rearm)
     }
 

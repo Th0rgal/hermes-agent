@@ -59,6 +59,7 @@ export function stripStateSignature<T extends string | null | undefined>(text: T
   if (!text || !text.includes('[STATE_SIGNATURE:')) {
     return text
   }
+
   return text.replace(STATE_SIGNATURE_RE, '').replace(/\n[ \t]*\n[ \t]*\n+/g, '\n\n').trim() as T
 }
 

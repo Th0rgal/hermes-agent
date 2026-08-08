@@ -14,17 +14,24 @@ export function isResolverError(error: unknown): boolean {
   if (!error || typeof error !== 'object') {
     return false
   }
+
   const code = (error as { code?: unknown }).code
+
   if (typeof code === 'string' && RESOLVER_ERROR_CODES.has(code)) {
     return true
   }
+
   const cause = (error as { cause?: unknown }).cause
+
   if (cause && cause !== error && isResolverError(cause)) {
     return true
   }
+
   const message = (error as { message?: unknown }).message
+
   return typeof message === 'string' && /\b(ENOTFOUND|EAI_AGAIN|EAI_FAIL|EAI_NONAME)\b/.test(message)
 }
+
 // Even at the capped retry path, consecutive liveness observations are at most
 // about 48s apart (ticket mint + socket open + backoff + the next status probe).
 // One minute keeps a continuous outage together without carrying old failures.

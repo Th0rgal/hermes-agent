@@ -173,6 +173,34 @@ function idToSession(sessionId: string): SessionInfo | undefined {
   )
 }
 
+/** True when two session ids name the SAME conversation — identical, or
+ *  bridged through a loaded/fetched row's lineage (stored root vs live tip,
+ *  either direction), across every slice the sidebar renders. The matcher a
+ *  surface holding only a bound id uses to mirror core row selection. */
+export function sessionIdsRefer(a: null | string | undefined, b: null | string | undefined): boolean {
+  if (!a || !b) {
+    return false
+  }
+
+  if (a === b) {
+    return true
+  }
+
+  const rowA = idToSession(a)
+
+  if (rowA && sessionMatchesStoredId(rowA, b)) {
+    return true
+  }
+
+  const rowB = idToSession(b)
+
+  if (rowB && sessionMatchesStoredId(rowB, a)) {
+    return true
+  }
+
+  return Boolean(rowA && rowB && sessionPinId(rowA) === sessionPinId(rowB))
+}
+
 export function sessionColorFor(session: null | SessionInfo | undefined): string | undefined {
   if (!session) {
     return undefined

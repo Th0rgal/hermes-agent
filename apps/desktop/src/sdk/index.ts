@@ -289,8 +289,13 @@ export {
   $sessionColorOverrides,
   sessionColorForId,
   sessionDurableId,
+  sessionIdsRefer,
   setSessionColorOverride
 } from '@/store/session-color'
+/** The stored id of the FOCUSED chat session (readonly computed) — what the
+ *  core sidebar rows highlight against; pair with `sessionIdsRefer` so a row
+ *  holding only a bound id selects in lockstep with the core rows. */
+export { $focusedStoredSessionId } from '@/store/session-states'
 /** Session id (live OR durable) → unread message count since last opened;
  *  nonzero entries only. Baselines stamp/clear on session open — the same
  *  signal that clears the core unread dot. */

@@ -145,7 +145,6 @@ export {
   type ModelMenuController
 } from '@/app/shell/model-catalog-menu'
 export type { StatusbarItem } from '@/app/shell/statusbar-controls'
-
 export type { TitlebarTool } from '@/app/shell/titlebar-controls'
 /** Pane placement roles. `'floating'` is the one NON-tiling value: the pane is
  *  excluded from the layout tree and rendered as a fixed, draggable card above
@@ -154,16 +153,22 @@ export type { TitlebarTool } from '@/app/shell/titlebar-controls'
  *  `width`/`height`. */
 export type { FloatingAnchor } from '@/components/pane-shell/tree/renderer/floating-rect'
 export { StatusDot, type StatusTone } from '@/components/status-dot'
+
 export { Badge } from '@/components/ui/badge'
 export { Button } from '@/components/ui/button'
 export { Checkbox } from '@/components/ui/checkbox'
 export { Codicon } from '@/components/ui/codicon'
+/** The 12-swatch palette + row the session menu's Appearance picker uses. */
+export { ColorSwatches } from '@/components/ui/color-swatches'
 export { ConfirmDialog } from '@/components/ui/confirm-dialog'
 export {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger
 } from '@/components/ui/context-menu'
 export { CopyButton } from '@/components/ui/copy-button'
@@ -182,6 +187,9 @@ export {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
 export { EmptyState } from '@/components/ui/empty-state'
@@ -213,9 +221,6 @@ export type {
   PluginRestOptions,
   PluginStorage
 } from '@/contrib/plugin'
-
-// -- contracts ----------------------------------------------------------------
-
 /** Mount-scoped contribution: while the rendering component is mounted, its
  *  children render in the target area's slot; unmount disposes it. Use for
  *  page-owned chrome (a page's titlebar control leaves with the page) —
@@ -223,6 +228,9 @@ export type {
  *  id with your plugin slug (`kanban:board-switcher`). */
 export { Contribute, type ContributeProps } from '@/contrib/react/contribute'
 export type { Contribution } from '@/contrib/types'
+
+// -- contracts ----------------------------------------------------------------
+
 /** Grab-to-pan for overflow containers (boards, timelines, wide tables) —
  *  the shared scrub primitive; don't hand-roll drag-to-scroll. */
 export { type GrabScroll, useGrabScroll } from '@/hooks/use-grab-scroll'
@@ -249,13 +257,11 @@ export { type KeybindContribution, KEYBINDS_AREA } from '@/lib/keybinds/actions'
 /** The app's deterministic identity color for a name (profiles, assignees,
  *  authors) + its translucent tag fill — so plugin-rendered identities read
  *  the same hue as everywhere else. */
-export { profileColor, profileColorSoft } from '@/lib/profile-color'
+export { PROFILE_SWATCHES, profileColor, profileColorSoft } from '@/lib/profile-color'
 /** The shared client itself, for invalidation OUTSIDE React (e.g. a
  *  `ctx.socket` frame invalidating a query). Inside components keep using
  *  `useQueryClient`. */
 export { queryClient } from '@/lib/query-client'
-
-export const PANES_AREA = 'panes'
 /** Hermes' reasoning levels + their compact labels, so a plugin surfacing a
  *  thinking depth uses the same scale and spelling as the rest of the app. */
 export {
@@ -265,15 +271,24 @@ export {
   type ReasoningEffort,
   reasoningEffortLabel
 } from '@/lib/reasoning-effort'
-export const STATUSBAR_AREAS = { left: 'statusBar.left', right: 'statusBar.right' } as const
-export const TITLEBAR_AREAS = { center: 'titleBar.center', left: 'titleBar.left', right: 'titleBar.right' } as const
-
 /** The app's own gateway-readiness evaluation (setup.status +
  *  setup.runtime_check, reconciled) — pass `host.request`. Don't hand-roll
  *  readiness from raw RPC shapes. */
 export { evaluateRuntimeReadiness, type RuntimeReadinessResult } from '@/lib/runtime-readiness'
+
+export const PANES_AREA = 'panes'
 export { coarseElapsed, fmtDateTime, fmtDayTime, relativeTime } from '@/lib/time'
+export const STATUSBAR_AREAS = { left: 'statusBar.left', right: 'statusBar.right' } as const
+export const TITLEBAR_AREAS = { center: 'titleBar.center', left: 'titleBar.left', right: 'titleBar.right' } as const
+
 export { cn } from '@/lib/utils'
+/** Per-session color overrides — the SAME store the sidebar/tabs resolve, so a
+ *  plugin-set color agrees everywhere. Write under `sessionDurableId(id)`. */
+export { $sessionColorOverrides, sessionColorForId, sessionDurableId, setSessionColorOverride } from '@/store/session-color'
+/** Session id (live OR durable) → unread message count since last opened;
+ *  nonzero entries only. Baselines stamp/clear on session open — the same
+ *  signal that clears the core unread dot. */
+export { $sessionUnreadCounts } from '@/store/session-unread'
 export { THEMES_AREA } from '@/themes/user-themes'
 export type { RpcEvent, StatusResponse } from '@/types/hermes'
 /** Subscribe a component to a `host.state` atom. */

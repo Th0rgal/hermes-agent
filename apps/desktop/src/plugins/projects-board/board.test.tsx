@@ -16,7 +16,7 @@ import {
   type ProjectsResponse,
   selectChips
 } from './api'
-import { MissionsBoardPage } from './board'
+import { ProjectsBoardPage } from './board'
 import { BOARD_LOCALES } from './i18n'
 
 // Radix calls these on open; jsdom doesn't implement them.
@@ -26,7 +26,7 @@ beforeAll(async () => {
   // SDK, and the registration door isn't (yet) SDK-exported.
   const { registerPluginLocales } = await import('@/i18n/plugin-i18n')
 
-  registerPluginLocales('missions-board', BOARD_LOCALES)
+  registerPluginLocales('projects-board', BOARD_LOCALES)
   Element.prototype.scrollIntoView = vi.fn()
   Element.prototype.hasPointerCapture = vi.fn(() => false)
   Element.prototype.releasePointerCapture = vi.fn()
@@ -216,7 +216,7 @@ describe('the board page', () => {
     render(
       <QueryClientProvider client={client}>
         <TooltipProvider>
-          <MissionsBoardPage />
+          <ProjectsBoardPage />
         </TooltipProvider>
       </QueryClientProvider>
     )
@@ -282,7 +282,7 @@ describe('the board page', () => {
     render(
       <QueryClientProvider client={client}>
         <TooltipProvider>
-          <MissionsBoardPage />
+          <ProjectsBoardPage />
         </TooltipProvider>
       </QueryClientProvider>
     )

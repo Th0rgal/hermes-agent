@@ -12,7 +12,7 @@ beforeAll(async () => {
   // registry directly (dynamic import — plugin sources import only the SDK).
   const { registerPluginLocales } = await import('@/i18n/plugin-i18n')
 
-  registerPluginLocales('missions-board', BOARD_LOCALES)
+  registerPluginLocales('projects-board', BOARD_LOCALES)
 })
 
 afterEach(() => {

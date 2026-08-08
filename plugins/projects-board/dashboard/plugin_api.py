@@ -1,12 +1,12 @@
 """Missions Board dashboard plugin — backend API routes.
 
-Mounted at /api/plugins/missions-board/ by the dashboard plugin system.
+Mounted at /api/plugins/projects-board/ by the dashboard plugin system.
 
 Intentionally thin: every handler forwards to sandboxed.sh through the gateway's
 credential-free relay (``hermes_cli.web_routers.missions._sandboxed_request``),
 so the desktop stays credential-free and there is exactly one place that mints a
 token for sandboxed.sh. The plugin's REST door is namespace-scoped to
-``/api/plugins/missions-board`` by construction, so these paths are relative.
+``/api/plugins/projects-board`` by construction, so these paths are relative.
 
 Reads: the project roster (board overview), one project's detail, and a
 project's state timeline. Writes: steering a running mission, a project
@@ -227,7 +227,7 @@ async def stream_events(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         return
     except httpx.HTTPError as error:
-        _log.warning("missions-board event relay lost the sandboxed.sh stream: %s", error)
+        _log.warning("projects-board event relay lost the sandboxed.sh stream: %s", error)
     finally:
         try:
             await ws.close()

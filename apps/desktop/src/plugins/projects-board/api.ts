@@ -1,7 +1,7 @@
 /**
- * Missions Board data layer. Everything goes through `ctx.rest` — the plugin's
- * own `/api/plugins/missions-board/*` router
- * (`plugins/missions-board/dashboard/plugin_api.py`), which relays to
+ * Projects data layer. Everything goes through `ctx.rest` — the plugin's
+ * own `/api/plugins/projects-board/*` router
+ * (`plugins/projects-board/dashboard/plugin_api.py`), which relays to
  * sandboxed.sh through the gateway's credential-free seam. No backend
  * credential ever reaches the renderer.
  *
@@ -189,14 +189,14 @@ export function bindApi(restFn: Rest, storage?: PluginStorage, socket?: Socket):
 }
 
 function call<T>(path: string, opts?: PluginRestOptions): Promise<T> {
-  return rest ? rest<T>(path, opts) : Promise.reject(new Error('missions-board: API used before bindApi()'))
+  return rest ? rest<T>(path, opts) : Promise.reject(new Error('projects-board: API used before bindApi()'))
 }
 
 // ── query keys ───────────────────────────────────────────────────────────────
 
-export const PROJECTS_KEY = ['missions-board', 'projects'] as const
-export const projectKey = (slug: string) => ['missions-board', 'project', slug] as const
-export const stateKey = (slug: string) => ['missions-board', 'state', slug] as const
+export const PROJECTS_KEY = ['projects-board', 'projects'] as const
+export const projectKey = (slug: string) => ['projects-board', 'project', slug] as const
+export const stateKey = (slug: string) => ['projects-board', 'state', slug] as const
 
 // ── attention transitions (pure — unit-tested) ───────────────────────────────
 

@@ -1,14 +1,14 @@
 /**
- * Missions Board — sandboxed.sh projects as a kanban board. A first-class
+ * Projects — sandboxed.sh projects as a kanban board. A first-class
  * `/board` page + a sidebar nav row + a live statusbar count of running
- * agents, all reusing the plugin's own `/api/plugins/missions-board` router
+ * agents, all reusing the plugin's own `/api/plugins/projects-board` router
  * through `ctx.rest`. No core edits.
  *
  * Ships OFF by default (`defaultEnabled: false`): it registers nothing until
  * the user turns it on in Settings ▸ Plugins.
  */
 
-import './missions-board.css'
+import './projects-board.css'
 
 import {
   cn,
@@ -29,6 +29,7 @@ import {
   useValue
 } from '@hermes/plugin-sdk'
 import { atom } from 'nanostores'
+import { useEffect } from 'react'
 
 import {
   $focusAttention,
@@ -43,12 +44,21 @@ import {
   type ProjectsResponse,
   setAttentionNotifier
 } from './api'
-import { MissionsBoardPage } from './board'
+import { ProjectsBoardPage } from './board'
 import { BOARD_LOCALES, useBoard } from './i18n'
 import { ProjectsSidebarSection } from './sidebar-section'
 
 /** Bound once at register() so the statusbar and page share one query cache. */
 const $bound = atom(false)
+
+// The plugin shipped at /board; keep that path working as a redirect.
+function LegacyBoardRedirect() {
+  useEffect(() => {
+    host.navigate('/projects')
+  }, [])
+
+  return null
+}
 
 // Live "N agents" pill — one glance at board activity from anywhere, clicks
 // through to the page. Shares the projects query (one cache, one poll). Hidden
@@ -84,7 +94,7 @@ function BoardCount() {
             'inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem] tabular-nums transition-colors',
             'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'
           )}
-          onClick={() => host.navigate('/board')}
+          onClick={() => host.navigate('/projects')}
           type="button"
         >
           <Codicon name="project" size="0.7rem" />
@@ -100,7 +110,7 @@ function BoardCount() {
             )}
             onClick={() => {
               $focusAttention.set(true)
-              host.navigate('/board')
+              host.navigate('/projects')
             }}
             type="button"
           >
@@ -113,8 +123,8 @@ function BoardCount() {
 }
 
 const plugin: HermesPlugin = {
-  id: 'missions-board',
-  name: 'Missions Board',
+  id: 'projects-board',
+  name: 'Projects',
   defaultEnabled: false,
   register(ctx) {
     ctx.i18n.register(BOARD_LOCALES)
@@ -131,7 +141,7 @@ const plugin: HermesPlugin = {
           label: ctx.i18n.t('openBoardAction'),
           onClick: () => {
             $focusAttention.set(true)
-            host.navigate('/board')
+            host.navigate('/projects')
           }
         },
         kind: 'warning',
@@ -152,7 +162,7 @@ const plugin: HermesPlugin = {
         host.navigate(`/${encodeURIComponent(row.sessionId)}`)
       } else {
         $openProjectSlug.set(row.slug)
-        host.navigate('/board')
+        host.navigate('/projects')
       }
     }
 
@@ -177,7 +187,7 @@ const plugin: HermesPlugin = {
           id: `palette-${row.kind}-${row.slug}`,
           area: PALETTE_AREA,
           data: {
-            id: `missions-board.${row.kind}.${row.slug}`,
+            id: `projects-board.${row.kind}.${row.slug}`,
             label:
               row.kind === 'chat'
                 ? ctx.i18n.t('paletteOpenConversation', row.slug)
@@ -197,14 +207,22 @@ const plugin: HermesPlugin = {
       {
         id: 'page',
         area: ROUTES_AREA,
+        data: { path: '/projects' } satisfies RouteContribution,
+        render: () => <ProjectsBoardPage />
+      },
+      {
+        // Legacy alias — the surface shipped at /board; anything still
+        // pointing there lands on /projects.
+        id: 'page-legacy',
+        area: ROUTES_AREA,
         data: { path: '/board' } satisfies RouteContribution,
-        render: () => <MissionsBoardPage />
+        render: () => <LegacyBoardRedirect />
       },
       {
         id: 'nav',
         area: SIDEBAR_NAV_AREA,
         order: 55,
-        data: { codicon: 'project', label: ctx.i18n.t('nav'), path: '/board' } satisfies SidebarNavContribution
+        data: { codicon: 'project', label: ctx.i18n.t('nav'), path: '/projects' } satisfies SidebarNavContribution
       },
       {
         // Bound project conversations above the sidebar's Pinned section;
@@ -224,10 +242,10 @@ const plugin: HermesPlugin = {
         id: 'open',
         area: PALETTE_AREA,
         data: {
-          id: 'missions-board.open',
+          id: 'projects-board.open',
           label: ctx.i18n.t('open'),
-          keywords: ['missions', 'board', 'projects', 'agents', 'sandboxed'],
-          run: () => host.navigate('/board')
+          keywords: ['projects', 'board', 'missions', 'sandboxed'],
+          run: () => host.navigate('/projects')
         } satisfies PaletteContribution
       }
     ])

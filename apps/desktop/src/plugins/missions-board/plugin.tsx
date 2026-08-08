@@ -19,6 +19,7 @@ import {
   type PaletteContribution,
   type RouteContribution,
   ROUTES_AREA,
+  SESSIONS_SECTIONS_AREA,
   SIDEBAR_NAV_AREA,
   type SidebarNavContribution,
   STATUSBAR_AREAS,
@@ -31,6 +32,7 @@ import { atom } from 'nanostores'
 import { bindApi, fetchProjects, liveMissions, needsAttention, PROJECTS_KEY } from './api'
 import { MissionsBoardPage } from './board'
 import { BOARD_LOCALES, useBoard } from './i18n'
+import { ProjectsSidebarSection } from './sidebar-section'
 
 /** Bound once at register() so the statusbar and page share one query cache. */
 const $bound = atom(false)
@@ -102,6 +104,14 @@ const plugin: HermesPlugin = {
         area: SIDEBAR_NAV_AREA,
         order: 55,
         data: { codicon: 'project', label: ctx.i18n.t('nav'), path: '/board' } satisfies SidebarNavContribution
+      },
+      {
+        // Bound project conversations above the sidebar's Pinned section;
+        // renders null (whole section hidden) on 503/empty, and unregisters
+        // with the plugin.
+        id: 'sidebar-section',
+        area: SESSIONS_SECTIONS_AREA,
+        render: () => <ProjectsSidebarSection />
       },
       {
         id: 'count',

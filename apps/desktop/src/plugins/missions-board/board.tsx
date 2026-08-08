@@ -8,6 +8,7 @@
  */
 
 import {
+  $sessionUnreadCounts,
   Button,
   cn,
   Codicon,
@@ -15,6 +16,9 @@ import {
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger,
   ErrorState,
   host,
@@ -27,11 +31,12 @@ import {
   useQueryClient,
   useValue
 } from '@hermes/plugin-sdk'
-import { type CSSProperties, type DragEvent as ReactDragEvent, useState } from 'react'
+import { type CSSProperties, type DragEvent as ReactDragEvent, useEffect, useState } from 'react'
 
 import {
   $collapsedColumns,
   $introDismissed,
+  $openProjectSlug,
   BOARD_BUCKETS,
   bucketAction,
   fetchProjects,
@@ -47,6 +52,7 @@ import {
   type ProjectsResponse,
   selectChips
 } from './api'
+import { SessionColorSwatchesRow, UnreadBadge } from './color-swatches'
 import { ProjectDrawer } from './drawer'
 import { type BoardText, bucketHelp, bucketLabel, useBoard } from './i18n'
 
@@ -200,6 +206,7 @@ function Card({
 }) {
   const b = useBoard()
   const [dragging, setDragging] = useState(false)
+  const unreadCounts = useValue($sessionUnreadCounts)
   const attention = project.bucket === 'attention'
   const live = liveMissions(project)
   const waiting = needsAttention(project)
@@ -242,6 +249,9 @@ function Card({
             <span className="min-w-0 flex-1 truncate text-[0.75rem] font-medium leading-snug text-foreground">
               {project.slug}
             </span>
+            {project.conversation?.session_id && (
+              <UnreadBadge count={unreadCounts[project.conversation.session_id] ?? 0} />
+            )}
           </div>
           {/* Mode + relative time share one row — no per-line sprawl. */}
           {(projectMode(project) || updateAgo) && (
@@ -272,6 +282,17 @@ function Card({
           <Codicon name="link-external" size="0.85rem" />
           {b.openProject}
         </ContextMenuItem>
+        {project.conversation?.session_id && (
+          <ContextMenuSub>
+            <ContextMenuSubTrigger>
+              <Codicon name="symbol-color" size="0.85rem" />
+              {b.setColor}
+            </ContextMenuSubTrigger>
+            <ContextMenuSubContent className="p-2">
+              <SessionColorSwatchesRow sessionId={project.conversation.session_id} />
+            </ContextMenuSubContent>
+          </ContextMenuSub>
+        )}
         <ContextMenuSeparator />
         {BOARD_BUCKETS.filter(name => bucketAction(project.bucket, name) !== null).map(name => (
           <ContextMenuItem key={name} onSelect={() => onMove(project.slug, name)}>
@@ -439,6 +460,20 @@ export function MissionsBoardPage() {
   })
 
   const [openSlug, setOpenSlug] = useState<null | string>(null)
+
+  // A drawer-open request raised from outside the page (the sidebar row's
+  // "Open board card"): the caller navigates here and parks the slug; the page
+  // consumes it on arrival and clears it so a remount can't reopen the drawer.
+  const requestedSlug = useValue($openProjectSlug)
+
+  useEffect(() => {
+    if (requestedSlug === null) {
+      return
+    }
+
+    setOpenSlug(requestedSlug)
+    $openProjectSlug.set(null)
+  }, [requestedSlug])
 
   const actionMut = useMutation({
     mutationFn: ({ action, slug }: { action: ProjectAction; slug: string; toBucket: string }) =>

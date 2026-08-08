@@ -1,15 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  isResolverError,
   REMOTE_LIVENESS_FAILURE_LIMIT,
   REMOTE_LIVENESS_FAILURE_WINDOW_MS,
+  REMOTE_LIVENESS_RESOLVER_FAILURE_LIMIT,
   REMOTE_LIVENESS_TIMEOUT_MS,
   RemoteLivenessTracker,
   RemoteRevalidationCoordinator,
   revalidatePooledRemoteBackends,
-  revalidateRemoteConnection,
-  isResolverError,
-  REMOTE_LIVENESS_RESOLVER_FAILURE_LIMIT
+  revalidateRemoteConnection
 } from './remote-liveness'
 
 describe('RemoteLivenessTracker', () => {
@@ -366,9 +366,11 @@ describe('resolver-flap tolerance (fork-delta)', () => {
   it('tolerates a longer streak when the per-failure limit is raised', () => {
     const tracker = new RemoteLivenessTracker(3, 60_000, () => 1_000)
     const url = 'https://gw.example'
+
     for (let i = 0; i < 5; i += 1) {
       expect(tracker.recordFailure(url, { failureLimit: REMOTE_LIVENESS_RESOLVER_FAILURE_LIMIT }).shouldReset).toBe(false)
     }
+
     expect(tracker.recordFailure(url, { failureLimit: REMOTE_LIVENESS_RESOLVER_FAILURE_LIMIT }).shouldReset).toBe(true)
   })
 

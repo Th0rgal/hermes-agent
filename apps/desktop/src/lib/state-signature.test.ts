@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+
 import { stripStateSignature } from './chat-messages'
 
 /**
@@ -31,6 +32,7 @@ describe('stripStateSignature', () => {
     // The exact line the operator reported.
     const text =
       'All lanes merged.\n[STATE_SIGNATURE: verity-program|none|066f1bf5|no-open-prs|none|next-tick [blocked]]'
+
     const out = stripStateSignature(text)
     expect(out).toBe('All lanes merged.')
     expect(out).not.toContain(']')

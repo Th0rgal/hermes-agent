@@ -467,6 +467,7 @@ const withAuthoritativeTurnState = (local: ChatMessage, authoritative: ChatMessa
 
   return merged
 }
+
 const isObservedCronDisplayMessage = (message: ChatMessage): boolean =>
   message.role === 'assistant' &&
   // Projection lifts the scheduler sentinel into ChatMessage.delivery; the

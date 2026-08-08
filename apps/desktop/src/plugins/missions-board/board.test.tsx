@@ -6,9 +6,11 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   bindApi,
   bucketAction,
+  type MissionChip,
   moveProject,
   type ProjectRow,
-  type ProjectsResponse
+  type ProjectsResponse,
+  selectChips
 } from './api'
 import { MissionsBoardPage } from './board'
 import { BOARD_LOCALES } from './i18n'
@@ -81,6 +83,52 @@ describe('moveProject', () => {
   })
 })
 
+// ── compact chip selection ───────────────────────────────────────────────────
+
+const chip = (id: string, status: string, updated_at: null | string = null): MissionChip => ({
+  github_pr: null,
+  id,
+  status,
+  title: id,
+  updated_at
+})
+
+describe('selectChips', () => {
+  it('caps at 3 — live first, then most-recent failed — and counts the rest', () => {
+    const { chips, overflow } = selectChips([
+      chip('f-old', 'failed', '2026-08-01T00:00:00Z'),
+      chip('done-1', 'completed'),
+      chip('wait', 'awaiting_user'),
+      chip('f-new', 'failed', '2026-08-07T00:00:00Z'),
+      chip('run', 'active'),
+      chip('done-2', 'completed'),
+      chip('done-3', 'stopped'),
+      chip('done-4', 'interrupted')
+    ])
+
+    expect(chips.map(c => c.id)).toEqual(['wait', 'run', 'f-new'])
+    expect(overflow).toBe(5)
+  })
+
+  it('never renders a wall of dead chips: nothing live → 1 most-recent + N', () => {
+    const { chips, overflow } = selectChips([
+      chip('f-old', 'failed', '2026-08-01T00:00:00Z'),
+      chip('f-new', 'failed', '2026-08-07T00:00:00Z'),
+      chip('done', 'completed', '2026-08-03T00:00:00Z')
+    ])
+
+    expect(chips.map(c => c.id)).toEqual(['f-new'])
+    expect(overflow).toBe(2)
+  })
+
+  it('shows all chips (no +N) when they fit under the cap', () => {
+    const { chips, overflow } = selectChips([chip('run', 'active')])
+
+    expect(chips.map(c => c.id)).toEqual(['run'])
+    expect(overflow).toBe(0)
+  })
+})
+
 // ── board render (mocked rest layer) ─────────────────────────────────────────
 
 describe('the board page', () => {
@@ -121,7 +169,17 @@ describe('the board page', () => {
       {
         ...row('hermes', 'active'),
         latest_update: { at: null, headline: 'Shipping PR #42', mode: 'active' },
-        missions: [{ github_pr: null, id: 'm2', status: 'active', title: 'Ship PR', updated_at: null }]
+        // 8 chips in — the card must cap at 3 (live + most-recent failed) + "+5".
+        missions: [
+          chip('Ship PR', 'active'),
+          chip('f1', 'failed', '2026-08-07T00:00:00Z'),
+          chip('f2', 'failed', '2026-08-06T00:00:00Z'),
+          chip('dead-1', 'stopped'),
+          chip('dead-2', 'stopped'),
+          chip('dead-3', 'interrupted'),
+          chip('dead-4', 'completed'),
+          chip('dead-5', 'completed')
+        ]
       },
       row('paloma', 'paused')
     ])
@@ -140,6 +198,14 @@ describe('the board page', () => {
     // Attention accents + latest update headline.
     expect(screen.getByText('controller blocked on CI')).toBeTruthy()
     expect(screen.getByText(/Shipping PR #42/)).toBeTruthy()
+
+    // Chip cap: 3 rendered (live + most-recent failed), the dead 5 folded
+    // into one muted "+5" — never a wall of stopped/interrupted chips.
+    expect(screen.getByText('Ship PR')).toBeTruthy()
+    expect(screen.getByText('f1')).toBeTruthy()
+    expect(screen.getByText('f2')).toBeTruthy()
+    expect(screen.getByText('+5')).toBeTruthy()
+    expect(screen.queryByText('dead-1')).toBeNull()
 
     dispose()
   })

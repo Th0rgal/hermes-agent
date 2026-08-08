@@ -43,7 +43,8 @@ import {
   projectMode,
   type ProjectRow,
   PROJECTS_KEY,
-  type ProjectsResponse
+  type ProjectsResponse,
+  selectChips
 } from './api'
 import { ProjectDrawer } from './drawer'
 import { type BoardText, bucketHelp, bucketLabel, useBoard } from './i18n'
@@ -110,6 +111,7 @@ export function ModeChip({ project }: { project: ProjectRow }) {
   )
 }
 
+/** One dense "2 live · 4 failed · 35 missions" line — zero terms omitted. */
 function HealthDigest({ b, project }: { b: BoardText; project: ProjectRow }) {
   const health = project.health
 
@@ -117,14 +119,31 @@ function HealthDigest({ b, project }: { b: BoardText; project: ProjectRow }) {
     return null
   }
 
+  const live = liveMissions(project).length
+
+  const terms = [
+    live > 0 && <span key="live">{b.live(live)}</span>,
+    health.failed > 0 && (
+      <span className="text-destructive" key="failed">
+        {b.failed(health.failed)}
+      </span>
+    ),
+    health.overdue > 0 && (
+      <span className="text-amber-500" key="overdue">
+        {b.overdue(health.overdue)}
+      </span>
+    ),
+    <span key="total">{b.missions(health.missions)}</span>
+  ].filter(Boolean)
+
   return (
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[0.625rem] text-(--ui-text-tertiary)">
-      <span>{b.missions(health.missions)}</span>
-      {health.failed > 0 && <span className="text-destructive">{b.failed(health.failed)}</span>}
-      {health.overdue > 0 && <span className="text-amber-500">{b.overdue(health.overdue)}</span>}
-      {health.tracks_needing_attention > 0 && (
-        <span className="text-amber-500">{b.tracksAttention(health.tracks_needing_attention)}</span>
-      )}
+    <div className="flex flex-wrap items-center gap-y-0.5 text-[0.625rem] text-(--ui-text-tertiary)">
+      {terms.map((term, index) => (
+        <span className="inline-flex items-center" key={index}>
+          {index > 0 && <span className="mx-1 text-(--ui-text-quaternary)">·</span>}
+          {term}
+        </span>
+      ))}
     </div>
   )
 }
@@ -135,18 +154,22 @@ const CHIP_DOT: Record<string, string> = {
   failed: 'bg-destructive'
 }
 
-function MissionDots({ missions }: { missions: MissionChip[] }) {
+/** At most 3 chips — live first, then most-recent failed — and one muted
+ *  "+N" for the rest (selectChips). The drawer keeps the full list. */
+function MissionDots({ b, missions }: { b: BoardText; missions: MissionChip[] }) {
   if (missions.length === 0) {
     return null
   }
 
+  const { chips, overflow } = selectChips(missions)
+
   return (
     <div className="flex flex-wrap items-center gap-1">
-      {missions.slice(0, 8).map((mission, index) => (
+      {chips.map((mission, index) => (
         <Tip key={mission.id ?? index} label={mission.title ?? mission.id ?? mission.status}>
           <span
             className={cn(
-              'inline-flex max-w-32 items-center gap-1 rounded-full bg-(--ui-bg-quaternary) px-1.5 py-px text-[0.5625rem] text-(--ui-text-tertiary)'
+              'inline-flex max-w-28 items-center gap-1 rounded-full bg-(--ui-bg-quaternary) px-1.5 py-px text-[0.5625rem] text-(--ui-text-tertiary)'
             )}
           >
             <span className={cn('size-1 shrink-0 rounded-full', CHIP_DOT[mission.status] ?? 'bg-(--ui-text-quaternary)')} />
@@ -154,6 +177,11 @@ function MissionDots({ missions }: { missions: MissionChip[] }) {
           </span>
         </Tip>
       ))}
+      {overflow > 0 && (
+        <span className="inline-flex items-center rounded-full bg-(--ui-bg-quaternary) px-1.5 py-px text-[0.5625rem] tabular-nums text-(--ui-text-quaternary)">
+          {b.moreChips(overflow)}
+        </span>
+      )}
     </div>
   )
 }
@@ -184,7 +212,7 @@ function Card({
       <ContextMenuTrigger asChild>
         <div
           className={cn(
-            'group relative flex flex-col gap-1.5 rounded-md border border-(--ui-stroke-tertiary) border-l-2 bg-(--ui-bg-elevated) p-2.5',
+            'group relative flex flex-col gap-1 rounded-md border border-(--ui-stroke-tertiary) border-l-2 bg-(--ui-bg-elevated) p-2',
             'transition-colors hover:bg-primary/[0.06]',
             draggable && 'cursor-grab active:cursor-grabbing',
             dragging && 'opacity-40'
@@ -204,23 +232,30 @@ function Card({
         >
           {/* Machine-activity arc: animates only while a mission is live. */}
           {live.length > 0 && !dragging && <span aria-hidden className="mb-arc" />}
-          <div className="flex items-baseline gap-2">
-            <span className="min-w-0 flex-1 truncate text-[0.8125rem] font-medium text-foreground">{project.slug}</span>
-            <ModeChip project={project} />
-          </div>
-          {attention && project.attention_reasons.length > 0 && (
-            <div className="text-[0.6875rem] leading-snug text-amber-500">{project.attention_reasons[0]}</div>
-          )}
-          {update?.headline && (
-            <div className="line-clamp-2 text-[0.6875rem] leading-snug text-(--ui-text-tertiary)">
-              {update.headline}
-              {updateAgo && <span className="text-(--ui-text-quaternary)"> · {updateAgo}</span>}
+          <span className="min-w-0 truncate text-[0.75rem] font-medium leading-snug text-foreground">
+            {project.slug}
+          </span>
+          {/* Mode + relative time share one row — no per-line sprawl. */}
+          {(projectMode(project) || updateAgo) && (
+            <div className="flex items-center gap-2">
+              <ModeChip project={project} />
+              {updateAgo && (
+                <span className="ml-auto shrink-0 text-[0.5625rem] text-(--ui-text-quaternary)">{updateAgo}</span>
+              )}
             </div>
           )}
+          {attention && project.attention_reasons.length > 0 && (
+            <div className="line-clamp-2 text-[0.625rem] leading-snug text-amber-500">
+              {project.attention_reasons[0]}
+            </div>
+          )}
+          {update?.headline && (
+            <div className="line-clamp-2 text-[0.625rem] leading-snug text-(--ui-text-tertiary)">{update.headline}</div>
+          )}
           <HealthDigest b={b} project={project} />
-          <MissionDots missions={project.missions} />
+          <MissionDots b={b} missions={project.missions} />
           {waiting.length > 0 && (
-            <span className="text-[0.625rem] uppercase tracking-wide text-amber-500">{b.needsYou(waiting.length)}</span>
+            <span className="text-[0.5625rem] uppercase tracking-wide text-amber-500">{b.needsYou(waiting.length)}</span>
           )}
         </div>
       </ContextMenuTrigger>

@@ -2512,6 +2512,8 @@ export const ar = defineLocale({
     sessionUnavailable: 'الجلسة غير متاحة',
     createSessionFailed: 'فشل إنشاء الجلسة',
     promptFailed: 'فشل إرسال الرسالة',
+    queuedWhileBusy: 'الوكيل في منتصف الدور — رسالتك في قائمة الانتظار وستُرسل عند انتهاء الدور.',
+    sendDroppedBusy: 'الوكيل في منتصف الدور — لم تُرسل الرسالة. حاول مجددًا بعد قليل.',
     providerCredentialRequired: 'مطلوب اعتماد المزود',
     emptySlashCommand: 'أمر slash فارغ',
     desktopCommands: 'أوامر سطح المكتب',

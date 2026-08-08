@@ -263,3 +263,41 @@ describe('useComposerSubmit with a clarify parked on the session', () => {
     expect($clarifyRequests.get()['other-session']).toBeDefined()
   })
 })
+
+describe('a refused steer never silently eats the message', () => {
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  it('queues the words AND surfaces a non-blocking hint', async () => {
+    const { $notifications } = await import('@/store/notifications')
+    const { $queuedPromptsBySession, getQueuedPrompts } = await import('@/store/composer-queue')
+
+    $queuedPromptsBySession.set({})
+    $notifications.set([])
+
+    const { hook, onSteer, onSubmit } = renderSubmitHook({ busy: true, text: 'keep going with the PR' })
+
+    // The gateway refuses the redirect (no live turn to steer — e.g. a
+    // backend without mid-turn steering, exactly the big controller
+    // conversations).
+    onSteer.mockResolvedValue(false)
+
+    act(() => {
+      hook.result.current.submitDraft()
+    })
+
+    await waitFor(() => expect(getQueuedPrompts('stored-session').map(entry => entry.text)).toEqual([
+      'keep going with the PR'
+    ]))
+
+    // The user is TOLD the message is parked — never "typed and nothing
+    // happened".
+    await waitFor(() => expect($notifications.get().some(n => n.kind === 'info')).toBe(true))
+    expect(onSubmit).not.toHaveBeenCalled()
+
+    $queuedPromptsBySession.set({})
+    $notifications.set([])
+  })
+})

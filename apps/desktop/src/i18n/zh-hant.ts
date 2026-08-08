@@ -2606,6 +2606,8 @@ export const zhHant = defineLocale({
     sessionUnavailable: '工作階段不可用',
     createSessionFailed: '無法建立新工作階段',
     promptFailed: '提示詞傳送失敗',
+    queuedWhileBusy: '智慧代理正在執行回合 — 訊息已加入佇列，回合結束後自動送出。',
+    sendDroppedBusy: '智慧代理正在執行回合，該訊息未送出。請稍後再試。',
     providerCredentialRequired: '傳送第一則訊息前請先新增提供方憑證。',
     emptySlashCommand: '空的斜線指令',
     desktopCommands: '桌面端指令',

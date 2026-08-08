@@ -2873,6 +2873,8 @@ export const en: Translations = {
     sessionUnavailable: 'Session unavailable',
     createSessionFailed: 'Could not create a new session',
     promptFailed: 'Prompt failed',
+    queuedWhileBusy: 'Agent is mid-turn — your message is queued and will send when the turn settles.',
+    sendDroppedBusy: 'Agent is mid-turn — that message was not sent. Try again in a moment.',
     providerCredentialRequired: 'Add a provider credential before sending your first message.',
     emptySlashCommand: 'empty slash command',
     desktopCommands: 'Desktop commands',

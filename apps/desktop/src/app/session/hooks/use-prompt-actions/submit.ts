@@ -163,10 +163,20 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
       const guardSessionId = options?.sessionId ?? activeSessionIdRef.current
 
-      if (
-        !hasSendable ||
-        (!options?.fromQueue && isTargetSessionBusy($sessionStates.get(), guardSessionId, busyRef.current))
-      ) {
+      if (!hasSendable) {
+        return false
+      }
+
+      if (!options?.fromQueue && isTargetSessionBusy($sessionStates.get(), guardSessionId, busyRef.current)) {
+        // A busy target must never SILENTLY eat a send — "typed and nothing
+        // went out" is indistinguishable from data loss. The drop stands (the
+        // composer's own busy path owns steering/queueing), but say so.
+        notify({
+          id: `send-busy:${guardSessionId ?? 'unknown'}`,
+          kind: 'info',
+          message: copy.sendDroppedBusy
+        })
+
         return false
       }
 

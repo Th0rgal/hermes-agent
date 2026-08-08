@@ -4443,3 +4443,35 @@ describe('usePromptActions stale-closure session routing', () => {
     }
   })
 })
+
+describe('busy-target sends are dropped LOUDLY, never silently', () => {
+  it('shows a non-blocking hint when the busy guard drops a send', async () => {
+    const { $notifications } = await import('@/store/notifications')
+
+    $notifications.set([])
+
+    const requestGateway = vi.fn(async () => ({}) as never)
+    let handle: HarnessHandle | null = null
+
+    await actRender(
+      <Harness
+        busyRef={{ current: true }}
+        onReady={h => {
+          handle = h
+        }}
+        refreshSessions={async () => {}}
+        requestGateway={requestGateway}
+      />
+    )
+
+    const accepted = await handle!.submitText('are you still on it?')
+
+    // The drop stands (the composer's busy path owns steer/queue)…
+    expect(accepted).toBe(false)
+    expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything(), expect.anything())
+    // …but the user is told — "typed and nothing went out" must not exist.
+    expect($notifications.get().some(n => n.kind === 'info')).toBe(true)
+
+    $notifications.set([])
+  })
+})

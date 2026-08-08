@@ -5,7 +5,7 @@ These forward to sandboxed.sh through `_sandboxed_request`; the tests stub that
 one seam so they exercise the route logic (shaping, validation, the writes)
 without a live backend.
 
-The plugin backend lives at ``plugins/missions-board/dashboard/plugin_api.py``,
+The plugin backend lives at ``plugins/projects-board/dashboard/plugin_api.py``,
 which is not an importable package — load it by file path, exactly like the
 kanban dashboard plugin test does.
 """
@@ -24,8 +24,8 @@ from fastapi import HTTPException
 
 def _load_board_api() -> ModuleType:
     repo_root = Path(__file__).resolve().parents[2]
-    plugin_file = repo_root / "plugins" / "missions-board" / "dashboard" / "plugin_api.py"
-    spec = importlib.util.spec_from_file_location("missions_board_plugin_api_under_test", plugin_file)
+    plugin_file = repo_root / "plugins" / "projects-board" / "dashboard" / "plugin_api.py"
+    spec = importlib.util.spec_from_file_location("projects_board_plugin_api_under_test", plugin_file)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod

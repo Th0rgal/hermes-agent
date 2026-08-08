@@ -79,7 +79,7 @@ function useRowActions(project: BoundRow) {
     onLifecycle: () => lifecycle.mutate(paused ? 'resume' : 'pause'),
     onOpenCard: () => {
       $openProjectSlug.set(project.slug)
-      host.navigate('/board')
+      host.navigate('/projects')
     }
   }
 }

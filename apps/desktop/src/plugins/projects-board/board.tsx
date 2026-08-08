@@ -1,5 +1,5 @@
 /**
- * The Missions Board page — mounted at `/board` in the workspace pane. A
+ * The Projects page — mounted at `/projects` (legacy `/board` redirects) in the workspace pane. A
  * kanban-style board of sandboxed.sh projects: four bucket columns (attention /
  * active / paused / archived), project cards with live mission chips and a
  * conic-arc border while agents are working, drag between the lifecycle
@@ -485,9 +485,9 @@ function Intro() {
       className="mx-4 mb-2 flex flex-col items-start gap-1.5 rounded-lg bg-(--ui-bg-quinary) px-3 py-2.5 text-[0.75rem] leading-relaxed text-(--ui-text-secondary)"
       data-selectable-text="true"
     >
-      <p className="min-w-0">{b.col.attention.help}</p>
+      <p className="min-w-0">{b.introBody}</p>
       <Button onClick={() => $introDismissed.set(true)} size="inline" variant="textStrong">
-        {b.close}
+        {b.introGotIt}
       </Button>
     </div>
   )
@@ -495,7 +495,7 @@ function Intro() {
 
 // ── page ─────────────────────────────────────────────────────────────────────
 
-export function MissionsBoardPage() {
+export function ProjectsBoardPage() {
   const b = useBoard()
   const qc = useQueryClient()
 
@@ -626,7 +626,7 @@ export function MissionsBoardPage() {
         <span className="rounded-full bg-(--ui-bg-quaternary) px-1.5 py-px text-[0.625rem] tabular-nums text-(--ui-text-tertiary)">
           {data?.projects.length ?? 0}
         </span>
-        {totalLive > 0 && <span className="text-[0.6875rem] text-(--ui-text-tertiary)">{b.agents(totalLive)}</span>}
+        {totalLive > 0 && <span className="text-[0.6875rem] text-(--ui-text-tertiary)">{b.liveCount(totalLive)}</span>}
         <div className="ml-auto">
           <Tip label={notifyOn ? b.notifyToggleOn : b.notifyToggleOff}>
             <Button

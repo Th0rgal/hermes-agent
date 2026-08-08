@@ -1,5 +1,5 @@
 /**
- * Plugin-scoped i18n for missions-board — bundles shipped under the plugin id
+ * Plugin-scoped i18n for projects-board — bundles shipped under the plugin id
  * via ctx.i18n.register, never touching core en.ts. `useBoard()` binds the
  * translator to the message SHAPE so components keep typed access.
  */
@@ -17,7 +17,7 @@ type BoardMessages = {
   loading: string
   noProjects: string
   countTip: (active: number, attention: number) => string
-  agents: (n: number) => string
+  liveCount: (n: number) => string
   needsYou: (n: number) => string
   col: Record<
     'archived' | 'active' | 'attention' | 'paused',
@@ -29,6 +29,8 @@ type BoardMessages = {
   expand: (label: string) => string
   collapse: (label: string) => string
   colEmpty: string
+  introBody: string
+  introGotIt: string
   updates: (n: number) => string
   missions: (n: number) => string
   live: (n: number) => string
@@ -88,17 +90,17 @@ type BoardMessages = {
 }
 
 const en: BoardMessages = {
-  title: 'Missions Board',
-  nav: 'Missions',
+  title: 'Projects',
+  nav: 'Projects',
   sidebarSection: 'Projects',
-  open: 'Missions Board: Open',
+  open: 'Projects: Open',
   empty: 'No sandboxed.sh projects on this host.',
   unreachable: 'sandboxed.sh is unreachable.',
   loading: 'Loading projects…',
   noProjects: 'No projects yet — the controller roster is empty.',
   countTip: (active, attention) =>
-    attention > 0 ? `${active} agents running · ${attention} need you` : `${active} agents running`,
-  agents: n => `${n} agent${n === 1 ? '' : 's'}`,
+    attention > 0 ? `${active} missions running · ${attention} need you` : `${active} missions running`,
+  liveCount: n => `${n} mission${n === 1 ? '' : 's'} running`,
   needsYou: n => `${n} need${n === 1 ? 's' : ''} you`,
   col: {
     attention: { help: 'Projects that need the operator — blocked, failing, or overdue.', label: 'Needs attention' },
@@ -112,6 +114,9 @@ const en: BoardMessages = {
   expand: label => `Expand ${label}`,
   collapse: label => `Collapse ${label}`,
   colEmpty: 'Empty',
+  introBody:
+    'A controller drives a project through its control conversation by dispatching missions. Attention is computed from health — resolve it, don’t drag it away.',
+  introGotIt: 'Got it',
   updates: n => `${n} update${n === 1 ? '' : 's'}`,
   missions: n => `${n} mission${n === 1 ? '' : 's'}`,
   live: n => `${n} live`,
@@ -119,7 +124,7 @@ const en: BoardMessages = {
   failed: n => `${n} failed`,
   overdue: n => `${n} overdue`,
   tracksAttention: n => `${n} track${n === 1 ? '' : 's'} need attention`,
-  steerPlaceholder: 'Nudge this agent…',
+  steerPlaceholder: 'Nudge this mission…',
   steer: 'Send',
   sent: 'Message delivered to the mission.',
   objective: 'Objective',
@@ -145,7 +150,7 @@ const en: BoardMessages = {
   stateTimeline: 'State timeline',
   observations: n => `${n} observation${n === 1 ? '' : 's'}`,
   conversation: 'Conversation',
-  openConversation: 'Open bound session',
+  openConversation: 'Open conversation',
   unread: n => `${n} unread message${n === 1 ? '' : 's'}`,
   menuOptions: 'Project options',
   nextActionArrow: action => `→ ${action}`,
@@ -200,7 +205,7 @@ export type BoardText = Bound<BoardMessages>
 
 /** The board strings for the active locale — one hook every component reads. */
 export function useBoard(): BoardText {
-  const t = usePluginI18n('missions-board')
+  const t = usePluginI18n('projects-board')
 
   return useMemo(() => bind(t, en), [t])
 }

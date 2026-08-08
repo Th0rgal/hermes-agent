@@ -1,6 +1,6 @@
 {
-  "name": "missions-board",
-  "label": "Missions Board",
+  "name": "projects-board",
+  "label": "Projects",
   "description": "A kanban-style board of your sandboxed.sh projects — attention, active, paused, and archived columns with live mission chips, drag-to-pause/resume/archive, and a project drawer with grant controls and inline mission steering.",
   "icon": "Package",
   "version": "1.0.0",

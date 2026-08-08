@@ -56,7 +56,9 @@ const STATE_SIGNATURE_RE = /[ \t]*(?:\*\*[^*\n]{0,64}?\*\*[ \t]*:?[ \t]*)?`?\[ST
 
 /** Remove the marker and the blank line it leaves behind. */
 export function stripStateSignature<T extends string | null | undefined>(text: T): T {
-  if (!text || !text.includes('[STATE_SIGNATURE:')) return text
+  if (!text || !text.includes('[STATE_SIGNATURE:')) {
+    return text
+  }
   return text.replace(STATE_SIGNATURE_RE, '').replace(/\n[ \t]*\n[ \t]*\n+/g, '\n\n').trim() as T
 }
 

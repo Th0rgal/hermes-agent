@@ -6,7 +6,7 @@ import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { $backgroundRunningSessionIds } from '@/store/composer-status'
 import { $unreadFinishedSessionIds } from '@/store/session'
-import { $sessionColorById, sessionColorFor } from '@/store/session-color'
+import { $sessionColorById, sessionColorFor, sessionColorForId } from '@/store/session-color'
 import { $attentionSessionIds, $stalledSessionIds, $workingSessionIds } from '@/store/session-states'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -119,9 +119,11 @@ export function SessionStatusDot({ storedSessionId, session, branchStem, classNa
   const r = t.sidebar.row
 
   // Subscribe to the shared color map for reactivity; sessionColorFor falls
-  // back to the resolver for a session outside the recents page.
+  // back to the resolver for a session outside the recents page, and an
+  // id-only call site (no SessionInfo in hand) resolves through the same
+  // stores by stored id — including across a compression rotation.
   useStore($sessionColorById)
-  const color = sessionColorFor(session) ?? null
+  const color = sessionColorFor(session) ?? sessionColorForId(storedSessionId) ?? null
 
   // Per-session membership as booleans via useStoreSelector: these arrays tick
   // on every stream delta (any session working/stalled/etc changes the array

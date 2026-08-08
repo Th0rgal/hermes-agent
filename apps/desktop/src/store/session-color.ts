@@ -3,7 +3,7 @@ import { computed } from 'nanostores'
 import { sessionProjectColor } from '@/app/chat/sidebar/projects/workspace-groups'
 import { Codecs, persistentAtom } from '@/lib/persisted'
 import { $projects } from '@/store/projects'
-import { $sessions, sessionPinId } from '@/store/session'
+import { $sessions, sessionMatchesStoredId, sessionPinId } from '@/store/session'
 import type { ProjectInfo, SessionInfo } from '@/types/hermes'
 
 // Per-session color OVERRIDES — a user-picked color that wins over the inherited
@@ -69,6 +69,36 @@ export const $sessionColorById = computed(
 // that isn't in `$sessions` — e.g. a project-tree session older than the
 // paginated recents page, opened as a tab — misses the map, so fall back to the
 // same resolver the map is built from.
+/** Resolve a color from a bare session ID — for surfaces that hold only an id
+ *  (a plugin's backend binding, say), possibly EITHER side of a compression
+ *  rotation. Precedence mirrors the object resolver: the live map, a direct
+ *  override hit (the id may itself be the durable key), then the full resolver
+ *  on whichever loaded session the id matches along its lineage chain. */
+export function sessionColorForId(sessionId: null | string | undefined): string | undefined {
+  if (!sessionId) {
+    return undefined
+  }
+
+  const direct = $sessionColorById.get()[sessionId] ?? $sessionColorOverrides.get()[sessionId]
+
+  if (direct) {
+    return direct
+  }
+
+  const session = $sessions.get().find(candidate => sessionMatchesStoredId(candidate, sessionId))
+
+  return session ? resolveSessionColor(session, $projects.get(), $sessionColorOverrides.get()) : undefined
+}
+
+/** The DURABLE id a color override for `sessionId` should be stored under —
+ *  the matched session's lineage root when it's loaded, else the id itself
+ *  (which is the root for a session outside the loaded page). */
+export function sessionDurableId(sessionId: string): string {
+  const session = $sessions.get().find(candidate => sessionMatchesStoredId(candidate, sessionId))
+
+  return session ? sessionPinId(session) : sessionId
+}
+
 export function sessionColorFor(session: null | SessionInfo | undefined): string | undefined {
   if (!session) {
     return undefined

@@ -20,6 +20,7 @@ import {
   host,
   Loader,
   relativeTime,
+  SessionStatusDot,
   Tip,
   useMutation,
   useQuery,
@@ -232,9 +233,16 @@ function Card({
         >
           {/* Machine-activity arc: animates only while a mission is live. */}
           {live.length > 0 && !dragging && <span aria-hidden className="mb-arc" />}
-          <span className="min-w-0 truncate text-[0.75rem] font-medium leading-snug text-foreground">
-            {project.slug}
-          </span>
+          <div className="flex min-w-0 items-center gap-1.5">
+            {/* The bound conversation's dot — the exact color/status primitive
+                the sidebar renders, so project ↔ session link visually. */}
+            {project.conversation?.session_id && (
+              <SessionStatusDot storedSessionId={project.conversation.session_id} />
+            )}
+            <span className="min-w-0 flex-1 truncate text-[0.75rem] font-medium leading-snug text-foreground">
+              {project.slug}
+            </span>
+          </div>
           {/* Mode + relative time share one row — no per-line sprawl. */}
           {(projectMode(project) || updateAgo) && (
             <div className="flex items-center gap-2">

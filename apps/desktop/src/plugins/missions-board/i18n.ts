@@ -10,6 +10,7 @@ import { useMemo } from 'react'
 type BoardMessages = {
   title: string
   nav: string
+  sidebarSection: string
   open: string
   empty: string
   unreachable: string
@@ -72,6 +73,7 @@ type BoardMessages = {
 const en: BoardMessages = {
   title: 'Missions Board',
   nav: 'Missions',
+  sidebarSection: 'Projects',
   open: 'Missions Board: Open',
   empty: 'No sandboxed.sh projects on this host.',
   unreachable: 'sandboxed.sh is unreachable.',

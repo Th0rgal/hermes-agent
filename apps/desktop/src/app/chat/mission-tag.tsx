@@ -31,7 +31,12 @@ export function useSessionMissions(sessionId: string | null | undefined, profile
 
     let cancelled = false
 
-    getSessionMissions(sessionId, profile)
+    // Promise.resolve().then(...) folds a synchronous throw (no
+    // window.hermesDesktop bridge — web build, tests) into the same rejection
+    // path as a failed gateway call, instead of crashing the render's effect
+    // pass. Either way the answer is "say nothing".
+    Promise.resolve()
+      .then(() => getSessionMissions(sessionId, profile))
       .then((response) => {
         if (!cancelled) {
           setMissions(response.missions)

@@ -14,6 +14,7 @@
  */
 
 import {
+  $focusedStoredSessionId,
   $sessionUnreadCounts,
   cn,
   Codicon,
@@ -34,6 +35,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
   host,
+  sessionIdsRefer,
   SessionStatusDot,
   Tip,
   useMutation,
@@ -136,6 +138,11 @@ function ProjectRowItem({ project }: { project: BoundRow }) {
   const sessionId = project.conversation.session_id
   const unread = unreadCounts[sessionId] ?? 0
   const actions = useRowActions(project)
+  // Selected in lockstep with the core sidebar rows: same focused-session
+  // source, lineage-aware matching (the binding may hold either side of a
+  // stored-id ↔ live-tip pair).
+  const focusedId = useValue($focusedStoredSessionId)
+  const selected = sessionIdsRefer(focusedId, sessionId)
 
   return (
     <ContextMenu>
@@ -144,7 +151,9 @@ function ProjectRowItem({ project }: { project: BoundRow }) {
           <button
             className={cn(
               'flex h-7 w-full items-center gap-2 rounded-md px-2 pr-7 text-left text-[0.8125rem] text-(--ui-text-secondary)',
-              'transition-colors hover:bg-(--ui-control-hover-background) hover:text-foreground'
+              'transition-colors hover:bg-(--ui-control-hover-background) hover:text-foreground',
+              // The exact selected-row treatment core session rows use.
+              selected && 'bg-(--ui-row-active-background) text-foreground'
             )}
             onClick={() => host.navigate(`/${encodeURIComponent(sessionId)}`)}
             type="button"

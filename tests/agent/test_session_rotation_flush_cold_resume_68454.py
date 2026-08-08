@@ -1,10 +1,14 @@
 """Regression (#68454): /new, /resume, /branch must not re-append cold-resumed
 transcript rows when flushing before session rotation.
 
-Sibling of #68196 / #68205 (preflight compression path). Cold resume loads
-plain dicts without ``_DB_PERSISTED_MARKER``. If the user rotates immediately
-via /new, /resume, or /branch, the old-session flush must pass
-``conversation_history=`` so identity skip treats the loaded prefix as durable.
+Sibling of #68196 / #68205 (preflight compression path). A cold resume that
+feeds an agent's working conversation loads via
+``get_messages_as_conversation(..., mark_persisted=True)``, which stamps
+``_DB_PERSISTED_MARKER`` on every returned row (opt-in per consumer — default
+loads keep the transcript's historical shape for ACP restore/export, see
+tests/test_restored_history_is_marked_persisted.py). If the user rotates
+immediately via /new, /resume, or /branch, the old-session flush skips those
+stamped rows whether or not the caller also passes ``conversation_history=``.
 
 These tests bind the real ``AIAgent._flush_messages_to_session_db`` methods onto
 a lightweight stand-in so construction never hits network model-metadata
@@ -62,9 +66,11 @@ def test_rotation_flush_without_history_boundary_no_longer_duplicates(
     messages, 127 of them the transcript re-appended whole, all 69 tool_call_ids
     duplicated at a constant offset and ``ts[127] == ts[0]`` exactly.
 
-    ``_rows_to_conversation`` now stamps ``_DB_PERSISTED_MARKER`` on every row it
-    returns -- a row loaded from the database is persisted by construction -- so
-    the flush skips them whether or not the caller remembered the boundary.
+    A cold-resume load destined for the flush now carries
+    ``mark_persisted=True`` -- a row loaded from the database is persisted by
+    construction, and the stamp is what every live-replay call site requests --
+    so the flush skips the loaded prefix whether or not the caller also
+    remembered the ``conversation_history=`` boundary.
 
     The companion test below keeps the boundary path covered: it is still the
     right call shape, and it must stay a no-op.
@@ -75,7 +81,7 @@ def test_rotation_flush_without_history_boundary_no_longer_duplicates(
     db.append_message(sid, "user", "persisted question")
     db.append_message(sid, "assistant", "persisted answer")
 
-    loaded = db.get_messages_as_conversation(sid)
+    loaded = db.get_messages_as_conversation(sid, mark_persisted=True)
     agent = _make_flush_agent(db, sid)
     agent._flush_messages_to_session_db(loaded)  # no conversation_history=
 

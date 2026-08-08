@@ -1,0 +1,14 @@
+{
+  "name": "missions-board",
+  "label": "Missions Board",
+  "description": "A kanban-style board of your sandboxed.sh projects — attention, active, paused, and archived columns with live mission chips, drag-to-pause/resume/archive, and a project drawer with grant controls and inline mission steering.",
+  "icon": "Package",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/board",
+    "position": "after:skills"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

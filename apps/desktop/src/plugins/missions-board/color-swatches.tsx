@@ -9,13 +9,76 @@
 import {
   $sessionColorOverrides,
   ColorSwatches,
+  host,
+  Input,
   PROFILE_SWATCHES,
   sessionDurableId,
   setSessionColorOverride,
+  useMutation,
   useValue
 } from '@hermes/plugin-sdk'
+import { useState } from 'react'
 
+import { steerMission } from './api'
 import { useBoard } from './i18n'
+
+// Local copy of board.tsx's errText (importing it would cycle board ↔ here).
+function detailText(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err)
+  const brace = raw.indexOf('{')
+
+  if (brace !== -1) {
+    try {
+      return (JSON.parse(raw.slice(brace)) as { detail?: string }).detail ?? raw
+    } catch {
+      // Not JSON — fall through.
+    }
+  }
+
+  return raw
+}
+
+/** The one Enter-to-steer input — shared by the drawer's mission rows and the
+ *  board card's inline chip affordance, so steering feels identical. */
+export function SteerInput({ missionId, onDone }: { missionId: string; onDone?: () => void }) {
+  const b = useBoard()
+  const [draft, setDraft] = useState('')
+
+  const send = useMutation({
+    mutationFn: () => steerMission(missionId, draft.trim()),
+    onError: err => host.notify({ kind: 'error', message: detailText(err) }),
+    onSuccess: () => {
+      setDraft('')
+      host.notify({ kind: 'info', message: b.sent })
+      onDone?.()
+    }
+  })
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <Input
+        autoFocus
+        className="h-6 flex-1 text-[0.75rem]"
+        onChange={event => setDraft(event.target.value)}
+        onKeyDown={event => {
+          if (event.key === 'Enter' && draft.trim() && !send.isPending) {
+            send.mutate()
+          }
+        }}
+        placeholder={b.steerPlaceholder}
+        value={draft}
+      />
+      <button
+        className="shrink-0 rounded bg-primary/80 px-2 py-1 text-[0.6875rem] text-primary-foreground disabled:opacity-40"
+        disabled={send.isPending || draft.trim().length === 0}
+        onClick={() => send.mutate()}
+        type="button"
+      >
+        {b.steer}
+      </button>
+    </div>
+  )
+}
 
 /** Unread count pill — hidden at 0, capped at "9+". */
 export function UnreadBadge({ count }: { count: number }) {

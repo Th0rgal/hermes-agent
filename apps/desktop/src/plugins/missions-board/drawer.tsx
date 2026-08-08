@@ -33,10 +33,10 @@ import {
   type ProjectRow,
   saveGrant,
   stateKey,
-  steerMission,
   type TrackHealth
 } from './api'
 import { ago, errText } from './board'
+import { SteerInput } from './color-swatches'
 import { useBoard } from './i18n'
 
 const FIELD_LABEL = 'text-[0.62rem] font-semibold uppercase tracking-[0.14em] text-(--ui-text-quaternary)'
@@ -165,18 +165,7 @@ function GrantPanel({ grant, slug }: { grant: null | ProjectGrant | undefined; s
 function MissionRow({ mission }: { mission: MissionChip }) {
   const b = useBoard()
   const [open, setOpen] = useState(false)
-  const [draft, setDraft] = useState('')
   const attention = mission.status === 'awaiting_user'
-
-  const send = useMutation({
-    mutationFn: () => steerMission(mission.id!, draft.trim()),
-    onError: err => host.notify({ kind: 'error', message: errText(err) }),
-    onSuccess: () => {
-      setDraft('')
-      setOpen(false)
-      host.notify({ kind: 'info', message: b.sent })
-    }
-  })
 
   return (
     <div className="rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary) px-2.5 py-1.5">
@@ -201,26 +190,8 @@ function MissionRow({ mission }: { mission: MissionChip }) {
         )}
       </button>
       {open && mission.id && (
-        <div className="mt-1.5 flex items-center gap-1.5">
-          <Input
-            className="h-6 flex-1 text-[0.75rem]"
-            onChange={event => setDraft(event.target.value)}
-            onKeyDown={event => {
-              if (event.key === 'Enter' && draft.trim() && !send.isPending) {
-                send.mutate()
-              }
-            }}
-            placeholder={b.steerPlaceholder}
-            value={draft}
-          />
-          <button
-            className="shrink-0 rounded bg-primary/80 px-2 py-1 text-[0.6875rem] text-primary-foreground disabled:opacity-40"
-            disabled={send.isPending || draft.trim().length === 0}
-            onClick={() => send.mutate()}
-            type="button"
-          >
-            {b.steer}
-          </button>
+        <div className="mt-1.5">
+          <SteerInput missionId={mission.id} onDone={() => setOpen(false)} />
         </div>
       )}
     </div>

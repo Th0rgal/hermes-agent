@@ -57,6 +57,8 @@ export interface ProjectRow {
   health?: ProjectHealth
   latest_update: DeliveryUpdate | null
   missions: MissionChip[]
+  /** Not in today's overview payload — rendered when the backend adds it. */
+  next_action?: null | string
   slug: string
   updates_count?: number
 }
@@ -121,8 +123,22 @@ export const $collapsedColumns = atom<Record<string, boolean>>({})
  *  it on arrival. Ephemeral by design — never persisted. */
 export const $openProjectSlug = atom<null | string>(null)
 
+/** One-shot "focus the Needs-attention column" request (the statusbar pill's
+ *  amber !N, an attention notification). The board consumes and clears it:
+ *  expand + scroll to + briefly highlight the column. Ephemeral. */
+export const $focusAttention = atom<boolean>(false)
+
+/** Fire a desktop notification when a project ENTERS attention. Persisted. */
+export const $notifyAttention = atom<boolean>(true)
+
+/** Per-project epoch-ms of the last attention notification (30-min debounce).
+ *  Persisted so an app restart doesn't re-fire a standing alert. */
+export const $attentionNotifiedAt = atom<Record<string, number>>({})
+
 const INTRO_KEY = 'introDismissed'
 const COLLAPSED_KEY = 'collapsedColumns'
+const NOTIFY_KEY = 'notifyAttention'
+const NOTIFIED_AT_KEY = 'attentionNotifiedAt'
 
 /** One `{invalidate, mission_id}` frame from the backend relay → refresh the
  *  roster. The poll stays as the fallback; the socket just makes a mission
@@ -157,7 +173,11 @@ export function bindApi(restFn: Rest, storage?: PluginStorage, socket?: Socket):
 
     persist($introDismissed, INTRO_KEY, false)
     persist($collapsedColumns, COLLAPSED_KEY, {})
+    persist($notifyAttention, NOTIFY_KEY, true)
+    persist($attentionNotifiedAt, NOTIFIED_AT_KEY, {})
   }
+
+  previousBuckets = null
 
   const unsubscribe = socket ? socket('/events', onEventFrame) : null
 
@@ -178,9 +198,98 @@ export const PROJECTS_KEY = ['missions-board', 'projects'] as const
 export const projectKey = (slug: string) => ['missions-board', 'project', slug] as const
 export const stateKey = (slug: string) => ['missions-board', 'state', slug] as const
 
+// ── attention transitions (pure — unit-tested) ───────────────────────────────
+
+/** Projects newly ENTERING attention relative to the previous roster snapshot.
+ *  A null previous (startup / rebind) yields none — a standing alert the app
+ *  boots into is not a transition. */
+export function attentionTransitions(
+  previous: null | Record<string, string>,
+  projects: ProjectRow[]
+): string[] {
+  if (!previous) {
+    return []
+  }
+
+  return projects
+    .filter(p => p.bucket === 'attention' && p.slug in previous && previous[p.slug] !== 'attention')
+    .map(p => p.slug)
+}
+
+/** 30-minute per-project debounce over the persisted notified-at record.
+ *  Returns the slugs to notify NOW and stamps them. */
+export function debounceAttentionNotifications(slugs: string[], now = Date.now()): string[] {
+  const DEBOUNCE_MS = 30 * 60 * 1000
+  const stamps = $attentionNotifiedAt.get()
+  const due = slugs.filter(slug => now - (stamps[slug] ?? 0) >= DEBOUNCE_MS)
+
+  if (due.length > 0) {
+    $attentionNotifiedAt.set({ ...stamps, ...Object.fromEntries(due.map(slug => [slug, now])) })
+  }
+
+  return due
+}
+
+// The plugin shell owns presentation (i18n'd copy, the notification door);
+// the data layer only detects transitions on each roster arrival.
+let notifyAttentionFn: ((slug: string) => void) | null = null
+let previousBuckets: null | Record<string, string> = null
+
+export function setAttentionNotifier(fn: ((slug: string) => void) | null): void {
+  notifyAttentionFn = fn
+}
+
+function observeRoster(projects: ProjectRow[]): void {
+  const entered = attentionTransitions(previousBuckets, projects)
+  previousBuckets = Object.fromEntries(projects.map(p => [p.slug, p.bucket]))
+
+  if (entered.length === 0 || !$notifyAttention.get() || !notifyAttentionFn) {
+    return
+  }
+
+  for (const slug of debounceAttentionNotifications(entered)) {
+    notifyAttentionFn(slug)
+  }
+}
+
+// ── palette rows (pure — unit-tested) ────────────────────────────────────────
+
+export interface ProjectPaletteRow {
+  kind: 'card' | 'chat'
+  sessionId?: string
+  slug: string
+}
+
+/** ⌘K rows from the roster: an "open board card" row per non-archived project
+ *  and an "open conversation" row when it has a binding. Capped (by project)
+ *  so a huge roster can't flood the palette. The overview payload carries no
+ *  project title, so rows are labeled by slug. */
+export function projectPaletteRows(projects: ProjectRow[], cap = 20): ProjectPaletteRow[] {
+  return projects
+    .filter(p => p.bucket !== 'archived')
+    .slice(0, cap)
+    .flatMap(p => {
+      const rows: ProjectPaletteRow[] = []
+      const sessionId = p.conversation?.session_id
+
+      if (sessionId) {
+        rows.push({ kind: 'chat', sessionId, slug: p.slug })
+      }
+
+      rows.push({ kind: 'card', slug: p.slug })
+
+      return rows
+    })
+}
+
 // ── reads ────────────────────────────────────────────────────────────────────
 
-export const fetchProjects = () => call<ProjectsResponse>('/projects')
+export const fetchProjects = () =>
+  call<ProjectsResponse>('/projects').then(response => {
+    observeRoster(response.projects)
+
+    return response
+  })
 
 export const fetchProject = (slug: string) => call<ProjectDetail>(`/projects/${encodeURIComponent(slug)}`)
 

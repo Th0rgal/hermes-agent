@@ -4,10 +4,14 @@ import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import {
+  $attentionNotifiedAt,
+  attentionTransitions,
   bindApi,
   bucketAction,
+  debounceAttentionNotifications,
   type MissionChip,
   moveProject,
+  projectPaletteRows,
   type ProjectRow,
   type ProjectsResponse,
   selectChips
@@ -126,6 +130,67 @@ describe('selectChips', () => {
 
     expect(chips.map(c => c.id)).toEqual(['run'])
     expect(overflow).toBe(0)
+  })
+})
+
+// ── attention transitions + notification debounce ────────────────────────────
+
+describe('attentionTransitions', () => {
+  it('reports only projects newly ENTERING attention', () => {
+    const previous = { hermes: 'attention', paloma: 'paused', verity: 'active' }
+
+    const entered = attentionTransitions(previous, [
+      row('verity', 'attention'), // active → attention: fires
+      row('hermes', 'attention'), // already there: silent
+      row('paloma', 'paused') // unchanged: silent
+    ])
+
+    expect(entered).toEqual(['verity'])
+  })
+
+  it('a null previous snapshot (startup) never fires', () => {
+    expect(attentionTransitions(null, [row('verity', 'attention')])).toEqual([])
+  })
+
+  it('a project first seen already in attention is not a transition', () => {
+    expect(attentionTransitions({}, [row('new-proj', 'attention')])).toEqual([])
+  })
+})
+
+describe('debounceAttentionNotifications', () => {
+  it('fires once, then suppresses inside the 30-minute window', () => {
+    $attentionNotifiedAt.set({})
+    const t0 = 1_000_000_000
+
+    expect(debounceAttentionNotifications(['verity'], t0)).toEqual(['verity'])
+    expect(debounceAttentionNotifications(['verity'], t0 + 29 * 60 * 1000)).toEqual([])
+    expect(debounceAttentionNotifications(['verity'], t0 + 31 * 60 * 1000)).toEqual(['verity'])
+
+    $attentionNotifiedAt.set({})
+  })
+})
+
+// ── palette generation ───────────────────────────────────────────────────────
+
+describe('projectPaletteRows', () => {
+  it('emits a card row per project and a chat row only when bound, skipping archived', () => {
+    const rows = projectPaletteRows([
+      { ...row('verity', 'active'), conversation: { session_id: 's1', source: 'controller' } },
+      row('paloma', 'paused'),
+      { ...row('old', 'archived'), conversation: { session_id: 's2', source: 'controller' } }
+    ])
+
+    expect(rows).toEqual([
+      { kind: 'chat', sessionId: 's1', slug: 'verity' },
+      { kind: 'card', slug: 'verity' },
+      { kind: 'card', slug: 'paloma' }
+    ])
+  })
+
+  it('caps by project so a huge roster cannot flood the palette', () => {
+    const projects = Array.from({ length: 40 }, (_, i) => row(`p${i}`, 'active'))
+
+    expect(projectPaletteRows(projects, 20)).toHaveLength(20)
   })
 })
 

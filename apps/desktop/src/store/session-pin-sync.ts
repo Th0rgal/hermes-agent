@@ -21,11 +21,15 @@
  */
 
 import { setSessionPinnedRemote } from '@/hermes'
-import { $pinnedSessionIds, pinSession, unpinSession } from '@/store/layout'
+import { $pinnedSessionIds, onUnpinIntent, pinSession, unpinSession } from '@/store/layout'
 import { $sessions, sessionMatchesStoredId, sessionPinId } from '@/store/session'
 
 // pin ids we've successfully PATCHed pinned=true this session.
 const mirrored = new Set<string>()
+// True while the pull pass is applying SERVER state locally — its unpins are
+// echoes of what the server already has, so the intent listener must not
+// PATCH them back.
+let applyingRemote = false
 // pin ids awaiting their row so we can resolve the owning profile before PATCH.
 const pending = new Set<string>()
 // Writes we've issued but not yet had acked, id -> value written. A list page
@@ -96,10 +100,17 @@ function pullRemotePins(): void {
       pinSession(pinId)
     } else if (!row.pinned && heldLocally) {
       // Same discipline on the way down: forget the mirror before the nested
-      // reconcile runs, or it re-PATCHes pinned=false the server already has.
+      // reconcile runs, and suppress the unpin-intent echo — the server
+      // already has pinned=false, there is nothing to write back.
       mirrored.delete(pinId)
       mirrored.delete(row.id)
-      unpinSession(local.has(pinId) ? pinId : row.id)
+      applyingRemote = true
+
+      try {
+        unpinSession(local.has(pinId) ? pinId : row.id)
+      } finally {
+        applyingRemote = false
+      }
     }
   }
 }
@@ -117,12 +128,15 @@ function reconcile(): void {
   // the still-stale row from silently reverting the user's action (#74570).
   const current = new Set($pinnedSessionIds.get())
 
-  // Unpinned: anything we were tracking that's no longer in the set.
+  // Tracking ids that left the set are FORGOTTEN, never written: pinned=false
+  // goes to the backend only on an explicit unpin (the onUnpinIntent door).
+  // Absence is not intent — a wiped/reset localStorage or a stale window
+  // presenting an empty set must never bulk-zero the server's durable pins
+  // (the 2026-08-08 pin-wipe class of failure).
   for (const id of [...mirrored, ...pending]) {
     if (!current.has(id)) {
       mirrored.delete(id)
       pending.delete(id)
-      void writePin(id, false, profileFor(id)).catch(() => {})
     }
   }
 
@@ -156,6 +170,18 @@ function reconcile(): void {
 
 // Sync once, then re-sync on pin-set and session-list changes. Call once per app.
 export function watchSessionPins(): void {
+  // Explicit unpins PATCH pinned=false — the ONLY path that clears the
+  // backend flag. Fires before the set mutates, so `unconfirmed` fences the
+  // reconcile that follows. Down-sync echoes (applyingRemote) are skipped.
+  onUnpinIntent(id => {
+    mirrored.delete(id)
+    pending.delete(id)
+
+    if (!applyingRemote && window.hermesDesktop) {
+      void writePin(id, false, profileFor(id)).catch(() => {})
+    }
+  })
+
   reconcile()
   $pinnedSessionIds.listen(reconcile)
   $sessions.listen(reconcile)

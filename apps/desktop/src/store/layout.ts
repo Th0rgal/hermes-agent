@@ -409,10 +409,37 @@ export function pinSession(sessionId: string, index?: number) {
   setOrderIds($pinnedSessionIds, insertUniqueId(prev, sessionId, index ?? prev.filter(id => id !== sessionId).length))
 }
 
+// Explicit-unpin INTENT — the signal the backend mirror is allowed to act on.
+// The durable `sessions.pinned` flag must only ever be cleared by a deliberate
+// unpin (a user gesture, or the server-authoritative down-sync), never inferred
+// from an id's absence in `$pinnedSessionIds`: absence can mean a wiped/reset
+// localStorage or a stale window, and inferring unpins from it is how a whole
+// pin set gets bulk-zeroed server-side.
+const unpinIntentListeners = new Set<(sessionId: string) => void>()
+
+/** Subscribe to explicit unpins (fires BEFORE the set mutates, so a listener's
+ *  write fence is in place when the change listeners run). */
+export function onUnpinIntent(listener: (sessionId: string) => void): () => void {
+  unpinIntentListeners.add(listener)
+
+  return () => unpinIntentListeners.delete(listener)
+}
+
 export function unpinSession(sessionId: string) {
+  const prev = $pinnedSessionIds.get()
+
+  if (!prev.includes(sessionId)) {
+    return
+  }
+
+  // Intent first: the pin-sync listener PATCHes pinned=false and records the
+  // in-flight write, so the reconcile triggered by the set change below sees
+  // the fence instead of re-adopting the still-pinned server row (#74570).
+  unpinIntentListeners.forEach(listener => listener(sessionId))
+
   setOrderIds(
     $pinnedSessionIds,
-    $pinnedSessionIds.get().filter(id => id !== sessionId)
+    prev.filter(id => id !== sessionId)
   )
 }
 

@@ -284,7 +284,13 @@ export const TITLEBAR_AREAS = { center: 'titleBar.center', left: 'titleBar.left'
 export { cn } from '@/lib/utils'
 /** Per-session color overrides — the SAME store the sidebar/tabs resolve, so a
  *  plugin-set color agrees everywhere. Write under `sessionDurableId(id)`. */
-export { $sessionColorOverrides, sessionColorForId, sessionDurableId, setSessionColorOverride } from '@/store/session-color'
+export {
+  $sessionColorById,
+  $sessionColorOverrides,
+  sessionColorForId,
+  sessionDurableId,
+  setSessionColorOverride
+} from '@/store/session-color'
 /** Session id (live OR durable) → unread message count since last opened;
  *  nonzero entries only. Baselines stamp/clear on session open — the same
  *  signal that clears the core unread dot. */

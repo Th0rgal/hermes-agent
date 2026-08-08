@@ -30,19 +30,40 @@ export interface PluginRecord {
 const DECISIONS_KEY = 'hermes.desktop.pluginDecisions.v2'
 const LEGACY_DISABLED_KEY = 'hermes.desktop.disabledPlugins.v1'
 
+// Plugin id renames: a stored decision under the old id keeps applying to the
+// new id, so a rename never silently re-disables (or re-enables) a plugin the
+// user already decided on.
+const RENAMED_PLUGIN_IDS: Record<string, string> = { 'missions-board': 'projects-board' }
+
+/** Carry decisions across id renames — the old id's choice maps onto the new
+ *  id unless the new id already has an EXPLICIT decision of its own. */
+export function migrateRenamedDecisions(decisions: Record<string, boolean>): Record<string, boolean> {
+  let out = decisions
+
+  for (const [oldId, newId] of Object.entries(RENAMED_PLUGIN_IDS)) {
+    if (oldId in out && !(newId in out)) {
+      out = { ...out, [newId]: out[oldId] }
+    }
+  }
+
+  return out
+}
+
 function loadDecisions(): Record<string, boolean> {
   try {
     const raw = window.localStorage.getItem(DECISIONS_KEY)
 
     if (raw) {
-      return JSON.parse(raw) as Record<string, boolean>
+      return migrateRenamedDecisions(JSON.parse(raw) as Record<string, boolean>)
     }
 
     // Migrate the v1 disabled-set: each disabled id becomes an explicit `false`.
     const legacy = window.localStorage.getItem(LEGACY_DISABLED_KEY)
 
     if (legacy) {
-      return Object.fromEntries((JSON.parse(legacy) as string[]).map(id => [id, false]))
+      return migrateRenamedDecisions(
+        Object.fromEntries((JSON.parse(legacy) as string[]).map(id => [id, false]))
+      )
     }
   } catch {
     // Nonfatal — fall through to no choices.

@@ -1,10 +1,26 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { ProjectInfo, SessionInfo } from '@/types/hermes'
 
 import { $projects } from './projects'
 import { $sessions } from './session'
-import { $sessionColorById, $sessionColorOverrides, sessionColorFor, setSessionColorOverride } from './session-color'
+import {
+  $fetchedSessionsById,
+  $sessionColorById,
+  $sessionColorOverrides,
+  resetLineageFetchState,
+  sessionColorFor,
+  sessionColorForId,
+  sessionDurableId,
+  setSessionColorOverride
+} from './session-color'
+
+const getSession = vi.fn()
+
+vi.mock('@/hermes', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  getSession: (...args: unknown[]) => getSession(...args)
+}))
 
 let nextId = 0
 
@@ -137,5 +153,47 @@ describe('sessionColorFor', () => {
   it('returns undefined for a null/absent session', () => {
     expect(sessionColorFor(null)).toBeUndefined()
     expect(sessionColorFor(undefined)).toBeUndefined()
+  })
+})
+
+describe('sessionColorForId — live conversation chains', () => {
+  afterEach(() => {
+    $fetchedSessionsById.set({})
+    resetLineageFetchState()
+    getSession.mockReset()
+  })
+
+  it('bridges a live tip the loaded lists do not carry to its stored override', async () => {
+    // The pinned/stored side of the chain: override keyed under the durable id.
+    setSessionColorOverride('root', '#abcdef')
+    // The recents page only knows an OLDER continuation — not the live tip.
+    $sessions.set([makeSession('/x', { id: 'older-tip', _lineage_root_id: 'root' })])
+
+    getSession.mockResolvedValue(makeSession('/x', { id: 'live-tip', _lineage_root_id: 'root' }))
+
+    // First ask: unknown — but it kicks off the one-shot lineage fetch.
+    expect(sessionColorForId('live-tip')).toBeUndefined()
+    expect(getSession).toHaveBeenCalledWith('live-tip')
+
+    await vi.waitFor(() => expect($fetchedSessionsById.get()['live-tip']).toBeTruthy())
+
+    // Resolved: the tip inherits the chain's color, and appears in the shared
+    // map so every SessionStatusDot subscriber repaints.
+    expect(sessionColorForId('live-tip')).toBe('#abcdef')
+    expect($sessionColorById.get()['live-tip']).toBe('#abcdef')
+
+    // Setting a color FROM the tip writes under the chain's durable id.
+    expect(sessionDurableId('live-tip')).toBe('root')
+  })
+
+  it('remembers a failed resolution instead of refetching forever', async () => {
+    getSession.mockRejectedValue(new Error('404'))
+
+    expect(sessionColorForId('ghost')).toBeUndefined()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(sessionColorForId('ghost')).toBeUndefined()
+
+    expect(getSession).toHaveBeenCalledTimes(1)
   })
 })

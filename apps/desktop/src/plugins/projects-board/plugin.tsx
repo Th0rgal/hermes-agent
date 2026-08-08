@@ -174,7 +174,7 @@ const plugin: HermesPlugin = {
       }
 
       const rows = projectPaletteRows(data.projects)
-      const signature = rows.map(row => `${row.kind}:${row.slug}:${row.sessionId ?? ''}`).join('|')
+      const signature = rows.map(row => `${row.kind}:${row.slug}:${row.label}:${row.sessionId ?? ''}`).join('|')
 
       if (signature === paletteSignature) {
         return
@@ -190,9 +190,9 @@ const plugin: HermesPlugin = {
             id: `projects-board.${row.kind}.${row.slug}`,
             label:
               row.kind === 'chat'
-                ? ctx.i18n.t('paletteOpenConversation', row.slug)
-                : ctx.i18n.t('paletteOpenCard', row.slug),
-            keywords: ['project', row.slug, 'missions', 'board'],
+                ? ctx.i18n.t('paletteOpenConversation', row.label)
+                : ctx.i18n.t('paletteOpenCard', row.label),
+            keywords: ['project', row.slug, row.label, 'missions', 'board'],
             run: paletteRun(row)
           } satisfies PaletteContribution
         }))

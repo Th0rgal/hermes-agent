@@ -60,6 +60,7 @@ export interface ProjectRow {
   /** Not in today's overview payload — rendered when the backend adds it. */
   next_action?: null | string
   slug: string
+  title?: null | string
   updates_count?: number
 }
 
@@ -256,14 +257,14 @@ function observeRoster(projects: ProjectRow[]): void {
 
 export interface ProjectPaletteRow {
   kind: 'card' | 'chat'
+  label: string
   sessionId?: string
   slug: string
 }
 
 /** ⌘K rows from the roster: an "open board card" row per non-archived project
  *  and an "open conversation" row when it has a binding. Capped (by project)
- *  so a huge roster can't flood the palette. The overview payload carries no
- *  project title, so rows are labeled by slug. */
+ *  so a huge roster can't flood the palette. Labeled by title, slug fallback. */
 export function projectPaletteRows(projects: ProjectRow[], cap = 20): ProjectPaletteRow[] {
   return projects
     .filter(p => p.bucket !== 'archived')
@@ -271,12 +272,13 @@ export function projectPaletteRows(projects: ProjectRow[], cap = 20): ProjectPal
     .flatMap(p => {
       const rows: ProjectPaletteRow[] = []
       const sessionId = p.conversation?.session_id
+      const label = p.title?.trim() || p.slug
 
       if (sessionId) {
-        rows.push({ kind: 'chat', sessionId, slug: p.slug })
+        rows.push({ kind: 'chat', label, sessionId, slug: p.slug })
       }
 
-      rows.push({ kind: 'card', slug: p.slug })
+      rows.push({ kind: 'card', label, slug: p.slug })
 
       return rows
     })

@@ -55,7 +55,7 @@ const CRON_DELIVERY_SENTINEL_RE = /^\s*\[Cron delivery:\s*([^\]]*)\]\s*/
 const STATE_SIGNATURE_RE = /[ \t]*(?:\*\*[^*\n]{0,64}?\*\*[ \t]*:?[ \t]*)?`?\[STATE_SIGNATURE:[^\n]{1,4096}\]`?/gi
 
 /** Remove the marker and the blank line it leaves behind. */
-export function stripStateSignature<T extends string | undefined>(text: T): T {
+export function stripStateSignature<T extends string | null | undefined>(text: T): T {
   if (!text || !text.includes('[STATE_SIGNATURE:')) return text
   return text.replace(STATE_SIGNATURE_RE, '').replace(/\n[ \t]*\n[ \t]*\n+/g, '\n\n').trim() as T
 }

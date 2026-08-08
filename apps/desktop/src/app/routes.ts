@@ -110,6 +110,11 @@ function isContributedPath(pathname: string): boolean {
 
 export const SIDEBAR_NAV_AREA = 'sidebar.nav'
 
+/** Plugin-contributed sections in the chat sidebar's sessions stack, rendered
+ *  ABOVE the Pinned section. Render-only contributions: the plugin owns the
+ *  whole section chrome (header, rows) and hides itself by rendering null. */
+export const SESSIONS_SECTIONS_AREA = 'sidebar.sessionsSections'
+
 /** Payload of a `sidebar.nav` data contribution. */
 export interface SidebarNavContribution {
   /** Codicon name, e.g. `'project'`. */

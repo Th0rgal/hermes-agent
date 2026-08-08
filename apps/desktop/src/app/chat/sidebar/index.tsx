@@ -102,6 +102,7 @@ import {
   type AppView,
   ARTIFACTS_ROUTE,
   MESSAGING_ROUTE,
+  SESSIONS_SECTIONS_AREA,
   SIDEBAR_NAV_AREA,
   type SidebarNavContribution,
   SKILLS_ROUTE
@@ -261,6 +262,9 @@ export function ChatSidebar({
   // Contributed nav rows (plugins pairing a page with a sidebar entry) render
   // below the built-ins with the same chrome; active = at their route.
   const navContributions = useContributions(SIDEBAR_NAV_AREA)
+  // Plugin-contributed sections above Pinned (render-only; a section hides
+  // itself by rendering null, so an empty/unavailable surface costs nothing).
+  const sectionContributions = useContributions(SESSIONS_SECTIONS_AREA)
 
   const contributedNav = useMemo<SidebarNavItem[]>(
     () =>
@@ -1263,6 +1267,15 @@ export function ChatSidebar({
                 workingSessionIdSet={workingSessionIdSet}
               />
             )}
+
+            {!trimmedQuery &&
+              sectionContributions.map(contribution =>
+                contribution.render ? (
+                  <div className="contents" key={`${contribution.source}:${contribution.id}`}>
+                    {contribution.render()}
+                  </div>
+                ) : null
+              )}
 
             {!trimmedQuery && (
               <SidebarSessionsSection

@@ -1,0 +1,44 @@
+/* Live-mission arc — a highlight that travels a project card's border while
+   any of its missions is actually live. The tone rides --mb-tone, set inline
+   from the card (indigo live / amber attention). Painted as an overlay ring
+   (mask keeps only the border band) so the card stays flat. */
+
+@property --mb-arc-angle {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+.mb-arc {
+  pointer-events: none;
+  position: absolute;
+  inset: -1px; /* sit on the card's own border line */
+  border-radius: inherit;
+  padding: 1.5px; /* arc thickness */
+  background: conic-gradient(
+    from var(--mb-arc-angle),
+    transparent 0deg,
+    var(--mb-tone, var(--ui-stroke-primary)) 55deg,
+    transparent 110deg
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: mb-arc-spin 2.2s linear infinite;
+}
+
+@keyframes mb-arc-spin {
+  to {
+    --mb-arc-angle: 360deg;
+  }
+}
+
+/* Column scrollers stay quiet. */
+.mb-column-scroll {
+  scrollbar-width: thin;
+}

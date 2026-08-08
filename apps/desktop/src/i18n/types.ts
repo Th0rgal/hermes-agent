@@ -2432,6 +2432,8 @@ export interface Translations {
     sessionUnavailable: string
     createSessionFailed: string
     promptFailed: string
+    queuedWhileBusy: string
+    sendDroppedBusy: string
     providerCredentialRequired: string
     emptySlashCommand: string
     desktopCommands: string

@@ -3036,6 +3036,8 @@ export const zh: Translations = {
     sessionUnavailable: '会话不可用',
     createSessionFailed: '无法创建新会话',
     promptFailed: '提示词发送失败',
+    queuedWhileBusy: '智能体正在执行回合 — 消息已加入队列，回合结束后自动发送。',
+    sendDroppedBusy: '智能体正在执行回合，该消息未发送。请稍后重试。',
     providerCredentialRequired: '发送第一条消息前请先添加提供方凭据。',
     emptySlashCommand: '空 slash 命令',
     desktopCommands: '桌面端命令',

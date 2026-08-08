@@ -1,11 +1,13 @@
 import { type RefObject, useEffect, useRef } from 'react'
 
+import { translateNow } from '@/i18n/runtime'
 import { SLASH_COMMAND_RE } from '@/lib/chat-runtime'
 import { triggerHaptic } from '@/lib/haptics'
 import { hasClarifyRequest, skipClarifyRequest } from '@/store/clarify'
 import { clearSessionDraft, type ComposerAttachment } from '@/store/composer'
 import { resetBrowseState } from '@/store/composer-input-history'
 import { enqueueQueuedPrompt, type QueuedPromptEntry } from '@/store/composer-queue'
+import { notify } from '@/store/notifications'
 
 import { cloneAttachments, type QueueEditState } from '../composer-utils'
 import { onComposerSubmitRequest } from '../focus'
@@ -222,6 +224,14 @@ export function useComposerSubmit({
     void Promise.resolve(onSteer(text)).then(accepted => {
       if (!accepted && activeQueueSessionKey) {
         enqueueQueuedPrompt(activeQueueSessionKey, { text, attachments: [] })
+        // The redirect was refused (no live turn to steer — e.g. a backend
+        // without mid-turn steering). The words are safe in the queue, but
+        // silence here reads as "the app ate my message": say what happened.
+        notify({
+          id: `queued-busy:${activeQueueSessionKey}`,
+          kind: 'info',
+          message: translateNow('desktop.queuedWhileBusy')
+        })
       }
     })
   }

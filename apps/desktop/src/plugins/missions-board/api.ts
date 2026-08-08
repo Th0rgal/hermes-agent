@@ -225,6 +225,48 @@ export function projectMode(project: ProjectRow): { base: string; cause: null | 
   return { base, cause: cause.length > 0 ? cause : null }
 }
 
+// ── card chip selection (pure — unit-tested) ─────────────────────────────────
+
+/** Statuses that count as "live" for the card's chip row, in display order. */
+const LIVE_CHIP_ORDER: Record<string, number> = { active: 1, awaiting_user: 0, queued: 2 }
+
+const chipRecency = (chip: MissionChip): number => {
+  const ms = chip.updated_at ? Date.parse(chip.updated_at) : Number.NaN
+
+  return Number.isNaN(ms) ? 0 : ms
+}
+
+/** The card's compact chip row: at most `cap` chips — live ones first
+ *  (awaiting_user, then active, then queued), then the most-recent failed —
+ *  and the rest folded into one "+N" count. A card with nothing live never
+ *  renders a wall of dead chips: at most ONE most-recent chip + "+N". The
+ *  drawer keeps the full list. */
+export function selectChips(
+  missions: MissionChip[],
+  cap = 3
+): { chips: MissionChip[]; overflow: number } {
+  const live = missions
+    .filter(m => m.status in LIVE_CHIP_ORDER)
+    .sort((a, b) => LIVE_CHIP_ORDER[a.status] - LIVE_CHIP_ORDER[b.status] || chipRecency(b) - chipRecency(a))
+
+  const byRecency = (pool: MissionChip[]) => [...pool].sort((a, b) => chipRecency(b) - chipRecency(a))
+
+  let chips: MissionChip[]
+
+  if (live.length === 0) {
+    chips = byRecency(missions).slice(0, Math.min(1, cap))
+  } else {
+    chips = live.slice(0, cap)
+
+    if (chips.length < cap) {
+      const failed = byRecency(missions.filter(m => m.status === 'failed'))
+      chips = [...chips, ...failed.slice(0, cap - chips.length)]
+    }
+  }
+
+  return { chips, overflow: missions.length - chips.length }
+}
+
 // ── board mechanics (pure — unit-tested) ─────────────────────────────────────
 
 /** The board's fixed column order. `attention` is computed from health, so it

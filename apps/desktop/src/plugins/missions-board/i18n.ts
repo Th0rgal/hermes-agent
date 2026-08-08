@@ -30,6 +30,8 @@ type BoardMessages = {
   colEmpty: string
   updates: (n: number) => string
   missions: (n: number) => string
+  live: (n: number) => string
+  moreChips: (n: number) => string
   failed: (n: number) => string
   overdue: (n: number) => string
   tracksAttention: (n: number) => string
@@ -93,6 +95,8 @@ const en: BoardMessages = {
   colEmpty: 'Empty',
   updates: n => `${n} update${n === 1 ? '' : 's'}`,
   missions: n => `${n} mission${n === 1 ? '' : 's'}`,
+  live: n => `${n} live`,
+  moreChips: n => `+${n}`,
   failed: n => `${n} failed`,
   overdue: n => `${n} overdue`,
   tracksAttention: n => `${n} track${n === 1 ? '' : 's'} need attention`,

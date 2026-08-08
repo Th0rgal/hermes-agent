@@ -160,3 +160,69 @@ describe('the Projects sidebar section', () => {
     dispose()
   })
 })
+
+describe('row selection mirrors the core sidebar', () => {
+  const sessionInfo = (id: string, lineageRoot: null | string = null) => ({
+    archived: false,
+    cwd: null,
+    ended_at: null,
+    id,
+    _lineage_root_id: lineageRoot,
+    input_tokens: 0,
+    is_active: false,
+    last_active: 0,
+    message_count: 0,
+    model: null,
+    output_tokens: 0,
+    preview: null,
+    source: null,
+    started_at: 0,
+    title: null,
+    tool_call_count: 0
+  })
+
+  const rowButton = (slug: string) => screen.getByText(slug).closest('button')!
+
+  const SELECTED_CLASS = 'bg-(--ui-row-active-background)'
+
+  it('selecting the TIP highlights the row bound to the durable id (and only it)', async () => {
+    const { setSessions, setSelectedStoredSessionId } = await import('@/store/session')
+
+    setSessions([sessionInfo('tip-verity', 'root-verity')])
+
+    const { dispose } = renderSection([
+      row('verity', 'active', 'root-verity'),
+      row('paloma', 'active', 'sess-paloma')
+    ])
+
+    await screen.findByText('verity')
+    setSelectedStoredSessionId('tip-verity')
+
+    await waitFor(() => expect(rowButton('verity').className).toContain(SELECTED_CLASS))
+    expect(rowButton('paloma').className).not.toContain(SELECTED_CLASS)
+
+    setSelectedStoredSessionId(null)
+    setSessions([])
+    dispose()
+  })
+
+  it('selecting the durable id highlights the row bound to the TIP', async () => {
+    const { setSessions, setSelectedStoredSessionId } = await import('@/store/session')
+
+    setSessions([sessionInfo('tip-verity', 'root-verity')])
+
+    const { dispose } = renderSection([row('verity', 'active', 'tip-verity')])
+
+    await screen.findByText('verity')
+    setSelectedStoredSessionId('root-verity')
+
+    await waitFor(() => expect(rowButton('verity').className).toContain(SELECTED_CLASS))
+
+    // Deselecting clears the highlight.
+    setSelectedStoredSessionId(null)
+    await waitFor(() => expect(rowButton('verity').className).not.toContain(SELECTED_CLASS))
+
+    setSessions([])
+    dispose()
+  })
+})

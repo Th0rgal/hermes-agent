@@ -115,6 +115,12 @@ export const $introDismissed = atom<boolean>(false)
  *  means auto: empty columns collapse to a rail. Persisted. */
 export const $collapsedColumns = atom<Record<string, boolean>>({})
 
+/** One-shot "open this project's drawer" request, so a command firing from
+ *  OUTSIDE the board page (the sidebar row's menu) can reach it: the caller
+ *  navigates to /board and parks the slug here; the page consumes and clears
+ *  it on arrival. Ephemeral by design — never persisted. */
+export const $openProjectSlug = atom<null | string>(null)
+
 const INTRO_KEY = 'introDismissed'
 const COLLAPSED_KEY = 'collapsedColumns'
 

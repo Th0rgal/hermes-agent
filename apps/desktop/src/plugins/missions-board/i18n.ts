@@ -64,6 +64,13 @@ type BoardMessages = {
   observations: (n: number) => string
   conversation: string
   openConversation: string
+  unread: (n: number) => string
+  menuOptions: string
+  setColor: string
+  noColor: string
+  openCard: string
+  pauseProject: string
+  resumeProject: string
   liveMissions: string
   noMissions: string
   close: string
@@ -129,6 +136,13 @@ const en: BoardMessages = {
   observations: n => `${n} observation${n === 1 ? '' : 's'}`,
   conversation: 'Conversation',
   openConversation: 'Open bound session',
+  unread: n => `${n} unread message${n === 1 ? '' : 's'}`,
+  menuOptions: 'Project options',
+  setColor: 'Set color',
+  noColor: 'Default color',
+  openCard: 'Open board card',
+  pauseProject: 'Pause project',
+  resumeProject: 'Resume project',
   liveMissions: 'Missions',
   noMissions: 'No recent missions.',
   close: 'Close',

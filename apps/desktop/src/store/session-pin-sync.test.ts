@@ -10,7 +10,7 @@ vi.mock('@/hermes', () => ({
   setSessionPinnedRemote: (id: string, pinned: boolean, profile?: null | string) => patch(id, pinned, profile)
 }))
 
-import { $pinnedSessionIds } from '@/store/layout'
+import { $pinnedSessionIds, unpinSession } from '@/store/layout'
 import { $sessions } from '@/store/session'
 
 import { watchSessionPins } from './session-pin-sync'
@@ -47,16 +47,40 @@ describe('watchSessionPins', () => {
     expect(patch).toHaveBeenCalledWith('a', true, 'work')
   })
 
-  it('mirrors an unpin as pinned=false', async () => {
+  it('mirrors an EXPLICIT unpin as pinned=false', async () => {
     $sessions.set([row('b')])
     $pinnedSessionIds.set(['b'])
     await flush()
     patch.mockClear()
 
-    $pinnedSessionIds.set([])
+    unpinSession('b')
     await flush()
 
     expect(patch).toHaveBeenCalledWith('b', false, undefined)
+  })
+
+  it('never writes pinned=false from mere set absence (wiped-storage guard)', async () => {
+    // Mirror two pins the backend holds durably.
+    $sessions.set([row('keep1'), row('keep2')])
+    $pinnedSessionIds.set(['keep1', 'keep2'])
+    await flush()
+    patch.mockClear()
+
+    // The local set empties WITHOUT any unpin intent — a wiped/reset
+    // localStorage, a stale window, a bug. The backend pins must survive:
+    // absence is not intent (the 2026-08-08 pin-wipe regression).
+    $pinnedSessionIds.set([])
+    await flush()
+
+    expect(patch).not.toHaveBeenCalled()
+
+    // Tracking was forgotten (not leaked): re-pinning re-asserts cleanly.
+    $pinnedSessionIds.set(['keep1'])
+    await flush()
+
+    expect(patch).toHaveBeenCalledWith('keep1', true, undefined)
+    expect(patch).not.toHaveBeenCalledWith('keep1', false, undefined)
+    expect(patch).not.toHaveBeenCalledWith('keep2', false, undefined)
   })
 
   it('defers a pin whose row is not loaded, then flushes once it appears', async () => {
@@ -127,6 +151,8 @@ describe('watchSessionPins remote pull', () => {
     await flush()
 
     expect($pinnedSessionIds.get()).not.toContain('gone')
+    // The down-sync is an ECHO of server state — it must not PATCH it back.
+    expect(patch).not.toHaveBeenCalledWith('gone', false, undefined)
   })
 
   it('leaves the local set alone when the backend omits the flag', async () => {
@@ -161,7 +187,7 @@ describe('watchSessionPins remote pull', () => {
     patch.mockClear()
 
     // User unpins while the loaded row still says pinned=true.
-    $pinnedSessionIds.set([])
+    unpinSession('sticky')
     await flush()
 
     expect($pinnedSessionIds.get()).not.toContain('sticky')

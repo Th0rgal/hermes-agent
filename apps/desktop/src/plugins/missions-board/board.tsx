@@ -8,6 +8,7 @@
  */
 
 import {
+  $sessionColorById,
   $sessionUnreadCounts,
   Button,
   cn,
@@ -24,6 +25,7 @@ import {
   host,
   Loader,
   relativeTime,
+  sessionColorForId,
   SessionStatusDot,
   Tip,
   useMutation,
@@ -31,11 +33,13 @@ import {
   useQueryClient,
   useValue
 } from '@hermes/plugin-sdk'
-import { type CSSProperties, type DragEvent as ReactDragEvent, useEffect, useState } from 'react'
+import { type CSSProperties, type DragEvent as ReactDragEvent, useEffect, useRef, useState } from 'react'
 
 import {
   $collapsedColumns,
+  $focusAttention,
   $introDismissed,
+  $notifyAttention,
   $openProjectSlug,
   BOARD_BUCKETS,
   bucketAction,
@@ -52,7 +56,7 @@ import {
   type ProjectsResponse,
   selectChips
 } from './api'
-import { SessionColorSwatchesRow, UnreadBadge } from './color-swatches'
+import { SessionColorSwatchesRow, SteerInput, UnreadBadge } from './color-swatches'
 import { ProjectDrawer } from './drawer'
 import { type BoardText, bucketHelp, bucketLabel, useBoard } from './i18n'
 
@@ -161,9 +165,12 @@ const CHIP_DOT: Record<string, string> = {
   failed: 'bg-destructive'
 }
 
+const LIVE_CHIP = new Set(['active', 'awaiting_user', 'queued'])
+
 /** At most 3 chips — live first, then most-recent failed — and one muted
- *  "+N" for the rest (selectChips). The drawer keeps the full list. */
-function MissionDots({ b, missions }: { b: BoardText; missions: MissionChip[] }) {
+ *  "+N" for the rest (selectChips). The drawer keeps the full list. A live
+ *  chip grows a hover reply affordance that opens the inline steer input. */
+function MissionDots({ b, missions, onSteer }: { b: BoardText; missions: MissionChip[]; onSteer?: (id: string) => void }) {
   if (missions.length === 0) {
     return null
   }
@@ -176,11 +183,24 @@ function MissionDots({ b, missions }: { b: BoardText; missions: MissionChip[] })
         <Tip key={mission.id ?? index} label={mission.title ?? mission.id ?? mission.status}>
           <span
             className={cn(
-              'inline-flex max-w-28 items-center gap-1 rounded-full bg-(--ui-bg-quaternary) px-1.5 py-px text-[0.5625rem] text-(--ui-text-tertiary)'
+              'group/chip inline-flex max-w-28 items-center gap-1 rounded-full bg-(--ui-bg-quaternary) px-1.5 py-px text-[0.5625rem] text-(--ui-text-tertiary)'
             )}
           >
             <span className={cn('size-1 shrink-0 rounded-full', CHIP_DOT[mission.status] ?? 'bg-(--ui-text-quaternary)')} />
             <span className="truncate">{mission.title ?? mission.id?.slice(0, 8) ?? mission.status}</span>
+            {onSteer && mission.id && LIVE_CHIP.has(mission.status) && (
+              <button
+                aria-label={b.steerMissionTip}
+                className="hidden shrink-0 text-(--ui-text-quaternary) hover:text-foreground group-hover/chip:inline-flex"
+                onClick={event => {
+                  event.stopPropagation()
+                  onSteer(mission.id!)
+                }}
+                type="button"
+              >
+                <Codicon name="reply" size="0.65rem" />
+              </button>
+            )}
           </span>
         </Tip>
       ))}
@@ -206,11 +226,18 @@ function Card({
 }) {
   const b = useBoard()
   const [dragging, setDragging] = useState(false)
+  const [steerId, setSteerId] = useState<null | string>(null)
   const unreadCounts = useValue($sessionUnreadCounts)
+  // Subscribe to the shared color map so the border repaints with the session.
+  useValue($sessionColorById)
   const attention = project.bucket === 'attention'
   const live = liveMissions(project)
   const waiting = needsAttention(project)
   const tone = attention ? BUCKET_TONE.attention : bucketTone(project.bucket)
+  // The bound conversation's resolved color owns the left edge — instant
+  // project ↔ session matching against the sidebar; bucket tone is the
+  // fallback for unbound/colorless projects.
+  const sessionTone = project.conversation?.session_id ? sessionColorForId(project.conversation.session_id) : undefined
   const update = project.latest_update
   const updateAgo = ago(update?.at)
   const draggable = project.bucket !== 'attention'
@@ -236,7 +263,12 @@ function Card({
             event.dataTransfer.setDragImage(event.currentTarget, event.nativeEvent.offsetX, event.nativeEvent.offsetY)
             setDragging(true)
           }}
-          style={{ '--mb-tone': attention ? BUCKET_TONE.attention : BUCKET_TONE.active, borderLeftColor: tone } as CSSProperties}
+          style={
+            {
+              '--mb-tone': attention ? BUCKET_TONE.attention : BUCKET_TONE.active,
+              borderLeftColor: sessionTone ?? tone
+            } as CSSProperties
+          }
         >
           {/* Machine-activity arc: animates only while a mission is live. */}
           {live.length > 0 && !dragging && <span aria-hidden className="mb-arc" />}
@@ -267,11 +299,21 @@ function Card({
               {project.attention_reasons[0]}
             </div>
           )}
+          {attention && project.next_action && (
+            <div className="line-clamp-1 text-[0.625rem] leading-snug text-(--ui-text-tertiary)">
+              {b.nextActionArrow(project.next_action)}
+            </div>
+          )}
           {update?.headline && (
             <div className="line-clamp-2 text-[0.625rem] leading-snug text-(--ui-text-tertiary)">{update.headline}</div>
           )}
           <HealthDigest b={b} project={project} />
-          <MissionDots b={b} missions={project.missions} />
+          <MissionDots b={b} missions={project.missions} onSteer={setSteerId} />
+          {steerId && (
+            <div onClick={event => event.stopPropagation()}>
+              <SteerInput missionId={steerId} onDone={() => setSteerId(null)} />
+            </div>
+          )}
           {waiting.length > 0 && (
             <span className="text-[0.5625rem] uppercase tracking-wide text-amber-500">{b.needsYou(waiting.length)}</span>
           )}
@@ -309,6 +351,7 @@ function Card({
 
 function Column({
   collapsed,
+  highlight = false,
   name,
   onDropProject,
   onMove,
@@ -317,6 +360,7 @@ function Column({
   projects
 }: {
   collapsed: boolean
+  highlight?: boolean
   name: string
   onDropProject: (slug: string, toBucket: string) => void
   onMove: (slug: string, toBucket: string) => void
@@ -389,7 +433,11 @@ function Column({
   return (
     <div
       {...dragHandlers}
-      className={cn('group/col flex h-full w-64 shrink-0 flex-col rounded-lg p-2 transition-colors', wash)}
+      className={cn(
+        'group/col flex h-full w-64 shrink-0 flex-col rounded-lg p-2 transition-[background-color,box-shadow]',
+        wash,
+        highlight && 'ring-1 ring-amber-400/60'
+      )}
     >
       <header className="mb-1.5 flex h-5 items-center gap-1.5 px-1">
         <span className="size-1.5 rounded-full" style={{ backgroundColor: tone }} />
@@ -475,6 +523,32 @@ export function MissionsBoardPage() {
     $openProjectSlug.set(null)
   }, [requestedSlug])
 
+  // Focus request for the Needs-attention column (statusbar !N, notification
+  // click-through): expand it, scroll it into view, flash a highlight.
+  const focusRequested = useValue($focusAttention)
+  const [attentionFlash, setAttentionFlash] = useState(false)
+  const columnsRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!focusRequested) {
+      return
+    }
+
+    $focusAttention.set(false)
+    const overrides = { ...$collapsedColumns.get() }
+    delete overrides.attention
+    overrides.attention = false
+    $collapsedColumns.set(overrides)
+    // Attention is the first column — scroll the strip home.
+    columnsRef.current?.scrollTo({ behavior: 'smooth', left: 0 })
+    setAttentionFlash(true)
+    const timer = window.setTimeout(() => setAttentionFlash(false), 2_400)
+
+    return () => window.clearTimeout(timer)
+  }, [focusRequested])
+
+  const notifyOn = useValue($notifyAttention)
+
   const actionMut = useMutation({
     mutationFn: ({ action, slug }: { action: ProjectAction; slug: string; toBucket: string }) =>
       projectAction(slug, action),
@@ -553,6 +627,19 @@ export function MissionsBoardPage() {
           {data?.projects.length ?? 0}
         </span>
         {totalLive > 0 && <span className="text-[0.6875rem] text-(--ui-text-tertiary)">{b.agents(totalLive)}</span>}
+        <div className="ml-auto">
+          <Tip label={notifyOn ? b.notifyToggleOn : b.notifyToggleOff}>
+            <Button
+              aria-label={notifyOn ? b.notifyToggleOn : b.notifyToggleOff}
+              className={cn(!notifyOn && 'opacity-50')}
+              onClick={() => $notifyAttention.set(!notifyOn)}
+              size="icon-xs"
+              variant="ghost"
+            >
+              <Codicon name={notifyOn ? 'bell' : 'bell-slash'} size="0.85rem" />
+            </Button>
+          </Tip>
+        </div>
       </header>
 
       {data && <Intro />}
@@ -573,13 +660,14 @@ export function MissionsBoardPage() {
           </div>
         </div>
       ) : (
-        <div className="flex flex-1 gap-2 overflow-x-auto px-4 pt-1 pb-3">
+        <div className="flex flex-1 gap-2 overflow-x-auto px-4 pt-1 pb-3" ref={columnsRef}>
           {columns.map(column => {
             const auto = hasProjects && column.projects.length === 0
 
             return (
               <Column
                 collapsed={overrides[column.name] ?? auto}
+                highlight={attentionFlash && column.name === 'attention'}
                 key={column.name}
                 name={column.name}
                 onDropProject={onMove}

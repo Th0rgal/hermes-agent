@@ -1872,6 +1872,7 @@ export const ja = defineLocale({
     attach: '添付',
     queued: count => `${count} 件キュー済み`,
     queuedPaused: count => `${count} 件キュー済み — 一時停止中`,
+    queueWaiting: count => `${count} 件のメッセージが待機中`,
     attachmentOnly: '添付のみのターン',
     emptyTurn: '空のターン',
     attachments: count => `${count} 件の添付`,

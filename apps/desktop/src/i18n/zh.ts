@@ -2229,6 +2229,7 @@ export const zh: Translations = {
     attach: '附加',
     queued: count => `${count} 条排队`,
     queuedPaused: count => `${count} 条排队 — 已暂停`,
+    queueWaiting: count => `${count} 条消息等待发送`,
     attachmentOnly: '仅附件回合',
     emptyTurn: '空回合',
     attachments: count => `${count} 个附件`,

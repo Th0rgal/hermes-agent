@@ -2036,6 +2036,7 @@ export const en: Translations = {
     attach: 'Attach',
     queued: count => `${count} Queued`,
     queuedPaused: count => `${count} Queued — paused`,
+    queueWaiting: count => (count === 1 ? '1 message waiting' : `${count} messages waiting`),
     attachmentOnly: 'Attachment-only turn',
     emptyTurn: 'Empty turn',
     attachments: count => `${count} attachment${count === 1 ? '' : 's'}`,

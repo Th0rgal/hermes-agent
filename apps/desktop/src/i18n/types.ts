@@ -1702,6 +1702,8 @@ export interface Translations {
     attach: string
     queued: (count: number) => string
     queuedPaused: (count: number) => string
+    /** Persistent waiting-turns banner near the composer. */
+    queueWaiting: (count: number) => string
     attachmentOnly: string
     emptyTurn: string
     attachments: (count: number) => string

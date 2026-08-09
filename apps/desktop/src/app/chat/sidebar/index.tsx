@@ -96,6 +96,7 @@ import {
   sessionPinId,
   setCurrentCwd
 } from '@/store/session'
+import { $fetchedSessionsById, ensureSessionLineage } from '@/store/session-color'
 import { $focusedStoredSessionId, $workingSessionIds, type SplitDir } from '@/store/session-states'
 
 import {
@@ -401,9 +402,13 @@ export function ChatSidebar({
 
   // Index sessions by every id a pin might be stored under — recents, cron,
   // AND messaging, since all three can be pinned (see session-index.ts).
+  // Individually fetched rows ($fetchedSessionsById) are folded in so a pin
+  // whose chain rolled entirely past the loaded pages still resolves.
+  const fetchedSessionsById = useStore($fetchedSessionsById)
+
   const sessionByAnyId = useMemo(
-    () => buildSessionByAnyId(visibleSessions, cronSessions, messagingSessions),
-    [visibleSessions, cronSessions, messagingSessions]
+    () => buildSessionByAnyId(visibleSessions, cronSessions, messagingSessions, Object.values(fetchedSessionsById)),
+    [visibleSessions, cronSessions, messagingSessions, fetchedSessionsById]
   )
 
   const pinnedSessions = useMemo(() => {
@@ -416,6 +421,10 @@ export function ChatSidebar({
       if (session && !seen.has(session.id)) {
         seen.add(session.id)
         out.push(session)
+      } else if (!session) {
+        // Pin id no loaded slice knows — fetch its row once (deduped); the
+        // arrival repaints via $fetchedSessionsById.
+        ensureSessionLineage(pinId)
       }
     }
 

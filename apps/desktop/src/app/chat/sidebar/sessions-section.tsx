@@ -13,6 +13,7 @@ import { groupEntriesByRecency, type SidebarListRow, toSessionRows } from '@/lib
 import { sessionBucketLabel } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { sessionPinId } from '@/store/session'
+import { sessionIdsRefer } from '@/store/session-color'
 
 import { SidebarDateDivider, SidebarSectionMeta } from './chrome'
 import {
@@ -230,7 +231,11 @@ export function SidebarSessionsSection({
       const rowProps = {
         branchStem,
         isPinned: pinned,
-        isSelected: session.id === activeSessionId,
+        // Pinned rows render the LIVE TIP of their chain while the focused id
+        // may be either side of a compression rotation — match through the
+        // lineage (the same matcher the projects-board rows use) so the row
+        // still highlights. Ordinary rows keep the exact-id fast path.
+        isSelected: pinned ? sessionIdsRefer(activeSessionId, session.id) : session.id === activeSessionId,
         isWorking: workingSessionIdSet.has(session.id),
         onArchive: () => onArchiveSession(session.id),
         onBranch: onBranchSession ? () => onBranchSession(session.id, session.profile) : undefined,

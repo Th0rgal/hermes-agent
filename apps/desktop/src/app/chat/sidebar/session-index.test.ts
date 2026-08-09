@@ -38,11 +38,43 @@ describe('buildSessionByAnyId', () => {
     expect(index.get('dupe')?.title).toBe('from recents')
   })
 
-  it('does not let a lineage alias clobber a real row under that id', () => {
-    // 'root' is a live session in its own right AND another row's lineage
-    // root; the real row must win so the pin opens the right conversation.
-    const index = buildSessionByAnyId([row('root')], [], [row('tip', { _lineage_root_id: 'root' })])
+  it('resolves the LIVE TIP when the stored root row and its continuation are both loaded', () => {
+    // The pinned-row staleness bug: a pin stored on the durable root id kept
+    // resolving to the root's own (frozen) row while work continued in the
+    // compression continuation. Every key of the chain must resolve to the
+    // freshest row — title, activity dot, and navigation then follow the tip.
+    const root = row('root', { last_active: 10 })
+    const tip = row('tip', { _lineage_root_id: 'root', last_active: 20 })
+
+    for (const index of [
+      buildSessionByAnyId([root, tip], [], []),
+      buildSessionByAnyId([tip, root], [], []),
+      buildSessionByAnyId([root], [], [tip])
+    ]) {
+      expect(index.get('root')?.id).toBe('tip')
+      expect(index.get('tip')?.id).toBe('tip')
+    }
+  })
+
+  it('keeps the fresher row of a chain even when it is the root itself', () => {
+    // Same-chain resolution is by recency, not by role — a root row that is
+    // genuinely fresher than a stale alias keeps its key.
+    const index = buildSessionByAnyId([row('root', { last_active: 30 })], [], [
+      row('tip', { _lineage_root_id: 'root', last_active: 20 })
+    ])
 
     expect(index.get('root')?.id).toBe('root')
+  })
+
+  it('folds individually fetched rows in at lowest priority', () => {
+    // A pin whose chain rolled past every loaded page resolves through the
+    // fetched slice; a loaded row of a DIFFERENT chain still wins its own id.
+    const index = buildSessionByAnyId([row('dupe', { title: 'loaded' })], [], [], [
+      row('tip', { _lineage_root_id: 'root', last_active: 5 }),
+      row('dupe', { title: 'fetched' })
+    ])
+
+    expect(index.get('root')?.id).toBe('tip')
+    expect(index.get('dupe')?.title).toBe('loaded')
   })
 })

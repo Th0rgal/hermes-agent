@@ -1814,6 +1814,7 @@ export const zhHant = defineLocale({
     attach: '附加',
     queued: count => `${count} 個排隊中`,
     queuedPaused: count => `${count} 個排隊中 — 已暫停`,
+    queueWaiting: count => `${count} 則訊息等待傳送`,
     attachmentOnly: '僅附件回合',
     emptyTurn: '空回合',
     attachments: count => `${count} 個附件`,

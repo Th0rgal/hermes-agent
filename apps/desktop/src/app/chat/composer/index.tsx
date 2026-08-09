@@ -56,6 +56,7 @@ import { useSlashCompletions } from './hooks/use-slash-completions'
 import { useSessionStatusPresence } from './hooks/use-status-presence'
 import { ActionBadges } from './micro-actions'
 import { chipTypedPathOnSpace, pathifyRefs } from './path-refs'
+import { QueueBanner } from './queue-banner'
 import { QueuePanel } from './queue-panel'
 import {
   beginComposerComposition,
@@ -1214,6 +1215,13 @@ export function ChatBar({
                     additions beside the "+" menu and before the controls.
                     All four render nothing until something contributes. */}
                   <ContribSlot area={COMPOSER_AREAS.top} />
+                  {/* Waiting-turns banner: persists (unlike the queued toast)
+                      while anything is queued; clicking focuses the composer,
+                      whose status stack holds the queue panel. Vanishes on its
+                      own when the queue drains. */}
+                  {activeQueueSessionKey && (
+                    <QueueBanner count={queuedPrompts.length} onFocusQueue={() => requestMainFocus()} />
+                  )}
                   <VoiceActivity state={voiceActivityState} />
                   <VoicePlaybackActivity />
                   {queueEdit && editingQueuedPrompt && (

@@ -37,8 +37,18 @@ vi.mock('./virtual-session-list', () => ({
 }))
 
 vi.mock('./session-row', () => ({
-  SidebarSessionRow: ({ session }: { session: SessionInfo }) => (
-    <div data-testid={`session-row-${session.id}`}>{session.id}</div>
+  SidebarSessionRow: ({
+    isSelected,
+    onPin,
+    session
+  }: {
+    isSelected?: boolean
+    onPin?: () => void
+    session: SessionInfo
+  }) => (
+    <div data-selected={isSelected ? 'true' : undefined} data-testid={`session-row-${session.id}`} onClick={onPin}>
+      {session.id}
+    </div>
   )
 }))
 
@@ -180,5 +190,116 @@ describe('SidebarSessionsSection memoization & virtualizer stability', () => {
 
     const thirdRowsRef = mockVirtualListPropsHistory[2].rows
     expect(thirdRowsRef).not.toBe(secondRowsRef)
+  })
+})
+
+describe('pinned rows follow conversation lineage', () => {
+  it('highlights a pinned TIP row when the focused id is the stored root (and vice versa)', async () => {
+    // A pinned row renders the live tip of its chain while the focused id may
+    // be either side of a compression rotation — selection must match through
+    // the lineage, exactly like the projects-board rows.
+    const { $sessions } = await import('@/store/session')
+
+    const tip = makeSession('tip', 5000)
+
+    ;(tip as unknown as { _lineage_root_id: string })._lineage_root_id = 'root'
+    $sessions.set([tip])
+
+    try {
+      const { getByTestId, rerender } = render(
+        <SidebarSessionsSection
+          activeSessionId="root"
+          emptyState={<div>Empty</div>}
+          label="Pinned"
+          onArchiveSession={noop}
+          onDeleteSession={noop}
+          onResumeSession={noop}
+          onToggle={noop}
+          onTogglePin={noop}
+          open={true}
+          pinned={true}
+          sessions={[tip]}
+          workingSessionIdSet={new Set()}
+        />
+      )
+
+      expect(getByTestId('session-row-tip').dataset.selected).toBe('true')
+
+      // An unrelated focused id must not select the pinned row.
+      rerender(
+        <SidebarSessionsSection
+          activeSessionId="elsewhere"
+          emptyState={<div>Empty</div>}
+          label="Pinned"
+          onArchiveSession={noop}
+          onDeleteSession={noop}
+          onResumeSession={noop}
+          onToggle={noop}
+          onTogglePin={noop}
+          open={true}
+          pinned={true}
+          sessions={[tip]}
+          workingSessionIdSet={new Set()}
+        />
+      )
+
+      expect(getByTestId('session-row-tip').dataset.selected).toBeUndefined()
+    } finally {
+      $sessions.set([])
+    }
+  })
+
+  it('keeps the pin toggle keyed on the DURABLE lineage id even when the row is the tip', () => {
+    // Server pinned-flag semantics are keyed by the durable root id — a row
+    // that resolved to the live tip must still pin/unpin under the root.
+    const onTogglePin = vi.fn()
+
+    const tip = makeSession('tip', 5000)
+
+    ;(tip as unknown as { _lineage_root_id: string })._lineage_root_id = 'root'
+
+    const { getByTestId } = render(
+      <SidebarSessionsSection
+        activeSessionId={null}
+        emptyState={<div>Empty</div>}
+        label="Pinned"
+        onArchiveSession={noop}
+        onDeleteSession={noop}
+        onResumeSession={noop}
+        onToggle={noop}
+        onTogglePin={onTogglePin}
+        open={true}
+        pinned={true}
+        sessions={[tip]}
+        workingSessionIdSet={new Set()}
+      />
+    )
+
+    getByTestId('session-row-tip').click()
+
+    expect(onTogglePin).toHaveBeenCalledWith('root')
+  })
+
+  it('keeps exact-id selection for unpinned rows', () => {
+    const session = makeSession('plain')
+
+    const { getByTestId } = render(
+      <SidebarSessionsSection
+        activeSessionId="plain"
+        emptyState={<div>Empty</div>}
+        label="Sessions"
+        onArchiveSession={noop}
+        onDeleteSession={noop}
+        onResumeSession={noop}
+        onToggle={noop}
+        onTogglePin={noop}
+        open={true}
+        pinned={false}
+        sessions={[session]}
+        workingSessionIdSet={new Set()}
+      />
+    )
+
+    expect(getByTestId('session-row-plain').dataset.selected).toBe('true')
   })
 })

@@ -21703,6 +21703,38 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             user_name=str(evt.get("user_name") or "").strip() or None,
         )
 
+    async def _resolve_delivery_tip_session_id(self, session_id: str) -> str:
+        """Best-effort live-tip resolution for a raw delivery/wake target.
+
+        A stored origin session id can go stale when the conversation rolls
+        over via compression continuations (or forks into siblings). Route
+        through the shared ``SessionDB.resolve_delivery_session_id`` resolver
+        so the wake self-post lands on the lineage's live tip. Falls back to
+        the input id when no session DB is bound or resolution fails.
+        """
+        sid = str(session_id or "").strip()
+        if not sid:
+            return session_id
+        session_db = cast(Any, self._session_db)
+        resolver = (
+            getattr(session_db, "resolve_delivery_session_id", None)
+            if session_db is not None
+            else None
+        )
+        if not callable(resolver):
+            return sid
+        try:
+            result = resolver(sid)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return str(result or "").strip() or sid
+        except Exception:
+            logger.debug(
+                "live-tip resolution failed for wake target %s", sid,
+                exc_info=True,
+            )
+            return sid
+
     async def _inject_watch_notification(
         self, synth_text: str, evt: dict,
     ) -> Optional[bool]:
@@ -21730,6 +21762,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if _sk and _parse_session_key(_sk) is None:
                     raw_sid = _sk
             if raw_sid:
+                raw_sid = await self._resolve_delivery_tip_session_id(raw_sid)
                 adapter = self.adapters.get(Platform.API_SERVER)
                 from gateway.wake import adapter_supports_push, deliver_wake
                 if adapter is not None and not adapter_supports_push(adapter):
@@ -21776,6 +21809,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # the raw X-Hermes-Session-Id session — self-post instead.
             from gateway.wake import deliver_wake
             raw_sid = str(evt.get("origin_session_id") or "").strip() or str(source.chat_id or "")
+            raw_sid = await self._resolve_delivery_tip_session_id(raw_sid)
             try:
                 logger.info(
                     "Watch pattern notification — waking api_server session "

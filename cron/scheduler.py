@@ -866,10 +866,20 @@ def _deliver_to_local_session(
 
         db = SessionDB()
         try:
-            resolve = getattr(db, "resolve_session_id", None)
-            sid = (resolve(session_id) if callable(resolve) else None) or session_id
-            resolve_resume = getattr(db, "resolve_resume_session_id", None)
-            sid = (resolve_resume(sid) if callable(resolve_resume) else None) or sid
+            # Shared live-tip resolver (resolve_delivery_session_id): a cron
+            # target stores the session id captured at creation time, but the
+            # conversation may have rolled over via compression continuations
+            # — or forked into siblings — since. Deliver to the lineage's
+            # live tip, never the stale stored id. getattr keeps old
+            # SessionDB doubles in tests working via the legacy two-step.
+            resolve_delivery = getattr(db, "resolve_delivery_session_id", None)
+            if callable(resolve_delivery):
+                sid = resolve_delivery(session_id) or session_id
+            else:  # pragma: no cover - legacy/double fallback
+                resolve = getattr(db, "resolve_session_id", None)
+                sid = (resolve(session_id) if callable(resolve) else None) or session_id
+                resolve_resume = getattr(db, "resolve_resume_session_id", None)
+                sid = (resolve_resume(sid) if callable(resolve_resume) else None) or sid
             resolved_session_id = sid
             session = db.get_session(sid)
             if not session:

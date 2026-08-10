@@ -148,3 +148,62 @@ async def test_pinned_delivery_does_not_close_the_operator_session(tmp_path):
 
     await adapter.on_processing_complete(_Event(), None)
     assert ended == [], "pinned delivery must not end its target session"
+
+
+@pytest.mark.asyncio
+async def test_pin_resolves_rolled_over_origin_to_live_tip(tmp_path):
+    """A stored origin id follows compression continuations to the live tip.
+
+    The origin session dispatched the mission, then rolled over via
+    compression (root -> a -> b). The completion callback must land in b —
+    the branch the human is actually reading — not the stale root.
+    """
+    store = _make_store(tmp_path)
+    adapter = _make_adapter({"mission-complete": ROUTE})
+    adapter.gateway_runner = _FakeRunner(store)
+    db = store._db
+
+    db.create_session("20260803_150605_59ab72", "desktop")
+    db.append_message(
+        "20260803_150605_59ab72", "assistant", f"Started mission {MISSION}."
+    )
+    db.end_session("20260803_150605_59ab72", "compression")
+    db.create_session("cont_a", "desktop", parent_session_id="20260803_150605_59ab72")
+    db.end_session("cont_a", "compression")
+    db.create_session("cont_b", "desktop", parent_session_id="cont_a")
+
+    pinned = await adapter._resolve_pinned_session(
+        "mission-complete",
+        ROUTE,
+        {"origin_session": "20260803_150605_59ab72", "mission_id": MISSION},
+    )
+    assert pinned == "cont_b"
+
+
+@pytest.mark.asyncio
+async def test_pin_forked_lineage_lands_on_live_leaf(tmp_path):
+    """A forked lineage resolves deterministically to the live sibling."""
+    store = _make_store(tmp_path)
+    adapter = _make_adapter({"mission-complete": ROUTE})
+    adapter.gateway_runner = _FakeRunner(store)
+    db = store._db
+
+    db.create_session("20260803_150605_59ab72", "desktop")
+    db.append_message(
+        "20260803_150605_59ab72", "assistant", f"Started mission {MISSION}."
+    )
+    db.end_session("20260803_150605_59ab72", "compression")
+    db.create_session(
+        "live_leaf", "desktop", parent_session_id="20260803_150605_59ab72"
+    )
+    db.create_session(
+        "stale_leaf", "desktop", parent_session_id="20260803_150605_59ab72"
+    )
+    db.end_session("stale_leaf", "ws_orphan_reap")
+
+    pinned = await adapter._resolve_pinned_session(
+        "mission-complete",
+        ROUTE,
+        {"origin_session": "20260803_150605_59ab72", "mission_id": MISSION},
+    )
+    assert pinned == "live_leaf"

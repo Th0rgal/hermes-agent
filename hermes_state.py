@@ -187,13 +187,17 @@ def replay_session_delivery_spool(
                 session_id = str(payload["session_id"])
                 # A delivery can be spooled just before context compression
                 # closes its target session.  Replay may happen much later,
-                # after several further compressions, so resolve the unique
-                # writable continuation before claiming the delivery receipt.
-                # Ambiguous or missing lineages deliberately fall back to the
-                # original id: append_message then fails closed and the spool
-                # entry remains available for a later repair/replay.
+                # after several further compressions — and the lineage may
+                # even have FORKED into sibling continuations by then — so
+                # resolve the live tip via the shared delivery resolver
+                # before claiming the delivery receipt. A forked lineage
+                # resolves deterministically to the newest/live leaf (the
+                # same one interactive resume follows) instead of failing
+                # forever on ambiguity. Unresolvable lineages fall back to
+                # the original id: append_message then fails closed and the
+                # spool entry remains available for a later repair/replay.
                 target_session_id = (
-                    db.get_writable_compression_tip(session_id) or session_id
+                    db.resolve_delivery_session_id(session_id) or session_id
                 )
                 db.append_message(
                     session_id=target_session_id,
@@ -6176,6 +6180,92 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             seen.add(child_id)
             current = child_id
         return None
+
+    def resolve_delivery_session_id(self, session_id: str) -> str:
+        """Resolve a stored delivery target to the LIVE TIP of its lineage.
+
+        The single shared resolver for every delivery entry point (cron
+        ``deliver=`` targets, project routes, webhook session pinning, the
+        durable spool replay, watch-notification wakes). A delivery target is
+        captured when the job/route/webhook is created, but the conversation
+        keeps moving: context compression ends the session and forks a
+        continuation child, and gateway races can even fork SIBLING
+        continuations. Delivering into the stored id then lands the message on
+        a branch the human no longer reads.
+
+        Semantics mirror sandboxed.sh's ``session_chain::live_tip``: follow
+        continuation children forward to the freshest leaf, deterministically
+        preferring (per hop) a child that itself continued the compression
+        chain, then a still-live (non-ended) child, then the most recently
+        active one — so a forked lineage resolves to the newest/live leaf, the
+        same one interactive resume follows (``get_compression_tip``).
+
+        Never returns a NEW branch: the result is an existing session row in
+        the input's lineage (or the input itself when no continuation exists,
+        the id is unknown, or resolution fails). Callers keep their existing
+        behavior for ended targets — they just apply it to the tip, not the
+        stale root.
+        """
+        sid = str(session_id or "").strip()
+        if not sid:
+            return session_id
+        try:
+            resolved = self.resolve_session_id(sid) or sid
+        except Exception:
+            resolved = sid
+        try:
+            return self._walk_delivery_tip(resolved)
+        except Exception:
+            return resolved
+
+    def _walk_delivery_tip(self, session_id: str) -> str:
+        """Follow continuation children forward to the freshest delivery leaf.
+
+        Like :meth:`get_compression_tip` (same child exclusions — explicit
+        branches, delegate/subagent runs, and tool children never hijack the
+        lineage; same deterministic per-hop preference — compression-chain
+        child, then live child, then most recently active) but WITHOUT
+        requiring ``parent.end_reason = 'compression'``: gateway + compression
+        races can fork the real continuation before the parent's end marker is
+        written, and the flush-cursor reset can leave the messages in a child
+        of a parent that never got the marker (see
+        ``resolve_resume_session_id``). Deliveries must land where the human's
+        resume path leads, so the walk covers those edges too.
+        """
+        current = session_id
+        seen = {current} if current else set()
+        for _ in range(100):
+            with self._lock:
+                cursor = self._conn.execute(
+                    f"""
+                    SELECT child.id
+                    FROM sessions child
+                    WHERE child.parent_session_id = ?
+                      AND json_extract(COALESCE(child.model_config, '{{}}'), '$._branched_from') IS NULL
+                      AND json_extract(COALESCE(child.model_config, '{{}}'), '$._delegate_from') IS NULL
+                      AND COALESCE(child.source, '') != 'tool'
+                    ORDER BY
+                      CASE
+                        WHEN child.end_reason = 'compression' THEN 0
+                        WHEN child.ended_at IS NULL THEN 1
+                        ELSE 2
+                      END,
+                      {_sql_session_last_active("child")} DESC,
+                      child.started_at DESC,
+                      child.id DESC
+                    LIMIT 1
+                    """,
+                    (current,),
+                )
+                row = cursor.fetchone()
+            if row is None:
+                return current
+            child_id = row["id"]
+            if not child_id or child_id in seen:
+                return current
+            seen.add(child_id)
+            current = child_id
+        return current
 
     # Columns excluded from compact_rows projections: only the payload-heavy
     # blob no list consumer renders. Everything else — including gateway

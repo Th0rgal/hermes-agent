@@ -87,6 +87,9 @@ type BoardMessages = {
   noMissions: string
   close: string
   needsYouTag: string
+  pausedByYou: string
+  controllerStopped: (cause: string) => string
+  controllerSilent: (since: string) => string
 }
 
 const en: BoardMessages = {
@@ -171,7 +174,10 @@ const en: BoardMessages = {
   liveMissions: 'Missions',
   noMissions: 'No recent missions.',
   close: 'Close',
-  needsYouTag: 'needs you'
+  needsYouTag: 'needs you',
+  pausedByYou: 'Paused by you',
+  controllerStopped: cause => (cause ? `Controller stopped itself: ${cause}` : 'Controller stopped itself'),
+  controllerSilent: since => `Controller silent since ${since}`
 }
 
 /** Registered via `ctx.i18n.register` at plugin load (disposer tracked). */

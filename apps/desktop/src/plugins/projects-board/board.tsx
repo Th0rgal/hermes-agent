@@ -57,6 +57,7 @@ import {
   selectChips
 } from './api'
 import { SessionColorSwatchesRow, SteerInput, UnreadBadge } from './color-swatches'
+import { ControllerStatusIcon } from './controller-status'
 import { ProjectDrawer } from './drawer'
 import { type BoardText, bucketHelp, bucketLabel, useBoard } from './i18n'
 
@@ -284,6 +285,7 @@ function Card({
             {project.conversation?.session_id && (
               <UnreadBadge count={unreadCounts[project.conversation.session_id] ?? 0} />
             )}
+            <ControllerStatusIcon project={project} />
           </div>
           {/* Mode + relative time share one row — no per-line sprawl. */}
           {(projectMode(project) || updateAgo) && (
@@ -292,11 +294,6 @@ function Card({
               {updateAgo && (
                 <span className="ml-auto shrink-0 text-[0.5625rem] text-(--ui-text-quaternary)">{updateAgo}</span>
               )}
-            </div>
-          )}
-          {attention && project.attention_reasons.length > 0 && (
-            <div className="line-clamp-2 text-[0.625rem] leading-snug text-amber-500">
-              {project.attention_reasons[0]}
             </div>
           )}
           {attention && project.next_action && (

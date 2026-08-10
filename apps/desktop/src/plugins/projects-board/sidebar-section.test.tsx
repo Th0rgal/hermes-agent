@@ -58,8 +58,38 @@ describe('the Projects sidebar section', () => {
     // Archived and binding-less projects never surface.
     expect(screen.queryByText('old')).toBeNull()
     expect(screen.queryByText('unbound')).toBeNull()
-    // The attention hint rides only the attention row.
-    expect(screen.getByLabelText('Needs attention')).toBeTruthy()
+    // The old amber attention dot is gone — no row here has a stopped
+    // controller, so no status icon renders either.
+    expect(screen.queryByLabelText('Needs attention')).toBeNull()
+    expect(screen.queryByRole('img')).toBeNull()
+
+    dispose()
+  })
+
+  it('shows the controller-status icon with its provenance, not an amber dot', async () => {
+    const { dispose } = renderSection([
+      // Operator paused via the board action → pause icon.
+      { ...row('paloma', 'paused', 'sess-paloma'), override: 'paused' },
+      // The controller stopped ITSELF → cut icon with the cause.
+      { ...row('verity', 'attention', 'sess-verity'), mode: 'blocked:transport-cap' },
+      // Silent for > 2h → cut icon, "silent since …".
+      {
+        ...row('lido', 'active', 'sess-lido'),
+        latest_update: { at: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(), headline: 'tick', mode: 'active' }
+      },
+      // Active and fresh → no icon.
+      {
+        ...row('hermes', 'active', 'sess-hermes'),
+        latest_update: { at: new Date().toISOString(), headline: 'tick', mode: 'active' }
+      }
+    ])
+
+    await screen.findByText('paloma')
+
+    expect(screen.getByLabelText('Paused by you')).toBeTruthy()
+    expect(screen.getByLabelText('Controller stopped itself: transport-cap')).toBeTruthy()
+    expect(screen.getByLabelText(/Controller silent since/)).toBeTruthy()
+    expect(screen.getAllByRole('img')).toHaveLength(3)
 
     dispose()
   })

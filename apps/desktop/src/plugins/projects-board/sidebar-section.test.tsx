@@ -256,3 +256,47 @@ describe('row selection mirrors the core sidebar', () => {
     dispose()
   })
 })
+
+describe('delete project from the row menu', () => {
+  it('renders Delete in the context menu, gates on confirm, then posts the action', async () => {
+    const calls: Array<{ body?: unknown; path: string }> = []
+
+    const rest = <T,>(path: string, opts?: { body?: unknown }): Promise<T> => {
+      calls.push({ body: opts?.body, path })
+
+      if (path === '/projects') {
+        return Promise.resolve({ projects: [row('verity', 'active', 'sess-verity')] } as T)
+      }
+
+      return Promise.resolve({} as T)
+    }
+
+    const dispose = bindApi(rest as Parameters<typeof bindApi>[0])
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+    const view = render(
+      <QueryClientProvider client={client}>
+        <ProjectsSidebarSection />
+      </QueryClientProvider>
+    )
+
+    fireEvent.contextMenu(await screen.findByText('verity'))
+
+    // Destructive entry present; selecting it opens the confirm — no call yet.
+    fireEvent.click(await screen.findByText('Delete project'))
+    expect(await screen.findByText('Delete project verity?')).toBeTruthy()
+    expect(calls.some(c => c.path.includes('/action'))).toBe(false)
+
+    // Confirming fires exactly the delete action.
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+
+    await waitFor(() =>
+      expect(calls.some(c => c.path === '/projects/verity/action' && JSON.stringify(c.body) === '{"action":"delete"}')).toBe(
+        true
+      )
+    )
+
+    view.unmount()
+    dispose()
+  })
+})

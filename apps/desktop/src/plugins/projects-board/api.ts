@@ -310,7 +310,7 @@ export const fetchProjectState = (slug: string, limit = 20) =>
 
 // ── writes ───────────────────────────────────────────────────────────────────
 
-export type ProjectAction = 'archive' | 'pause' | 'resume' | 'unarchive'
+export type ProjectAction = 'archive' | 'delete' | 'pause' | 'resume' | 'unarchive'
 
 export const projectAction = (slug: string, action: ProjectAction) =>
   call(`/projects/${encodeURIComponent(slug)}/action`, { body: { action }, method: 'POST' })

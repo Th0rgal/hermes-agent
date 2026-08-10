@@ -56,7 +56,7 @@ import {
   type ProjectsResponse,
   selectChips
 } from './api'
-import { SessionColorSwatchesRow, SteerInput, UnreadBadge } from './color-swatches'
+import { DeleteProjectDialog, SessionColorSwatchesRow, SteerInput, UnreadBadge } from './color-swatches'
 import { ControllerStatusIcon } from './controller-status'
 import { ProjectDrawer } from './drawer'
 import { type BoardText, bucketHelp, bucketLabel, useBoard } from './i18n'
@@ -228,6 +228,7 @@ function Card({
   const b = useBoard()
   const [dragging, setDragging] = useState(false)
   const [steerId, setSteerId] = useState<null | string>(null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const unreadCounts = useValue($sessionUnreadCounts)
   // Subscribe to the shared color map so the border repaints with the session.
   useValue($sessionColorById)
@@ -339,7 +340,13 @@ function Card({
             {b.moveTo(bucketLabel(b, name))}
           </ContextMenuItem>
         ))}
+        <ContextMenuSeparator />
+        <ContextMenuItem className="text-destructive" onSelect={() => setConfirmDelete(true)}>
+          <Codicon name="trash" size="0.85rem" />
+          {b.deleteProject}
+        </ContextMenuItem>
       </ContextMenuContent>
+      <DeleteProjectDialog onClose={() => setConfirmDelete(false)} open={confirmDelete} project={project} />
     </ContextMenu>
   )
 }

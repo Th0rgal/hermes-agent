@@ -9,9 +9,11 @@
 import {
   $sessionColorOverrides,
   ColorSwatches,
+  ConfirmDialog,
   host,
   Input,
   PROFILE_SWATCHES,
+  queryClient,
   sessionDurableId,
   setSessionColorOverride,
   useMutation,
@@ -19,7 +21,7 @@ import {
 } from '@hermes/plugin-sdk'
 import { useState } from 'react'
 
-import { steerMission } from './api'
+import { projectAction, PROJECTS_KEY, steerMission } from './api'
 import { useBoard } from './i18n'
 
 // Local copy of board.tsx's errText (importing it would cycle board ↔ here).
@@ -116,6 +118,38 @@ export function SessionColorSwatchesRow({ sessionId }: { sessionId: string }) {
       onChange={color => setSessionColorOverride(durableId, color)}
       swatches={PROFILE_SWATCHES}
       value={overrides[durableId] ?? null}
+    />
+  )
+}
+
+/** Confirm-gated project delete — shared by the sidebar row menus and the
+ *  board card's context menu. The backend writes a "deleted" board override:
+ *  missions and the conversation are untouched, the project just disappears
+ *  from every board, hence the calm copy. */
+export function DeleteProjectDialog({
+  onClose,
+  open,
+  project
+}: {
+  onClose: () => void
+  open: boolean
+  project: { slug: string; title?: null | string }
+}) {
+  const b = useBoard()
+
+  return (
+    <ConfirmDialog
+      confirmLabel={b.deleteConfirm}
+      description={b.deleteProjectBody}
+      destructive
+      dismissOnConfirm
+      onClose={onClose}
+      onConfirm={async () => {
+        await projectAction(project.slug, 'delete')
+        await queryClient.invalidateQueries({ queryKey: PROJECTS_KEY })
+      }}
+      open={open}
+      title={b.deleteProjectTitle(project.title?.trim() || project.slug)}
     />
   )
 }

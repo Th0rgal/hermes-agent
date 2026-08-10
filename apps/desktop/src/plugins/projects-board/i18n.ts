@@ -83,6 +83,10 @@ type BoardMessages = {
   openCard: string
   pauseProject: string
   resumeProject: string
+  deleteProject: string
+  deleteConfirm: string
+  deleteProjectTitle: (name: string) => string
+  deleteProjectBody: string
   liveMissions: string
   noMissions: string
   close: string
@@ -171,6 +175,10 @@ const en: BoardMessages = {
   openCard: 'Open board card',
   pauseProject: 'Pause project',
   resumeProject: 'Resume project',
+  deleteProject: 'Delete project',
+  deleteConfirm: 'Delete',
+  deleteProjectTitle: name => `Delete project ${name}?`,
+  deleteProjectBody: 'Its missions and conversation are not touched; the project disappears from all boards.',
   liveMissions: 'Missions',
   noMissions: 'No recent missions.',
   close: 'Close',

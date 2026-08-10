@@ -264,13 +264,13 @@ describe('useComposerSubmit with a clarify parked on the session', () => {
   })
 })
 
-describe('a refused steer never silently eats the message', () => {
+describe('a refused steer hands delivery to the gateway', () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
   })
 
-  it('queues the words AND surfaces a non-blocking hint', async () => {
+  it('submits through prompt.submit with next-turn semantics — no client queue', async () => {
     const { $notifications } = await import('@/store/notifications')
     const { $queuedPromptsBySession, getQueuedPrompts } = await import('@/store/composer-queue')
 
@@ -279,23 +279,49 @@ describe('a refused steer never silently eats the message', () => {
 
     const { hook, onSteer, onSubmit } = renderSubmitHook({ busy: true, text: 'keep going with the PR' })
 
-    // The gateway refuses the redirect (no live turn to steer — e.g. a
-    // backend without mid-turn steering, exactly the big controller
-    // conversations).
+    // The backend refuses the redirect (no mid-turn steering — exactly the
+    // big controller conversations). The gateway still accepts prompt.submit
+    // mid-turn and queues/injects SERVER-side, so the client must submit.
     onSteer.mockResolvedValue(false)
 
     act(() => {
       hook.result.current.submitDraft()
     })
 
-    await waitFor(() => expect(getQueuedPrompts('stored-session').map(entry => entry.text)).toEqual([
-      'keep going with the PR'
-    ]))
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith(
+        'keep going with the PR',
+        expect.objectContaining({ fromQueue: true })
+      )
+    )
 
-    // The user is TOLD the message is parked — never "typed and nothing
-    // happened".
+    // Server owns delivery — nothing parked client-side, no queue to strand
+    // the words in when the app closes.
+    expect(getQueuedPrompts('stored-session')).toEqual([])
+
+    $queuedPromptsBySession.set({})
+    $notifications.set([])
+  })
+
+  it('falls back to the client queue WITH a hint only when the submit itself fails', async () => {
+    const { $notifications } = await import('@/store/notifications')
+    const { $queuedPromptsBySession, getQueuedPrompts } = await import('@/store/composer-queue')
+
+    $queuedPromptsBySession.set({})
+    $notifications.set([])
+
+    const { hook, onSteer, onSubmit } = renderSubmitHook({ busy: true, text: 'still with me?' })
+
+    onSteer.mockResolvedValue(false)
+    // Gateway unreachable/rejecting — the one case the client queue remains for.
+    onSubmit.mockResolvedValue(false)
+
+    act(() => {
+      hook.result.current.submitDraft()
+    })
+
+    await waitFor(() => expect(getQueuedPrompts('stored-session').map(entry => entry.text)).toEqual(['still with me?']))
     await waitFor(() => expect($notifications.get().some(n => n.kind === 'info')).toBe(true))
-    expect(onSubmit).not.toHaveBeenCalled()
 
     $queuedPromptsBySession.set({})
     $notifications.set([])

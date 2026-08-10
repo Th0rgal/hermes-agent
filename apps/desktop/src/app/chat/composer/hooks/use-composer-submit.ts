@@ -222,17 +222,46 @@ export function useComposerSubmit({
     clearDraft()
 
     void Promise.resolve(onSteer(text)).then(accepted => {
-      if (!accepted && activeQueueSessionKey) {
+      if (accepted) {
+        return
+      }
+
+      // The redirect was refused (backends without mid-turn steering —
+      // builtin/smart, builtin/assistant — or a turn that just settled). The
+      // GATEWAY itself never rejects a mid-turn prompt.submit: its busy path
+      // (_handle_busy_submit) steers/redirects capable agents and otherwise
+      // queues SERVER-side, injecting at turn end from run's tail. So hand
+      // delivery to the server instead of parking the words in a client
+      // queue that only drains while this app is open AND observes idle —
+      // that queue is where controller-session messages went to die.
+      // `fromQueue` rides as `queued: true`: explicit next-turn semantics,
+      // never a live-turn interrupt, and it bypasses the client's own
+      // busy-target guard.
+      const submittedScope = activeQueueSessionKeyRef.current
+
+      // Only if the SUBMIT itself fails (gateway unreachable/rejecting) does
+      // the client queue still catch the words — with the hint, so nothing
+      // is ever silently eaten.
+      const parkLocally = () => {
+        if (!activeQueueSessionKey) {
+          return
+        }
+
         enqueueQueuedPrompt(activeQueueSessionKey, { text, attachments: [] })
-        // The redirect was refused (no live turn to steer — e.g. a backend
-        // without mid-turn steering). The words are safe in the queue, but
-        // silence here reads as "the app ate my message": say what happened.
         notify({
           id: `queued-busy:${activeQueueSessionKey}`,
           kind: 'info',
           message: translateNow('desktop.queuedWhileBusy')
         })
       }
+
+      void Promise.resolve(onSubmit(text, { composerScope: submittedScope, fromQueue: true }))
+        .then(sent => {
+          if (sent === false) {
+            parkLocally()
+          }
+        })
+        .catch(parkLocally)
     })
   }
 

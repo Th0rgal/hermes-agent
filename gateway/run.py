@@ -21715,7 +21715,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         sid = str(session_id or "").strip()
         if not sid:
             return session_id
-        session_db = cast(Any, self._session_db)
+        # getattr: minimal runner doubles in tests (and early-init states)
+        # may not carry _session_db at all — resolution is best-effort.
+        session_db = cast(Any, getattr(self, "_session_db", None))
         resolver = (
             getattr(session_db, "resolve_delivery_session_id", None)
             if session_db is not None
@@ -21727,7 +21729,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             result = resolver(sid)
             if asyncio.iscoroutine(result):
                 result = await result
-            return str(result or "").strip() or sid
+            resolved = result if isinstance(result, str) else ""
+            return resolved.strip() or sid
         except Exception:
             logger.debug(
                 "live-tip resolution failed for wake target %s", sid,

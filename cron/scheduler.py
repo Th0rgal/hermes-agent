@@ -870,12 +870,17 @@ def _deliver_to_local_session(
             # target stores the session id captured at creation time, but the
             # conversation may have rolled over via compression continuations
             # — or forked into siblings — since. Deliver to the lineage's
-            # live tip, never the stale stored id. getattr keeps old
-            # SessionDB doubles in tests working via the legacy two-step.
+            # live tip, never the stale stored id. The result must be a real
+            # session-id string: doubles (MagicMock) auto-create the method
+            # and return a Mock, and older SessionDB stand-ins may lack it —
+            # both fall back to the legacy two-step resolution.
+            sid = None
             resolve_delivery = getattr(db, "resolve_delivery_session_id", None)
             if callable(resolve_delivery):
-                sid = resolve_delivery(session_id) or session_id
-            else:  # pragma: no cover - legacy/double fallback
+                resolved = resolve_delivery(session_id)
+                if isinstance(resolved, str) and resolved.strip():
+                    sid = resolved
+            if sid is None:
                 resolve = getattr(db, "resolve_session_id", None)
                 sid = (resolve(session_id) if callable(resolve) else None) or session_id
                 resolve_resume = getattr(db, "resolve_resume_session_id", None)

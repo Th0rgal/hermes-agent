@@ -1156,7 +1156,9 @@ class WebhookAdapter(BasePlatformAdapter):
             result = resolver(session_id)
             if asyncio.iscoroutine(result):
                 result = await result
-            return str(result or "").strip() or session_id
+            # Non-str results (e.g. MagicMock doubles) are not session ids.
+            resolved = result if isinstance(result, str) else ""
+            return resolved.strip() or session_id
         except Exception:
             logger.debug(
                 "[webhook] live-tip resolution failed for %s", session_id,

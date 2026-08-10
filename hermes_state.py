@@ -4108,8 +4108,40 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         self._execute_write(_do)
 
     def reopen_session(self, session_id: str) -> None:
-        """Clear ended_at/end_reason so a session can be resumed."""
+        """Clear ended_at/end_reason so a session can be resumed.
+
+        Refuses (no-ops) when the row is a compression-rotated parent that
+        already has a continuation child (non-branch/non-delegate/non-tool):
+        reopening such a parent both re-arms ``publish_compression_child`` on
+        it — the next compression would fork a SIBLING of the real
+        continuation — and erases the ``'compression'`` marker that
+        ``get_compression_tip`` / ``find_live_compression_child`` / stale-agent
+        recovery depend on. Callers must resolve to the lineage tip (e.g.
+        ``resolve_resume_session_id``) and reopen that instead.
+        """
         def _do(conn):
+            row = conn.execute(
+                "SELECT end_reason FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is not None and row["end_reason"] == "compression":
+                child = conn.execute(
+                    """SELECT 1 FROM sessions
+                       WHERE parent_session_id = ?
+                         AND json_extract(COALESCE(model_config, '{}'), '$._branched_from') IS NULL
+                         AND json_extract(COALESCE(model_config, '{}'), '$._delegate_from') IS NULL
+                         AND COALESCE(source, '') != 'tool'
+                       LIMIT 1""",
+                    (session_id,),
+                ).fetchone()
+                if child is not None:
+                    logger.info(
+                        "reopen_session refused for %s: compression-rotated "
+                        "parent with a continuation child — resolve to the "
+                        "lineage tip and reopen that instead",
+                        session_id,
+                    )
+                    return
             conn.execute(
                 "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?",
                 (session_id,),

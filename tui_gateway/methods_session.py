@@ -413,7 +413,22 @@ def _(rid, params: dict) -> dict:
         source = _resolve_session_source(str(params.get("source") or "").strip() or None)
         lease = None  # claimed lazily on the first turn (_ensure_active_session_slot)
         try:
-            db.reopen_session(target)
+            # Lazy watch windows deliberately skip live-tip resolution (they
+            # attach to the exact delegate child they were opened on), so only
+            # reopen when the target really is a delegate child. Reopening an
+            # arbitrary node here could resurrect a compression-rotated parent
+            # of the main lineage — the next compression on it would then fork
+            # a SIBLING of the real continuation.
+            _is_delegate_child = False
+            try:
+                import json as _json
+
+                _cfg = _json.loads(found.get("model_config") or "{}")
+                _is_delegate_child = bool(_cfg.get("_delegate_from"))
+            except Exception:
+                _is_delegate_child = False
+            if _is_delegate_child:
+                db.reopen_session(target)
             # The child's OWN conversation only — include_ancestors would prepend
             # the parent's transcript onto the subagent's branch.
             # repair_alternation: this resume feeds LIVE REPLAY (the loaded

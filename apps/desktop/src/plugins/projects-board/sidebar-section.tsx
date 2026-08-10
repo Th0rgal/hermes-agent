@@ -43,6 +43,7 @@ import {
   useQueryClient,
   useValue
 } from '@hermes/plugin-sdk'
+import { useState } from 'react'
 
 import {
   $openProjectSlug,
@@ -53,7 +54,7 @@ import {
   PROJECTS_KEY
 } from './api'
 import { errText } from './board'
-import { SessionColorSwatchesRow, UnreadBadge } from './color-swatches'
+import { DeleteProjectDialog, SessionColorSwatchesRow, UnreadBadge } from './color-swatches'
 import { ControllerStatusIcon } from './controller-status'
 import { useBoard } from './i18n'
 
@@ -90,10 +91,12 @@ function useRowActions(project: BoundRow) {
 function RowMenuItems({
   actions,
   kit,
+  onDelete,
   sessionId
 }: {
   actions: ReturnType<typeof useRowActions>
   kit: 'context' | 'dropdown'
+  onDelete: () => void
   sessionId: string
 }) {
   const { b, lifecycleLabel, onLifecycle, onOpenCard } = actions
@@ -129,6 +132,10 @@ function RowMenuItems({
         <Codicon name="debug-pause" size="0.85rem" />
         {lifecycleLabel}
       </Item>
+      <Item className="text-destructive" onSelect={onDelete}>
+        <Codicon name="trash" size="0.85rem" />
+        {b.deleteProject}
+      </Item>
     </>
   )
 }
@@ -144,10 +151,12 @@ function ProjectRowItem({ project }: { project: BoundRow }) {
   // stored-id ↔ live-tip pair).
   const focusedId = useValue($focusedStoredSessionId)
   const selected = sessionIdsRefer(focusedId, sessionId)
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
   return (
-    <ContextMenu>
-      <ContextMenuTrigger asChild>
+    <>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
         <div className="group/mbrow relative">
           <button
             className={cn(
@@ -181,15 +190,17 @@ function ProjectRowItem({ project }: { project: BoundRow }) {
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
-              <RowMenuItems actions={actions} kit="dropdown" sessionId={sessionId} />
+              <RowMenuItems actions={actions} kit="dropdown" onDelete={() => setConfirmDelete(true)} sessionId={sessionId} />
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <RowMenuItems actions={actions} kit="context" sessionId={sessionId} />
+        <RowMenuItems actions={actions} kit="context" onDelete={() => setConfirmDelete(true)} sessionId={sessionId} />
       </ContextMenuContent>
-    </ContextMenu>
+      </ContextMenu>
+      <DeleteProjectDialog onClose={() => setConfirmDelete(false)} open={confirmDelete} project={project} />
+    </>
   )
 }
 

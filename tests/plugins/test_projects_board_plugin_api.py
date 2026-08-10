@@ -125,6 +125,16 @@ async def test_action_forwards_a_valid_verb(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_action_accepts_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_backend(monkeypatch, lambda m, p: None)
+
+    result = await board_api.project_action("verity", {"action": "delete"})
+
+    assert result == {"ok": True, "slug": "verity", "action": "delete"}
+    assert calls[0]["body"] == {"action": "delete"}
+
+
+@pytest.mark.asyncio
 async def test_action_rejects_an_unknown_verb(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _stub_backend(monkeypatch, lambda m, p: None)
     with pytest.raises(HTTPException) as excinfo:

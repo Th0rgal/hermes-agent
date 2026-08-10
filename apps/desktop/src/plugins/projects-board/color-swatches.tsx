@@ -88,14 +88,15 @@ export function UnreadBadge({ count }: { count: number }) {
     return null
   }
 
+  // Neutral tokens, NOT the theme accent: several theme presets use an
+  // amber/orange accent, and an accent-tinted pill at this size reads as an
+  // amber ATTENTION dot — a severity signal a count must never fake. The
+  // count itself is the information; quiet chrome carries it (same treatment
+  // as kanban's count chips).
   return (
     <span
       aria-label={b.unread(count)}
-      className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full px-1 text-[0.5625rem] font-semibold tabular-nums"
-      style={{
-        backgroundColor: 'color-mix(in srgb, var(--ui-accent) 18%, transparent)',
-        color: 'var(--ui-accent)'
-      }}
+      className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-(--ui-bg-quaternary) px-1 text-[0.5625rem] font-semibold tabular-nums text-(--ui-text-secondary)"
       title={b.unread(count)}
     >
       {count > 9 ? '9+' : count}

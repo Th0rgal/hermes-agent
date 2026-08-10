@@ -70,3 +70,47 @@ export function buildSessionByAnyId(
 
   return map
 }
+
+/**
+ * The row a pinned entry should DISPLAY. Resolution follows the chain to the
+ * live tip (activity, dot, navigation), but a continuation tip carries an
+ * auto-generated title while the user's rename landed on the row the pin was
+ * stored under — the root. Prefer the root row's non-empty title so "Verity"
+ * never becomes "Untitled session" after a rollover; everything else (id,
+ * recency, status) stays the tip's. The stores don't distinguish explicit
+ * from generated titles, so a non-empty root title is the pragmatic rule.
+ */
+export function pinnedDisplaySession(
+  pinId: string,
+  resolved: SessionInfo,
+  exactRowById: Map<string, SessionInfo>
+): SessionInfo {
+  if (resolved.id === pinId) {
+    return resolved
+  }
+
+  const rootTitle = exactRowById.get(pinId)?.title?.trim()
+
+  if (!rootTitle || rootTitle === resolved.title) {
+    return resolved
+  }
+
+  return { ...resolved, title: rootTitle }
+}
+
+/** Exact-id row index (no lineage aliasing) — the companion lookup
+ *  `pinnedDisplaySession` needs to find the ROOT row the freshest-wins chain
+ *  index no longer surfaces under its own id. */
+export function buildExactSessionById(...slices: SessionInfo[][]): Map<string, SessionInfo> {
+  const map = new Map<string, SessionInfo>()
+
+  for (const slice of slices) {
+    for (const session of slice) {
+      if (!map.has(session.id)) {
+        map.set(session.id, session)
+      }
+    }
+  }
+
+  return map
+}

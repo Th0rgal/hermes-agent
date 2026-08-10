@@ -4,6 +4,7 @@ import { type FC, type ReactNode, useCallback, useRef, useState } from 'react'
 import { DirectiveContent } from '@/components/assistant-ui/directive-text'
 import { messageAttachmentRefs, messageContentText } from '@/components/assistant-ui/thread/content'
 import { ReactionBadge, ReactionPicker } from '@/components/assistant-ui/thread/message-reactions'
+import { SendReceiptIndicator } from '@/components/assistant-ui/thread/send-receipt'
 import { type RestoreMessageTarget } from '@/components/assistant-ui/thread/types'
 import { useMessageReactions } from '@/components/assistant-ui/thread/use-message-reactions'
 import { UserMessageText } from '@/components/assistant-ui/thread/user-message-text'
@@ -432,6 +433,8 @@ export const UserMessage: FC<{
             </BranchPickerPrimitive.Root>
           </div>
         </ActionBarPrimitive.Root>
+        {/* Delivery receipt: pending/delivered/failed-retry for tracked sends. */}
+        <SendReceiptIndicator messageId={messageId} />
       </StickyHumanMessageContainer>
     </MessagePrimitive.Root>
   )

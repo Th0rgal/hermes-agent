@@ -4475,3 +4475,109 @@ describe('busy-target sends are dropped LOUDLY, never silently', () => {
     $notifications.set([])
   })
 })
+
+describe('delivery receipts ride every submit', () => {
+  it('marks the send delivered on the prompt.submit ack', async () => {
+    const { $sendReceipts } = await import('@/store/send-receipts')
+
+    $sendReceipts.set({})
+
+    const requestGateway = vi.fn(async () => ({}) as never)
+    let handle: HarnessHandle | null = null
+
+    await actRender(
+      <Harness
+        onReady={h => {
+          handle = h
+        }}
+        refreshSessions={async () => {}}
+        requestGateway={requestGateway}
+      />
+    )
+
+    expect(await handle!.submitText('receipt me')).toBe(true)
+
+    const receipts = Object.values($sendReceipts.get())
+
+    expect(receipts).toHaveLength(1)
+    expect(receipts[0]).toMatchObject({ state: 'delivered', text: 'receipt me' })
+
+    $sendReceipts.set({})
+  })
+
+  it('marks the send failed when the submit throws — and the receipt persists', async () => {
+    const { $sendReceipts } = await import('@/store/send-receipts')
+
+    $sendReceipts.set({})
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'prompt.submit') {
+        throw new Error('socket dropped mid-write')
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+
+    await actRender(
+      <Harness
+        onReady={h => {
+          handle = h
+        }}
+        refreshSessions={async () => {}}
+        requestGateway={requestGateway as never}
+      />
+    )
+
+    expect(await handle!.submitText('do not lose me')).toBe(false)
+
+    const receipts = Object.values($sendReceipts.get())
+
+    expect(receipts).toHaveLength(1)
+    expect(receipts[0]).toMatchObject({ state: 'failed', text: 'do not lose me' })
+
+    $sendReceipts.set({})
+  })
+})
+
+describe('lineage-skewed composer scope must not abort the send (the Lido vanishing send)', () => {
+  it('submits when the composer scope is the lineage ROOT and the target resolves to the raw TIP', async () => {
+    const { $messagingSessions } = await import('@/store/session')
+
+    // The conversation's row lives ONLY in the messaging slice (controller
+    // conversation) — submit-time resolveComposerSessionKey over $sessions
+    // falls back to the raw tip id, while the composer resolved 'root'.
+    $messagingSessions.set([sessionInfo({ id: 'tip', _lineage_root_id: 'root' } as never)])
+    setSessions(() => [])
+
+    const requestGateway = vi.fn(async () => ({}) as never)
+    let handle: HarnessHandle | null = null
+
+    await actRender(
+      <Harness
+        activeSessionId="tip"
+        onReady={h => {
+          handle = h
+        }}
+        refreshSessions={async () => {}}
+        requestGateway={requestGateway}
+        storedSessionId="tip"
+      />
+    )
+
+    const accepted = await handle!.submitText('are you alive?', { composerScope: 'root' })
+
+    // Pre-fix this aborted BEFORE any RPC (composer:root->tip drift) and
+    // silently restored the draft. The gateway must see the prompt.
+    expect(accepted).toBe(true)
+    expect(requestGateway).toHaveBeenCalledWith('prompt.submit', expect.objectContaining({ text: 'are you alive?' }), expect.anything())
+
+    // A GENUINELY foreign composer scope still fail-closes.
+    requestGateway.mockClear()
+    expect(await handle!.submitText('wrong box', { composerScope: 'some-other-chat' })).toBe(false)
+    expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything(), expect.anything())
+
+    $messagingSessions.set([])
+  })
+})

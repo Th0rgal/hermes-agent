@@ -133,7 +133,7 @@ import {
   useRepoWorktreeMap
 } from './projects'
 import { SidebarBlankState, SidebarPinnedEmptyState, SidebarSessionSkeletons } from './section-states'
-import { buildSessionByAnyId } from './session-index'
+import { buildExactSessionById, buildSessionByAnyId, pinnedDisplaySession } from './session-index'
 import { SidebarSessionsSection, VIRTUALIZE_THRESHOLD } from './sessions-section'
 import { CONTEXT_SPLIT_KIT, SplitSubmenu } from './split-submenu'
 
@@ -415,12 +415,22 @@ export function ChatSidebar({
     const seen = new Set<string>()
     const out: SessionInfo[] = []
 
+    // Exact-id rows (no lineage aliasing): the ROOT row a rename landed on,
+    // which the freshest-wins chain index hides behind the tip.
+    const exactRowById = buildExactSessionById(
+      visibleSessions,
+      cronSessions,
+      messagingSessions,
+      Object.values(fetchedSessionsById)
+    )
+
     for (const pinId of pinnedSessionIds) {
       const session = sessionByAnyId.get(pinId)
 
       if (session && !seen.has(session.id)) {
         seen.add(session.id)
-        out.push(session)
+        // Tip row for activity/navigation; the root's own title for display.
+        out.push(pinnedDisplaySession(pinId, session, exactRowById))
       } else if (!session) {
         // Pin id no loaded slice knows — fetch its row once (deduped); the
         // arrival repaints via $fetchedSessionsById.
@@ -429,7 +439,7 @@ export function ChatSidebar({
     }
 
     return out
-  }, [pinnedSessionIds, sessionByAnyId])
+  }, [pinnedSessionIds, sessionByAnyId, visibleSessions, cronSessions, messagingSessions, fetchedSessionsById])
 
   const pinnedRealIdSet = useMemo(() => new Set(pinnedSessions.map(s => s.id)), [pinnedSessions])
   const pinnedIdSet = useMemo(() => new Set(pinnedSessionIds), [pinnedSessionIds])

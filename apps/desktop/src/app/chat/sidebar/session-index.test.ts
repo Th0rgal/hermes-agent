@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { SessionInfo } from '@/types/hermes'
 
-import { buildSessionByAnyId } from './session-index'
+import { buildSessionByAnyId, pinnedDisplaySession } from './session-index'
 
 const row = (id: string, extra: Partial<SessionInfo> = {}): SessionInfo =>
   ({ id, message_count: 1, source: 'cli', started_at: 0, title: id, ...extra }) as SessionInfo
@@ -76,5 +76,34 @@ describe('buildSessionByAnyId', () => {
 
     expect(index.get('root')?.id).toBe('tip')
     expect(index.get('dupe')?.title).toBe('loaded')
+  })
+})
+
+describe('pinnedDisplaySession', () => {
+  it('keeps the root\'s custom name when the chain resolved to an auto-titled tip', () => {
+    const root = row('root', { title: 'Verity' })
+    const tip = row('tip', { _lineage_root_id: 'root', title: 'Untitled session' })
+    const exact = new Map([[root.id, root], [tip.id, tip]])
+
+    const shown = pinnedDisplaySession('root', tip, exact)
+
+    // Display: the user's rename. Navigation/activity: still the tip's row.
+    expect(shown.title).toBe('Verity')
+    expect(shown.id).toBe('tip')
+  })
+
+  it('falls back to the tip title when the root has none (or is not loaded)', () => {
+    const tip = row('tip', { _lineage_root_id: 'root', title: 'Sandboxed manager #4' })
+
+    expect(pinnedDisplaySession('root', tip, new Map([[tip.id, tip]])).title).toBe('Sandboxed manager #4')
+    expect(
+      pinnedDisplaySession('root', tip, new Map([['root', row('root', { title: '   ' })]])).title
+    ).toBe('Sandboxed manager #4')
+  })
+
+  it('is identity when the pin resolves to its own row', () => {
+    const root = row('root', { title: 'Verity' })
+
+    expect(pinnedDisplaySession('root', root, new Map())).toBe(root)
   })
 })

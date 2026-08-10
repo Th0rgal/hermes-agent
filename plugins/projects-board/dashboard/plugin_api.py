@@ -43,7 +43,7 @@ _REFRESH_EVENTS = frozenset(
 
 # The full set of lifecycle actions sandboxed.sh accepts on a project. Column
 # drags map source→target buckets onto exactly these.
-_PROJECT_ACTIONS = frozenset({"pause", "resume", "archive", "unarchive"})
+_PROJECT_ACTIONS = frozenset({"pause", "resume", "archive", "unarchive", "delete"})
 
 
 def _ws_upgrade_authorized(ws: WebSocket) -> bool:

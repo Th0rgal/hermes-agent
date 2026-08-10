@@ -5,8 +5,9 @@
  * SessionStatusDot primitive — same resolved color as the Pinned row), the
  * project slug, an unread-count pill (messages since the session was last
  * open, capped at 9+, cleared by opening the session — the same signal that
- * clears the core unread dot), and an amber hint when the project needs
- * attention. Click = open the session. A hover ⋯ menu (and right-click) offers
+ * clears the core unread dot), and a controller-status icon when the
+ * controller is stopped (paused by the operator, self-stopped, or gone
+ * silent). Click = open the session. A hover ⋯ menu (and right-click) offers
  * Set color / Open board card / Pause–Resume.
  *
  * Hides itself entirely (renders null) when the surface is unavailable (503 /
@@ -37,7 +38,6 @@ import {
   host,
   sessionIdsRefer,
   SessionStatusDot,
-  Tip,
   useMutation,
   useQuery,
   useQueryClient,
@@ -54,6 +54,7 @@ import {
 } from './api'
 import { errText } from './board'
 import { SessionColorSwatchesRow, UnreadBadge } from './color-swatches'
+import { ControllerStatusIcon } from './controller-status'
 import { useBoard } from './i18n'
 
 type BoundRow = ProjectRow & { conversation: { session_id: string } }
@@ -162,11 +163,7 @@ function ProjectRowItem({ project }: { project: BoundRow }) {
             <SessionStatusDot storedSessionId={sessionId} />
             <span className="min-w-0 flex-1 truncate">{project.title?.trim() || project.slug}</span>
             <UnreadBadge count={unread} />
-            {project.bucket === 'attention' && (
-              <Tip label={project.attention_reasons[0] ?? b.col.attention.label}>
-                <span aria-label={b.col.attention.label} className="size-1.5 shrink-0 rounded-full bg-amber-500" />
-              </Tip>
-            )}
+            <ControllerStatusIcon project={project} />
           </button>
           {/* Hover ⋯ — overlaid so it never shifts the row's layout. */}
           <DropdownMenu>

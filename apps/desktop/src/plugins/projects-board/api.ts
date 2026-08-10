@@ -53,12 +53,22 @@ export type ProjectBucket = 'active' | 'archived' | 'attention' | 'paused'
 export interface ProjectRow {
   attention_reasons: string[]
   bucket: string
+  /** The roster record's controller ↔ project link, when declared. */
+  controller_cron_id?: null | string
   conversation?: { session_id: string; source: string } | null
   health?: ProjectHealth
   latest_update: DeliveryUpdate | null
   missions: MissionChip[]
+  /** The controller's own reported mode (`active`/`blocked`/`paused`), served
+   *  directly on the row (also still on latest_update.mode). */
+  mode?: null | string
   /** Not in today's overview payload — rendered when the backend adds it. */
   next_action?: null | string
+  /** The OPERATOR's board override (`"paused"`/`"archived"`), when one is set.
+   *  Only the board action endpoint writes overrides — its presence is
+   *  operator intent, which is what distinguishes "paused by you" from a
+   *  controller that stopped itself. */
+  override?: null | string
   slug: string
   title?: null | string
   updates_count?: number
@@ -340,6 +350,57 @@ export function projectMode(project: ProjectRow): { base: string; cause: null | 
   const cause = rest.join(':').trim()
 
   return { base, cause: cause.length > 0 ? cause : null }
+}
+
+// ── controller-stop provenance (pure — unit-tested) ──────────────────────────
+
+/** No delivery for longer than this and the controller counts as silent. The
+ *  backend doesn't serve a per-controller cadence, so 2 hours stands in for
+ *  "3× the expected cadence" — silent budget-death is a known failure mode,
+ *  so a stale controller is treated the same as one that cut itself. */
+export const STALE_CONTROLLER_MS = 2 * 60 * 60 * 1000
+
+/** WHO stopped the controller — the provenance behind the status icon.
+ *  - `operator-paused`: the operator paused the project via the board action
+ *    (the row carries a `"paused"` override).
+ *  - `self-stopped`: the controller set its own mode to paused/blocked.
+ *  - `stale`: no delivery for STALE_CONTROLLER_MS — treated as cut.
+ *  `null` = controller active, no icon. */
+export type ControllerStop =
+  | { cause: null | string; kind: 'self-stopped' }
+  | { kind: 'operator-paused' }
+  | { kind: 'stale'; lastAt: number }
+
+export function controllerStop(project: ProjectRow, now = Date.now()): ControllerStop | null {
+  if (project.override === 'paused') {
+    return { kind: 'operator-paused' }
+  }
+
+  if (project.override) {
+    // Archived by the operator — the lifecycle column already says it all.
+    return null
+  }
+
+  const raw = project.mode ?? project.latest_update?.mode
+
+  if (raw) {
+    const [base, ...rest] = raw.trim().toLowerCase().split(':')
+
+    if (base === 'paused' || base === 'blocked') {
+      const cause = rest.join(':').trim() || project.latest_update?.blocker?.trim() || null
+
+      return { cause, kind: 'self-stopped' }
+    }
+  }
+
+  const at = project.latest_update?.at
+  const lastAt = at ? Date.parse(at) : Number.NaN
+
+  if (!Number.isNaN(lastAt) && now - lastAt > STALE_CONTROLLER_MS) {
+    return { kind: 'stale', lastAt }
+  }
+
+  return null
 }
 
 // ── card chip selection (pure — unit-tested) ─────────────────────────────────

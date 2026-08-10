@@ -8,13 +8,15 @@ import {
   attentionTransitions,
   bindApi,
   bucketAction,
+  controllerStop,
   debounceAttentionNotifications,
   type MissionChip,
   moveProject,
   projectPaletteRows,
   type ProjectRow,
   type ProjectsResponse,
-  selectChips
+  selectChips,
+  STALE_CONTROLLER_MS
 } from './api'
 import { ProjectsBoardPage } from './board'
 import { BOARD_LOCALES } from './i18n'
@@ -194,6 +196,66 @@ describe('projectPaletteRows', () => {
   })
 })
 
+// ── controller-stop provenance ───────────────────────────────────────────────
+
+describe('controllerStop', () => {
+  const now = Date.parse('2026-08-08T12:00:00Z')
+
+  it('an operator board-pause wins: override present → operator-paused', () => {
+    // Even when the controller ALSO reports paused — the operator's action is
+    // the provenance that matters.
+    const stop = controllerStop({ ...row('verity', 'paused'), mode: 'paused', override: 'paused' }, now)
+
+    expect(stop).toEqual({ kind: 'operator-paused' })
+  })
+
+  it('mode paused/blocked WITHOUT an override is a self-stop, cause attached', () => {
+    expect(controllerStop({ ...row('verity', 'paused'), mode: 'paused' }, now)).toEqual({
+      cause: null,
+      kind: 'self-stopped'
+    })
+    expect(controllerStop({ ...row('verity', 'attention'), mode: 'blocked:transport-cap' }, now)).toEqual({
+      cause: 'transport-cap',
+      kind: 'self-stopped'
+    })
+    // Mode may ride only on latest_update (compat), blocker as the fallback cause.
+    expect(
+      controllerStop(
+        {
+          ...row('verity', 'attention'),
+          latest_update: { at: null, blocker: 'lease writer', headline: 'h', mode: 'blocked' }
+        },
+        now
+      )
+    ).toEqual({ cause: 'lease writer', kind: 'self-stopped' })
+  })
+
+  it('a silent controller (> 2h since the last delivery) counts as cut', () => {
+    const lastAt = now - STALE_CONTROLLER_MS - 60_000
+
+    const stale = {
+      ...row('verity', 'active'),
+      latest_update: { at: new Date(lastAt).toISOString(), headline: 'h', mode: 'active' }
+    }
+
+    expect(controllerStop(stale, now)).toEqual({ kind: 'stale', lastAt })
+  })
+
+  it('renders nothing for active controllers, fresh updates, or archived overrides', () => {
+    const fresh = {
+      ...row('verity', 'active'),
+      mode: 'active',
+      latest_update: { at: new Date(now - 60_000).toISOString(), headline: 'h', mode: 'active' }
+    }
+
+    expect(controllerStop(fresh, now)).toBeNull()
+    // No updates at all — nothing to call stale.
+    expect(controllerStop(row('verity', 'active'), now)).toBeNull()
+    // Operator-archived rows carry their column; no icon.
+    expect(controllerStop({ ...row('old', 'archived'), mode: 'paused', override: 'archived' }, now)).toBeNull()
+  })
+})
+
 // ── board render (mocked rest layer) ─────────────────────────────────────────
 
 describe('the board page', () => {
@@ -230,6 +292,7 @@ describe('the board page', () => {
         ...row('verity', 'attention'),
         title: 'Verity Core',
         attention_reasons: ['controller blocked on CI'],
+        mode: 'blocked:ci-red',
         missions: [{ github_pr: null, id: 'm1', status: 'awaiting_user', title: 'Fix CI', updated_at: null }]
       },
       {
@@ -247,7 +310,7 @@ describe('the board page', () => {
           chip('dead-5', 'completed')
         ]
       },
-      row('paloma', 'paused')
+      { ...row('paloma', 'paused'), override: 'paused' }
     ])
 
     // Cards land in their columns; a served title beats the slug.
@@ -262,9 +325,16 @@ describe('the board page', () => {
     expect(screen.getByText('Paused')).toBeTruthy()
     expect(screen.getByText('Archived')).toBeTruthy()
 
-    // Attention accents + latest update headline.
-    expect(screen.getByText('controller blocked on CI')).toBeTruthy()
+    // Latest update headline still renders; the amber attention-reasons line
+    // is gone — the controller-status icon (with its provenance tooltip) is
+    // the stop indicator now.
+    expect(screen.queryByText('controller blocked on CI')).toBeNull()
     expect(screen.getByText(/Shipping PR #42/)).toBeTruthy()
+
+    // Provenance icons: verity self-stopped (mode blocked, no override),
+    // paloma paused by the operator (board override), hermes active → none.
+    expect(screen.getByLabelText('Controller stopped itself: ci-red')).toBeTruthy()
+    expect(screen.getByLabelText('Paused by you')).toBeTruthy()
 
     // Chip cap: 3 rendered (live + most-recent failed), the dead 5 folded
     // into one muted "+5" — never a wall of stopped/interrupted chips.

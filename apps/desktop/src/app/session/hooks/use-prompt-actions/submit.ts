@@ -21,6 +21,7 @@ import {
 } from '@/store/composer'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
+import { dropSendReceipt, markSendDelivered, markSendFailed, trackSend } from '@/store/send-receipts'
 import {
   $sessions,
   resolveComposerSessionKey,
@@ -29,6 +30,7 @@ import {
   setMessages,
   touchSessionActivity
 } from '@/store/session'
+import { sessionIdsRefer } from '@/store/session-color'
 import { $sessionStates } from '@/store/session-states'
 
 import type { ClientSessionState } from '../../../types'
@@ -278,24 +280,48 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       // the created chat after createBackendSessionForSend. submitTargetStoredId
       // is the stored session this submit targets, so a move ONTO it (the
       // pipeline's own re-home) is never counted as drift.
-      const sessionDriftReason = (): string | null =>
-        targetStartedInCurrentView
-          ? sessionContextDrift({
-              startRouteToken: startingRouteToken,
-              nowRouteToken: getRouteToken(),
-              startSelectedStoredId: startingStoredSessionId,
-              nowSelectedStoredId: selectedStoredSessionIdRef.current,
-              submitTargetStoredId: startingStoredSessionId,
-              composerScope: options?.composerScope,
-              // The composer keys drafts/attachments on the durable lineage
-              // root (survives auto-compression tip rotation), while
-              // startingStoredSessionId is the live tip — resolve the target
-              // into the same lineage-root domain before comparing, or every
-              // submit into a session that has ever compressed would
-              // false-positive-abort.
-              submitTargetComposerScope: resolveComposerSessionKey(startingStoredSessionId, $sessions.get())
-            })
-          : null
+      const sessionDriftReason = (): string | null => {
+        if (!targetStartedInCurrentView) {
+          return null
+        }
+
+        const drift = sessionContextDrift({
+          startRouteToken: startingRouteToken,
+          nowRouteToken: getRouteToken(),
+          startSelectedStoredId: startingStoredSessionId,
+          nowSelectedStoredId: selectedStoredSessionIdRef.current,
+          submitTargetStoredId: startingStoredSessionId,
+          composerScope: options?.composerScope,
+          // The composer keys drafts/attachments on the durable lineage
+          // root (survives auto-compression tip rotation), while
+          // startingStoredSessionId is the live tip — resolve the target
+          // into the same lineage-root domain before comparing, or every
+          // submit into a session that has ever compressed would
+          // false-positive-abort.
+          submitTargetComposerScope: resolveComposerSessionKey(startingStoredSessionId, $sessions.get())
+        })
+
+        // The composer prong compares two SNAPSHOT-dependent resolutions: the
+        // composer resolved its scope at render time, this side resolves at
+        // send time — and `resolveComposerSessionKey` falls back to the RAW id
+        // whenever the row happens to be outside the paginated recents page.
+        // A big rolling controller conversation flaps in and out of that page
+        // constantly, so one side can resolve the lineage ROOT while the other
+        // returns the TIP for the SAME conversation → a false 'composer:'
+        // drift that silently aborts the send pre-RPC and restores the draft
+        // (the Lido vanishing-send). Before honouring that prong, ask the
+        // lineage-aware matcher whether the two ids name the same
+        // conversation — it resolves across every loaded slice AND the
+        // individually-fetched bridge rows, not just the recents page.
+        if (
+          drift?.startsWith('composer:') &&
+          sessionIdsRefer(options?.composerScope, startingStoredSessionId)
+        ) {
+          return null
+        }
+
+        return drift
+      }
 
       const targetIsCurrentView = (): boolean => targetStartedInCurrentView && !sessionDriftReason()
 
@@ -320,6 +346,12 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       }
 
       const optimisticId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
+      // Delivery receipt: pending from the instant the bubble exists; the
+      // gateway ack (below) marks it delivered, any throw marks it failed,
+      // and 15s of SILENCE also marks it failed — a send can slip past a
+      // guard, but it can no longer vanish.
+      trackSend(optimisticId, visibleText, targetStoredSessionId ?? null)
 
       // What the bubble shows. A `/skill` send carries the whole expanded
       // skill body as its text — model-facing scaffolding — so the dispatcher
@@ -416,6 +448,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
       const abortForSessionSwitch = (optimisticSessionId: null | string): false => {
         dropOptimistic(optimisticSessionId)
+        dropSendReceipt(optimisticId)
         releaseBusy()
 
         return false
@@ -543,6 +576,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           sessionId = await createBackendSessionForSend(bubbleText)
         } catch (err) {
           dropOptimistic(null)
+          dropSendReceipt(optimisticId)
           releaseBusy()
 
           if (targetIsCurrentView()) {
@@ -565,6 +599,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           }
 
           dropOptimistic(null)
+          dropSendReceipt(optimisticId)
           releaseBusy()
 
           if (targetIsCurrentView()) {
@@ -690,10 +725,12 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // Submit landed — the turn now runs (busy stays true), but the submit
         // window is closed, so release the lock for the next (sequential) send.
         releaseSubmitLock()
+        markSendDelivered(optimisticId)
 
         return true
       } catch (err) {
         releaseBusy()
+        markSendFailed(optimisticId)
 
         // A queued drain that raced a not-yet-settled turn gets a transient
         // "session busy" (4009). Don't surface an error bubble/toast — the entry

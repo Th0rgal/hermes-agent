@@ -1148,6 +1148,30 @@ def _session_was_rotated_by_compression(session_db: Any, session_id: str) -> boo
     )
 
 
+def _session_has_live_continuation(session_db: Any, session_id: str) -> bool:
+    """Marker-independent rotation check via the shared delivery-tip walk.
+
+    ``_session_was_rotated_by_compression`` requires the parent's
+    ``end_reason='compression'`` marker, but ``reopen_session`` (older builds)
+    and end-marker races can strip it while the continuation child persists.
+    A session whose delivery tip is a different row has, by construction, a
+    continuation child (only compression rotation creates continuation edges;
+    branch/delegate/tool children are excluded from the walk), so the stale
+    agent must adopt it rather than keep writing to the old node.
+
+    Type-pinned via ``getattr(type(...))`` like the sibling helpers so
+    MagicMock test-double agents cannot auto-create a truthy resolver.
+    """
+    resolver = getattr(type(session_db), "resolve_delivery_session_id", None)
+    if not callable(resolver):
+        return False
+    try:
+        tip = resolver(session_db, session_id)
+    except Exception:
+        return False
+    return bool(tip) and str(tip) != str(session_id)
+
+
 def _emit_compression_attempt_telemetry(
     agent: Any,
     *,
@@ -1203,6 +1227,36 @@ def compression_skipped_due_to_lock(agent: Any) -> bool:
     return _sig is True or isinstance(_sig, str)
 
 
+def _resolve_continuation_child(
+    session_db: Any,
+    parent_session_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Resolve the continuation child a stale parent should adopt.
+
+    Prefer the strict resolver (``find_live_compression_child``: marker
+    present, exactly one live child). When it declines — sibling forks make
+    the lineage ambiguous, or the ``'compression'`` marker was stripped by an
+    earlier ``reopen_session`` — fall back to the shared delivery-order tip
+    (``resolve_delivery_session_id``), which picks the same deterministic
+    leaf deliveries and interactive resume follow. Failing closed here is
+    what used to perpetuate forks: once one sibling existed, every stale
+    writer skipped adoption and forked again.
+    """
+    finder = getattr(type(session_db), "find_live_compression_child", None)
+    if callable(finder):
+        child = finder(session_db, parent_session_id)
+        if child and child.get("id"):
+            return child
+    resolver = getattr(type(session_db), "resolve_delivery_session_id", None)
+    getter = getattr(type(session_db), "get_session", None)
+    if not callable(resolver) or not callable(getter):
+        return None
+    tip = resolver(session_db, parent_session_id)
+    if not tip or str(tip) == str(parent_session_id):
+        return None
+    return getter(session_db, str(tip))
+
+
 def _adopt_live_compression_child(
     agent: Any,
     session_db: Any,
@@ -1214,11 +1268,10 @@ def _adopt_live_compression_child(
     stale contender fail-closed when lineage is ambiguous or the compacted
     handoff cannot be read.
     """
-    finder = getattr(type(session_db), "find_live_compression_child", None)
     loader = getattr(type(session_db), "get_messages_as_conversation", None)
-    if not callable(finder) or not callable(loader):
+    if not callable(loader):
         return None
-    child = finder(session_db, parent_session_id)
+    child = _resolve_continuation_child(session_db, parent_session_id)
     if not child or not child.get("id"):
         return None
     child_session_id = str(child["id"])
@@ -1227,7 +1280,7 @@ def _adopt_live_compression_child(
         return None
     # Revalidate after loading: the child may have rotated or a competing
     # continuation may have appeared between the two DB reads.
-    confirmed = finder(session_db, parent_session_id)
+    confirmed = _resolve_continuation_child(session_db, parent_session_id)
     if not confirmed or str(confirmed.get("id") or "") != child_session_id:
         return None
 
@@ -1297,7 +1350,9 @@ def recover_rotated_compression_session(
     if session_db is None or not session_id:
         return None
     try:
-        if not _session_was_rotated_by_compression(session_db, session_id):
+        if not _session_was_rotated_by_compression(
+            session_db, session_id
+        ) and not _session_has_live_continuation(session_db, session_id):
             return None
         # Rotation publication holds the parent compression lease until the
         # child handoff is durable. A concurrent turn waits briefly rather than

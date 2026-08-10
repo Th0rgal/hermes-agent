@@ -1097,9 +1097,17 @@ class WebhookAdapter(BasePlatformAdapter):
         if not session_id or not _SESSION_ID_RE.match(session_id):
             return None
 
+        # The payload carries the session id captured when the work was
+        # dispatched, but the conversation may have rolled over via
+        # compression continuations — or forked into sibling branches —
+        # since. Resolve to the lineage's live tip (shared
+        # resolve_delivery_session_id semantics) so the delivery lands where
+        # the human actually reads, never on a stale branch.
+        live_session_id = await self._resolve_live_delivery_tip(session_id)
+
         requires_field = str(route_config.get("session_requires") or "").strip()
         if not requires_field:
-            return session_id
+            return live_session_id
         needle = str(_dig(payload, requires_field) or "").strip()
         if not needle:
             logger.debug(
@@ -1108,16 +1116,53 @@ class WebhookAdapter(BasePlatformAdapter):
                 requires_field,
             )
             return None
-        if not await self._session_mentions(session_id, needle):
+        # The reference may have been written pre-rollover (stored id) or
+        # carried forward into the continuation (live tip) — accept either;
+        # the delivery target is always the live tip.
+        if not await self._session_mentions(session_id, needle) and (
+            live_session_id == session_id
+            or not await self._session_mentions(live_session_id, needle)
+        ):
             logger.info(
-                "[webhook] route=%s: session %s never referenced %s — "
+                "[webhook] route=%s: session %s (tip %s) never referenced %s — "
                 "falling back to a per-delivery session",
                 route_name,
                 session_id,
+                live_session_id,
                 needle,
             )
             return None
-        return session_id
+        return live_session_id
+
+    async def _resolve_live_delivery_tip(self, session_id: str) -> str:
+        """Best-effort live-tip resolution for a pinned delivery target.
+
+        Delegates to the shared ``SessionDB.resolve_delivery_session_id``
+        resolver through the runner's async session DB. Falls back to the
+        input id when no DB is available or resolution fails — downstream
+        (`_resolve_async_delegation_session`) still fail-closes on unknown
+        or dead targets.
+        """
+        runner = self.gateway_runner
+        session_db = getattr(runner, "_session_db", None) if runner else None
+        resolver = (
+            getattr(session_db, "resolve_delivery_session_id", None)
+            if session_db is not None
+            else None
+        )
+        if not callable(resolver):
+            return session_id
+        try:
+            result = resolver(session_id)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return str(result or "").strip() or session_id
+        except Exception:
+            logger.debug(
+                "[webhook] live-tip resolution failed for %s", session_id,
+                exc_info=True,
+            )
+            return session_id
 
     async def _session_mentions(self, session_id: str, needle: str) -> bool:
         """Whether ``needle`` appears in the tail of a session's transcript.

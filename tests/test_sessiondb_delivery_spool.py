@@ -198,7 +198,16 @@ def test_spool_replay_follows_unique_compression_chain(tmp_path, monkeypatch):
         verify.close()
 
 
-def test_spool_replay_keeps_ambiguous_compression_delivery(tmp_path, monkeypatch):
+def test_spool_replay_forked_lineage_lands_on_live_leaf(tmp_path, monkeypatch):
+    """A forked lineage replays deterministically onto the live/newest leaf.
+
+    Historical behavior kept the spool entry forever on sibling ambiguity —
+    which meant a delivery whose target had forked (compression races do
+    this) was never delivered at all, while the human kept the conversation
+    going on one of the leaves. Replay now routes through the shared
+    ``resolve_delivery_session_id`` live-tip resolver: the live (non-ended)
+    leaf wins, else the newest, deterministically — never a new branch.
+    """
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
     path = tmp_path / "state.db"
@@ -208,19 +217,24 @@ def test_spool_replay_keeps_ambiguous_compression_delivery(tmp_path, monkeypatch
         db.create_session("child-a", source="api_server", parent_session_id="parent")
         db.create_session("child-b", source="api_server", parent_session_id="parent")
         db.end_session("parent", end_reason="compression")
+        # The human abandoned child-a (reaped); child-b is the live leaf.
+        db.end_session("child-a", end_reason="ws_orphan_reap")
     finally:
         db.close()
 
     spool_path = spool_session_delivery(
-        "cron:parent:j:r2", "parent", "assistant", "must not pick a sibling"
+        "cron:parent:j:r2", "parent", "assistant", "lands on the live leaf"
     )
-    assert replay_session_delivery_spool(db_path=path) == {"replayed": 0, "failed": 1}
-    assert spool_path.exists()
+    assert replay_session_delivery_spool(db_path=path) == {"replayed": 1, "failed": 0}
+    assert not spool_path.exists()
 
     verify = SessionDB(db_path=path)
     try:
+        assert verify.get_messages("parent") == []
         assert verify.get_messages("child-a") == []
-        assert verify.get_messages("child-b") == []
+        assert [
+            message["content"] for message in verify.get_messages("child-b")
+        ] == ["lands on the live leaf"]
     finally:
         verify.close()
 

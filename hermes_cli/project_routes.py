@@ -147,8 +147,14 @@ def _live_session(db, session_id: str) -> tuple[str, dict]:
     sid = str(session_id or "").strip()
     if not sid:
         raise LookupError("session_id is required")
-    resolved = db.resolve_session_id(sid) or sid
-    resolved = db.resolve_resume_session_id(resolved) or resolved
+    # Shared live-tip resolver: deterministic across forked sibling
+    # continuations (prefers the live/newest leaf, same as resume).
+    resolve_delivery = getattr(db, "resolve_delivery_session_id", None)
+    if callable(resolve_delivery):
+        resolved = resolve_delivery(sid) or sid
+    else:  # pragma: no cover - legacy/double fallback
+        resolved = db.resolve_session_id(sid) or sid
+        resolved = db.resolve_resume_session_id(resolved) or resolved
     row = db.get_session(resolved)
     if not row:
         raise LookupError(f"session '{session_id}' not found")

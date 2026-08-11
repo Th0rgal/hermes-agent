@@ -16,6 +16,32 @@
   <a href="README.es.md"><img src="https://img.shields.io/badge/Lang-Español-orange?style=for-the-badge" alt="Español"></a>
 </p>
 
+> ### ☤ This is a deployment fork
+>
+> `Th0rgal/hermes-agent` is a fork of
+> [`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent)
+> that we run in production as the **coordinator for
+> [sandboxed.sh](https://github.com/Th0rgal/sandboxed.sh)** — the
+> mission-execution backend. Hermes decides *what* to do (control
+> conversations, controller crons, project state) and drives sandboxed.sh over
+> MCP to *build* it in isolated workspaces.
+>
+> **What the fork adds on top of upstream** (themed):
+> - **Projects & missions surface** — a kanban board of sandboxed.sh projects, sidebar sections, unread badges and session-color borders (mostly a self-contained desktop plugin, `apps/desktop/src/plugins/projects-board/`, + a server proxy).
+> - **Durable delivery pipeline** — long-running mission work is delivered back into the conversation that asked for it (replayed as input, not as the model's own turn), with a gateway that serves a conversation's missions.
+> - **Structured controller events** — silence/dedupe/batching so a controller cron reports clean status instead of noise.
+> - **Explicit project → session routing** — durable routes binding a project to the control conversation that owns it.
+> - **Session-lineage correctness** — resume/pin/reopen follow the live delivery-order tip so continuations never fork or resurrect a trimmed session.
+> - **Reliability hardening** — loud-or-parked composer sends with delivery receipts, MCP failures classified by denylist (a 404 no longer downs a healthy server), Codex `model is not supported` 400s classified as `model_not_found`.
+>
+> The fork is kept as a short linear series of `[fork-delta]` commits on the
+> **`production`** branch, deliberately biased toward **plugins over core
+> patches** to stay easy to rebase onto upstream. See
+> **[`FORK.md`](FORK.md)** for the branch model, sync workflow, and the
+> plugin-ization roadmap. Everything below is the upstream project description.
+
+---
+
 **The self-improving AI agent built by [Nous Research](https://nousresearch.com).** It's the only agent with a built-in learning loop — it creates skills from experience, improves them during use, nudges itself to persist knowledge, searches its own past conversations, and builds a deepening model of who you are across sessions. Run it on a $5 VPS, a GPU cluster, or serverless infrastructure that costs nearly nothing when idle. It's not tied to your laptop — talk to it from Telegram while it works on a cloud VM.
 
 Use any model you want — [Nous Portal](https://portal.nousresearch.com), OpenRouter, OpenAI, your own endpoint, and [many others](https://hermes-agent.nousresearch.com/docs/integrations/providers). Switch with `hermes model` — no code changes, no lock-in.

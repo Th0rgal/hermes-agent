@@ -132,7 +132,15 @@ export function sessionColorForId(sessionId: null | string | undefined): string 
     return undefined
   }
 
-  const direct = $sessionColorById.get()[sessionId] ?? $sessionColorOverrides.get()[sessionId]
+  // Read the override under the SAME key the swatches write it — the durable
+  // lineage id (`setSessionColorOverride(sessionDurableId(id), …)`), not the
+  // raw id. A project's bound id is a lineage tip; storing under the root
+  // (durable) but reading under the tip left the dot grey despite a chosen
+  // color. Fall back to the raw id for overrides written before this fix.
+  const direct =
+    $sessionColorById.get()[sessionId] ??
+    $sessionColorOverrides.get()[sessionDurableId(sessionId)] ??
+    $sessionColorOverrides.get()[sessionId]
 
   if (direct) {
     return direct

@@ -97,9 +97,21 @@ export function ConfirmDialog({
       <DialogContent
         className="max-w-md"
         onKeyDown={event => {
-          // Enter/Space confirm regardless of which button holds focus
-          // (preventDefault stops a focused Cancel from swallowing it).
-          if ((event.key === 'Enter' || event.key === ' ') && !busy) {
+          if (busy) {
+            return
+          }
+          // A text field in the dialog body (e.g. a rename input) must keep
+          // its own keys: Space types a space, and Enter — not Space —
+          // submits. Only outside an editable target does Space also confirm
+          // (so a focused Cancel button can't swallow the shortcut).
+          const target = event.target as HTMLElement | null
+          const editable =
+            !!target &&
+            (target.tagName === 'INPUT' ||
+              target.tagName === 'TEXTAREA' ||
+              target.isContentEditable)
+          const confirmKey = event.key === 'Enter' || (event.key === ' ' && !editable)
+          if (confirmKey) {
             event.preventDefault()
             void run()
           }

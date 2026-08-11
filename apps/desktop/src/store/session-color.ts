@@ -36,7 +36,16 @@ export function setSessionColorOverride(durableId: string, color: null | string)
 // sessions list reads this to HIDE a project's main session from the generic
 // list — it already shows under the Projects section, so listing it twice just
 // adds noise. Ids are lineage tips; match with `sessionIdsRefer`, not equality.
-export const $projectBoundSessionIds = atom<string[]>([])
+//
+// Persisted so the last-known bound ids are available on the very first render,
+// before the plugin's roster fetch resolves — otherwise a bound session flashes
+// into the generic list for a frame and then disappears. The plugin overwrites
+// this with fresh ids on every roster refresh.
+export const $projectBoundSessionIds = persistentAtom<string[]>(
+  'hermes.desktop.projectBoundSessionIds',
+  [],
+  Codecs.stringArray
+)
 
 /** Publish the set of project-bound session ids (called by the projects-board
  *  plugin whenever its roster refreshes). A no-op set-guard keeps the atom

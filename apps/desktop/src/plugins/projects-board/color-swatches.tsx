@@ -182,6 +182,7 @@ export function RenameProjectDialog({
         <Input
           autoFocus
           onChange={event => setTitle(event.target.value)}
+          onFocus={event => event.target.select()}
           placeholder={b.renamePlaceholder}
           value={title}
         />

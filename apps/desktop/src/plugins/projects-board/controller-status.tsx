@@ -57,7 +57,9 @@ export function ControllerStatusIcon({ project }: { project: ProjectRow }) {
       ? b.pausedByYou
       : stop.kind === 'self-stopped'
         ? b.controllerStopped(stop.cause ?? '')
-        : b.controllerSilent(relativeTime(stop.lastAt))
+        : stop.kind === 'never-engaged'
+          ? b.controllerNeverEngaged
+          : b.controllerSilent(relativeTime(stop.lastAt))
 
   return (
     <Tip label={label}>

@@ -383,6 +383,7 @@ export const STALE_CONTROLLER_MS = 2 * 60 * 60 * 1000
  *  `null` = controller active, no icon. */
 export type ControllerStop =
   | { cause: null | string; kind: 'self-stopped' }
+  | { kind: 'never-engaged' }
   | { kind: 'operator-paused' }
   | { kind: 'stale'; lastAt: number }
 
@@ -413,6 +414,15 @@ export function controllerStop(project: ProjectRow, now = Date.now()): Controlle
 
   if (!Number.isNaN(lastAt) && now - lastAt > STALE_CONTROLLER_MS) {
     return { kind: 'stale', lastAt }
+  }
+
+  // A project that DECLARES a controller (controller_cron_id) but the
+  // controller has never reported a mode and never posted an update has
+  // simply never engaged — it looks "active" (no dot) yet nothing runs, which
+  // is the "I see it active but it does nothing" confusion. Surface it
+  // distinctly. (No controller_cron_id at all = deliberately unmanaged → no dot.)
+  if (project.controller_cron_id && !raw && Number.isNaN(lastAt)) {
+    return { kind: 'never-engaged' }
   }
 
   return null

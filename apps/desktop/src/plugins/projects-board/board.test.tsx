@@ -254,6 +254,14 @@ describe('controllerStop', () => {
     // Operator-archived rows carry their column; no icon.
     expect(controllerStop({ ...row('old', 'archived'), mode: 'paused', override: 'archived' }, now)).toBeNull()
   })
+
+  it('a declared-but-never-engaged controller (cron linked, no mode, no update) is surfaced', () => {
+    expect(controllerStop({ ...row('bench', 'active'), controller_cron_id: 'cron_abc' }, now)).toEqual({
+      kind: 'never-engaged'
+    })
+    // No controller declared at all → deliberately unmanaged, no icon.
+    expect(controllerStop(row('bench', 'active'), now)).toBeNull()
+  })
 })
 
 // ── board render (mocked rest layer) ─────────────────────────────────────────

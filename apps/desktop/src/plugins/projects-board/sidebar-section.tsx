@@ -54,7 +54,7 @@ import {
   PROJECTS_KEY
 } from './api'
 import { errText } from './board'
-import { DeleteProjectDialog, SessionColorSwatchesRow, UnreadBadge } from './color-swatches'
+import { DeleteProjectDialog, RenameProjectDialog, SessionColorSwatchesRow, UnreadBadge } from './color-swatches'
 import { ControllerStatusIcon } from './controller-status'
 import { useBoard } from './i18n'
 
@@ -92,11 +92,13 @@ function RowMenuItems({
   actions,
   kit,
   onDelete,
+  onRename,
   sessionId
 }: {
   actions: ReturnType<typeof useRowActions>
   kit: 'context' | 'dropdown'
   onDelete: () => void
+  onRename: () => void
   sessionId: string
 }) {
   const { b, lifecycleLabel, onLifecycle, onOpenCard } = actions
@@ -132,6 +134,10 @@ function RowMenuItems({
         <Codicon name="debug-pause" size="0.85rem" />
         {lifecycleLabel}
       </Item>
+      <Item onSelect={onRename}>
+        <Codicon name="edit" size="0.85rem" />
+        {b.renameProject}
+      </Item>
       <Item className="text-destructive" onSelect={onDelete}>
         <Codicon name="trash" size="0.85rem" />
         {b.deleteProject}
@@ -152,6 +158,7 @@ function ProjectRowItem({ project }: { project: BoundRow }) {
   const focusedId = useValue($focusedStoredSessionId)
   const selected = sessionIdsRefer(focusedId, sessionId)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [confirmRename, setConfirmRename] = useState(false)
 
   return (
     <>
@@ -190,16 +197,29 @@ function ProjectRowItem({ project }: { project: BoundRow }) {
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
-              <RowMenuItems actions={actions} kit="dropdown" onDelete={() => setConfirmDelete(true)} sessionId={sessionId} />
+              <RowMenuItems
+                actions={actions}
+                kit="dropdown"
+                onDelete={() => setConfirmDelete(true)}
+                onRename={() => setConfirmRename(true)}
+                sessionId={sessionId}
+              />
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <RowMenuItems actions={actions} kit="context" onDelete={() => setConfirmDelete(true)} sessionId={sessionId} />
+        <RowMenuItems
+          actions={actions}
+          kit="context"
+          onDelete={() => setConfirmDelete(true)}
+          onRename={() => setConfirmRename(true)}
+          sessionId={sessionId}
+        />
       </ContextMenuContent>
       </ContextMenu>
       <DeleteProjectDialog onClose={() => setConfirmDelete(false)} open={confirmDelete} project={project} />
+      <RenameProjectDialog onClose={() => setConfirmRename(false)} open={confirmRename} project={project} />
     </>
   )
 }

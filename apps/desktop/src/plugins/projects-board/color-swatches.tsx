@@ -147,6 +147,8 @@ export function DeleteProjectDialog({
       onConfirm={async () => {
         await projectAction(project.slug, 'delete')
         await queryClient.invalidateQueries({ queryKey: PROJECTS_KEY })
+        // Feedback + reassurance in one: the row is gone, the work is not.
+        host.notify({ kind: 'success', message: b.deleteProjectDone(project.title?.trim() || project.slug) })
       }}
       open={open}
       title={b.deleteProjectTitle(project.title?.trim() || project.slug)}

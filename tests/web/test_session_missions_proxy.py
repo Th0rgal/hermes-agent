@@ -11,7 +11,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from hermes_cli.web_routers import missions as missions_router
+from plugins.projects.dashboard import plugin_api as missions_router
 
 
 @pytest.fixture(autouse=True)

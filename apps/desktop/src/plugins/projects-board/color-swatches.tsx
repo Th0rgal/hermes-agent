@@ -198,6 +198,7 @@ export function RenameProjectDialog({
         }
         await renameProject(project.slug, next)
         await queryClient.invalidateQueries({ queryKey: PROJECTS_KEY })
+        host.notify({ kind: 'success', message: b.renameProjectDone(next) })
       }}
       open={open}
       title={b.renameProjectTitle(current)}

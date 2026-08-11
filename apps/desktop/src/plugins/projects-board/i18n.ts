@@ -92,6 +92,7 @@ type BoardMessages = {
   archiveProject: string
   renameConfirm: string
   renameProjectTitle: (name: string) => string
+  renameProjectDone: (name: string) => string
   renamePlaceholder: string
   liveMissions: string
   noMissions: string
@@ -190,6 +191,7 @@ const en: BoardMessages = {
   archiveProject: 'Archive project',
   renameConfirm: 'Rename',
   renameProjectTitle: name => `Rename ${name}`,
+  renameProjectDone: name => `Renamed to “${name}”.`,
   renamePlaceholder: 'Project name',
   liveMissions: 'Missions',
   noMissions: 'No recent missions.',

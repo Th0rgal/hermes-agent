@@ -81,6 +81,9 @@ function useRowActions(project: BoundRow) {
     b,
     lifecycleLabel: paused ? b.resumeProject : b.pauseProject,
     onLifecycle: () => lifecycle.mutate(paused ? 'resume' : 'pause'),
+    // Archived projects are filtered out of the sidebar, so from a row the
+    // only reachable direction is archive (unarchive lives on the board).
+    onArchive: () => lifecycle.mutate('archive'),
     onOpenCard: () => {
       $openProjectSlug.set(project.slug)
       host.navigate('/projects')
@@ -101,7 +104,7 @@ function RowMenuItems({
   onRename: () => void
   sessionId: string
 }) {
-  const { b, lifecycleLabel, onLifecycle, onOpenCard } = actions
+  const { b, lifecycleLabel, onArchive, onLifecycle, onOpenCard } = actions
 
   const [Item, Separator, Sub, SubTrigger, SubContent] =
     kit === 'context'
@@ -137,6 +140,10 @@ function RowMenuItems({
       <Item onSelect={onRename}>
         <Codicon name="edit" size="0.85rem" />
         {b.renameProject}
+      </Item>
+      <Item onSelect={onArchive}>
+        <Codicon name="archive" size="0.85rem" />
+        {b.archiveProject}
       </Item>
       <Item className="text-destructive" onSelect={onDelete}>
         <Codicon name="trash" size="0.85rem" />

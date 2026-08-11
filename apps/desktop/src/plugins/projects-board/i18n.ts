@@ -88,6 +88,7 @@ type BoardMessages = {
   deleteProjectTitle: (name: string) => string
   deleteProjectBody: string
   renameProject: string
+  archiveProject: string
   renameConfirm: string
   renameProjectTitle: (name: string) => string
   renamePlaceholder: string
@@ -184,6 +185,7 @@ const en: BoardMessages = {
   deleteProjectTitle: name => `Delete project ${name}?`,
   deleteProjectBody: 'Its missions and conversation are not touched; the project disappears from all boards.',
   renameProject: 'Rename project',
+  archiveProject: 'Archive project',
   renameConfirm: 'Rename',
   renameProjectTitle: name => `Rename ${name}`,
   renamePlaceholder: 'Project name',

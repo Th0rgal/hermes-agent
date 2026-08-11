@@ -40,6 +40,13 @@ from typing import Any, List, Optional
 # the module) fail with ModuleNotFoundError for hermes_time et al.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Pure delivery-routing resolvers, extracted to cron/delivery_routing.py to
+# shrink this file's fork delta. Re-exported so existing
+# `from cron.scheduler import _resolve_origin` imports keep working.
+from cron.delivery_routing import (  # noqa: E402,F401
+    _normalize_deliver_value,
+    _resolve_origin,
+)
 from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import (
@@ -669,26 +676,6 @@ def _get_lock_paths() -> tuple[Path, Path]:
     return lock_dir, lock_dir / ".tick.lock"
 
 
-def _resolve_origin(job: dict) -> Optional[dict]:
-    """Extract origin info from a job, preserving any extra routing metadata.
-
-    Treats non-dict origins (free-form provenance strings, ints, lists from
-    migration scripts or hand-edited jobs.json) as missing instead of
-    crashing with ``AttributeError`` on ``origin.get(...)``. Without this
-    guard, a job tagged with e.g. ``"combined-digest-replaces-x-and-y"``
-    crashed every fire attempt with
-    ``'str' object has no attribute 'get'`` — ``mark_job_run`` recorded the
-    failure, but the next tick re-loaded the same poisoned origin and
-    crashed identically until the field was patched manually (#18722).
-    """
-    origin = job.get("origin")
-    if not isinstance(origin, dict):
-        return None
-    platform = origin.get("platform")
-    chat_id = origin.get("chat_id")
-    if platform and chat_id:
-        return origin
-    return None
 
 
 def _cron_mirror_delivery_enabled(job: dict, cfg: Optional[dict] = None) -> bool:
@@ -1578,25 +1565,6 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
         "thread_id": _get_home_target_thread_id(platform_name),
     }
 
-
-def _normalize_deliver_value(deliver) -> str:
-    """Normalize a stored/submitted ``deliver`` value to its canonical string form.
-
-    The contract is that ``deliver`` is a string (``"local"``, ``"origin"``,
-    ``"telegram"``, ``"telegram:-1001:17"``, or comma-separated combinations).
-    Historically some callers — MCP clients passing an array, direct edits of
-    ``jobs.json``, or stale code paths — have stored a list/tuple like
-    ``["telegram"]``.  ``str(["telegram"])`` would serialize to the literal
-    string ``"['telegram']"``, which is not a known platform and fails
-    resolution silently.  Flatten lists/tuples into a comma-separated string
-    so both forms work.  Returns ``"local"`` for anything falsy.
-    """
-    if deliver is None or deliver == "":
-        return "local"
-    if isinstance(deliver, (list, tuple)):
-        parts = [str(p).strip() for p in deliver if str(p).strip()]
-        return ",".join(parts) if parts else "local"
-    return str(deliver)
 
 
 # Routing intent tokens — resolved at fire time, not create time, so a

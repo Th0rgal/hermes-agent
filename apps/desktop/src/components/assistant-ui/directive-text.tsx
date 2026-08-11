@@ -5,6 +5,7 @@ import type { TextMessagePartComponent, TextMessagePartProps } from '@assistant-
 import type { FC } from 'react'
 import { Fragment, useEffect, useMemo, useState } from 'react'
 
+import { openSession } from '@/app/open-session'
 import { ZoomableImage } from '@/components/chat/zoomable-image'
 import type { I18nContextValue } from '@/i18n'
 import { extractEmbeddedImages } from '@/lib/embedded-images'
@@ -452,8 +453,12 @@ export function openSessionRef(value: string) {
   }
 
   triggerHaptic('selection')
-  // navigate is unused for the `tab` intent (focus-or-tile only).
-  void import('@/app/open-session').then(({ openSession }) => openSession(sessionId, () => undefined, 'tab'))
+  // navigate is unused for the `tab` intent (focus-or-tile only). Static
+  // import: `@/app/open-session` is already statically imported by many core
+  // modules (sidebar rows, command palette, close-tab, …), so the dynamic
+  // import() here never split it into its own chunk — it only produced Vite's
+  // INEFFECTIVE_DYNAMIC_IMPORT warning. Call it directly.
+  openSession(sessionId, () => undefined, 'tab')
 }
 
 /** What activating a directive of a given kind does. The single source of truth

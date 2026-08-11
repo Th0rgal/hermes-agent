@@ -76,31 +76,56 @@ git fetch origin && git reset --hard origin/production
 systemctl restart hermes-assistant hermes-dashboard
 ```
 
-## Minimizing maintenance: keep deltas in plugins
+## Minimizing maintenance: what actually costs us at rebase
 
-Every line we patch into an upstream core file is a line that can conflict on
-the next rebase — the recurring `fix(fork): reconcile delta series with
-upstream refactors` commits are that tax. The way to shrink it is to move
-fork behaviour behind Hermes's **plugin seams** instead of editing core, so an
-upstream refactor of core leaves our code untouched.
+The recurring `fix(fork): reconcile delta series with upstream refactors`
+commits are the tax. But the right metric is **edits to files that also exist
+upstream** — NOT "lines the fork added". A **fork-added new file never
+conflicts** on rebase (upstream doesn't have it), no matter how large. So the
+~5.9k "core" lines split sharply:
 
-Roughly ~40% of the fork already lives in plugins (the whole **projects-board**
-desktop UI + its `plugins/projects-board/dashboard/` proxy). That is the model
-to replicate. Rough split of the remaining ~5.9k patched lines across ~77 core
-files, and where they should go:
+- **New fork files — already conflict-free, moving them buys nothing.**
+  `gateway/controller_events.py`, `tools/project_tools.py`,
+  `hermes_cli/project_routes.py`, `hermes_cli/web_routers/missions.py`,
+  `apps/desktop/src/store/session-unread.ts`, `apps/desktop/src/app/chat/mission-tag.tsx`,
+  etc. Relocating these into plugins is organizational hygiene, not conflict
+  reduction — don't spend rebase-budget effort on it.
+- **Edits interleaved into upstream files — the real tax.** These are what to
+  attack. Ordered by pain: `hermes_state.py` (~687), `tui_gateway/server.py`
+  (~305), `cron/scheduler.py` (~519 of edits), `gateway/platforms/webhook.py`
+  (~198), `apps/desktop/src/lib/chat-messages.ts`, `apps/desktop/src/app/chat/sidebar/index.tsx`,
+  `gateway/delivery.py` (~86), plus one-liners (`web_server.py` `include_router`,
+  `toolsets.py`, `tui_gateway` import of `set_project_workspace_callback`).
 
-**Server (Python) — move behind `plugins/<name>/` + `register(ctx)` hooks:**
-- **Project routing** — `hermes_cli/project_routes.py`, `hermes_cli/web_routers/missions.py`, `tools/project_tools.py` (~715 lines). Already cohesive new modules bolted onto core routers; should register their routes/tools through `PluginContext` from a `plugins/projects/` server plugin instead of being imported by core.
-- **Structured controller events** — `gateway/controller_events.py` (~402, essentially a new file). Emit over an `invoke_hook` seam rather than a core gateway module.
-- **Durable cron/callback delivery** — `cron/scheduler.py`, `cron/jobs.py`, `gateway/delivery.py`, `gateway/platforms/webhook.py`. Highest-conflict cron/gateway edits; lift the additive parts (delivery replay, session-origin) into `cron_providers` / a delivery plugin behind hooks.
-- **MCP classification** (`tools/mcp_tool.py`, `agent/error_classifier.py`) and the **command secret source** (`agent/secret_sources/command.py`) — small, hook- or entry-point-plugin candidates.
+### The real lever: add a seam, then upstream it
 
-**Desktop (renderer) — collapse into the `contrib` extension API:**
-- `store/session-unread.ts`, `app/chat/mission-tag.tsx`, `store/session-color.ts`, `app/chat/session-status-dot.tsx` (~350 lines) are missions-board presentation leaking into core stores/components. Where the plugin can't reach them yet, add SDK/contrib extension points (the fork already added `$sessionColorById`, the `SESSIONS_SECTIONS_AREA` slot, `SessionStatusDot`) and move the logic into `apps/desktop/src/plugins/projects-board/`.
+For each hot upstream file, replace the interleaved edit with **one call into a
+generic seam**, then open the seam upstream. Once upstream ships the seam, our
+delta on that file disappears entirely. Highest value:
 
-**Accept as irreducible core deltas — keep them tight and well-commented:**
-- `hermes_state.py` (~687), `hermes_state_schema.py`, `hermes_state_common.py` — session lineage/resume/trim invariants live deep in the state monolith; no plugin seam exists.
-- `tui_gateway/server.py` (~305), `agent/conversation_loop.py`, `agent/system_prompt.py`.
+- **`gateway/delivery.py`** — DONE: the dormant `deliver_events` moved to
+  `plugins/controller_events/`; the event contract stays in the leaf
+  `controller_events.py`. Next: route the 4 `cron/scheduler.py` emit sites
+  through an `invoke_hook('controller_event', …)` seam so scheduler.py stops
+  importing the module (defer — scheduler.py runs the live controller; do it on
+  a supervised gateway-redeploy window).
+- **`web_server.py`** — add a `register_router` seam so a plugin can mount a
+  prefix-less router (the dashboard-plugin seam force-prefixes `/api/plugins/<name>/`,
+  which would break the fixed `/api/projects` paths). Then `missions.py` moves
+  to a plugin with zero URL change. Upstream `register_router`.
+- **Desktop** — `chat-messages.ts` fork functions and `sidebar/index.tsx` edits
+  are the real desktop tax. `sidebar` edits already lean on shared atoms
+  (`$sessionColorById`, `$projectBoundSessionIds`, `SESSIONS_SECTIONS_AREA`); a
+  titlebar slot would move `mission-tag.tsx` off `app/chat/index.tsx`. Upstream
+  the slots.
 
-Do this incrementally, one cluster per fork-delta PR, verifying prod parity
-after each — not as one big-bang refactor of the live `production` branch.
+### Accept as irreducible (keep tight + well-commented)
+
+`hermes_state.py` (session lineage/resume/trim invariants — no seam), `tui_gateway/server.py`,
+`agent/conversation_loop.py`, `agent/system_prompt.py`, `lib/chat-messages.ts`
+(shared lib, per-function interleaving), and the interleaved cron/webhook core:
+durable-replay-into-SessionDB (`scheduler.py`), cron mirror, webhook
+session-reaping.
+
+Do this incrementally, one seam per fork-delta PR, verifying prod parity after
+each — never a big-bang refactor + force-push of the live `production` branch.

@@ -12,7 +12,13 @@
  * backend is unreachable.
  */
 
-import { atom, type PluginRestOptions, type PluginStorage, queryClient } from '@hermes/plugin-sdk'
+import {
+  atom,
+  type PluginRestOptions,
+  type PluginStorage,
+  queryClient,
+  setProjectBoundSessionIds
+} from '@hermes/plugin-sdk'
 
 export type MissionStatus = string
 
@@ -251,6 +257,12 @@ export function setAttentionNotifier(fn: ((slug: string) => void) | null): void 
 }
 
 function observeRoster(projects: ProjectRow[]): void {
+  // Publish each project's bound control-conversation id to core, so the
+  // generic sessions list can hide sessions that already show under Projects.
+  setProjectBoundSessionIds(
+    projects.map(p => p.conversation?.session_id).filter((id): id is string => Boolean(id))
+  )
+
   const entered = attentionTransitions(previousBuckets, projects)
   previousBuckets = Object.fromEntries(projects.map(p => [p.slug, p.bucket]))
 

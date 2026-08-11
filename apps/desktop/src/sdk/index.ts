@@ -290,6 +290,7 @@ export {
   sessionColorForId,
   sessionDurableId,
   sessionIdsRefer,
+  setProjectBoundSessionIds,
   setSessionColorOverride
 } from '@/store/session-color'
 /** The stored id of the FOCUSED chat session (readonly computed) — what the

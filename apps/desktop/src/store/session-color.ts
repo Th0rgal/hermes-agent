@@ -31,6 +31,38 @@ export function setSessionColorOverride(durableId: string, color: null | string)
   }
 }
 
+// The bound control-conversation session ids of every projects-board project,
+// published by the plugin (core has no view of the plugin's roster). The core
+// sessions list reads this to HIDE a project's main session from the generic
+// list — it already shows under the Projects section, so listing it twice just
+// adds noise. Ids are lineage tips; match with `sessionIdsRefer`, not equality.
+export const $projectBoundSessionIds = atom<string[]>([])
+
+/** Publish the set of project-bound session ids (called by the projects-board
+ *  plugin whenever its roster refreshes). A no-op set-guard keeps the atom
+ *  stable when the ids are unchanged, so subscribers don't re-render on every
+ *  poll. */
+export function setProjectBoundSessionIds(ids: string[]): void {
+  const next = Array.from(new Set(ids.filter(Boolean)))
+  const prev = $projectBoundSessionIds.get()
+  const same = next.length === prev.length && next.every((id, i) => id === prev[i])
+
+  if (!same) {
+    $projectBoundSessionIds.set(next)
+  }
+}
+
+/** True when `session` is the bound control conversation of some project — the
+ *  session shown under the Projects section. Lineage-aware: a project's bound
+ *  id is a tip, a list row may hold the root (or vice versa). */
+export function isProjectBoundSession(session: SessionInfo, boundIds: string[]): boolean {
+  if (boundIds.length === 0) {
+    return false
+  }
+
+  return boundIds.some(id => sessionMatchesStoredId(session, id) || sessionIdsRefer(session.id, id))
+}
+
 // The resolved color for every session, keyed by live session id — the ONE
 // source of truth both the sidebar rows and the pane tabs read, so the two
 // surfaces can never drift. Recomputed only when the session list, projects, or

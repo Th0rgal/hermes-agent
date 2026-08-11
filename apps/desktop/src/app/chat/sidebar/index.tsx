@@ -96,7 +96,12 @@ import {
   sessionPinId,
   setCurrentCwd
 } from '@/store/session'
-import { $fetchedSessionsById, ensureSessionLineage } from '@/store/session-color'
+import {
+  $fetchedSessionsById,
+  $projectBoundSessionIds,
+  ensureSessionLineage,
+  isProjectBoundSession
+} from '@/store/session-color'
 import { $focusedStoredSessionId, $workingSessionIds, type SplitDir } from '@/store/session-states'
 
 import {
@@ -453,6 +458,15 @@ export function ChatSidebar({
     [pinnedRealIdSet, pinnedIdSet]
   )
 
+  // A project's bound control conversation already shows under the Projects
+  // section, so hide it from the generic sessions list to avoid listing it
+  // twice. Lineage-aware (the binding may hold either side of a root↔tip pair).
+  const projectBoundSessionIds = useStore($projectBoundSessionIds)
+  const isBoundToProject = useCallback(
+    (session: SessionInfo) => isProjectBoundSession(session, projectBoundSessionIds),
+    [projectBoundSessionIds]
+  )
+
   // Full-text search across *all* sessions (not just the loaded page) so 699
   // sessions stay findable. Debounced; loaded sessions are matched instantly
   // client-side and merged ahead of the server hits.
@@ -515,8 +529,8 @@ export function ChatSidebar({
   }, [trimmedQuery, sortedSessions, serverMatches, sessionByAnyId])
 
   const unpinnedAgentSessions = useMemo(
-    () => sortedSessions.filter(s => !isPinnedSession(s)),
-    [sortedSessions, isPinnedSession]
+    () => sortedSessions.filter(s => !isPinnedSession(s) && !isBoundToProject(s)),
+    [sortedSessions, isPinnedSession, isBoundToProject]
   )
 
   useEffect(() => {

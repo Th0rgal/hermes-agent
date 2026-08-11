@@ -26,6 +26,7 @@ from gateway.controller_events import (
     UserNotification,
 )
 from gateway.delivery import DeliveryRouter, DeliveryTarget
+from plugins.controller_events import deliver_controller_events
 
 
 class RecordingAdapter:
@@ -63,7 +64,7 @@ async def test_batch_of_events_is_one_platform_send(router):
         ProjectProgress(project="alpha", stage="delivered"),
     ]
 
-    result = await router.deliver_events(events, TELEGRAM, job_id="j1")
+    result = await deliver_controller_events(router, events, TELEGRAM, job_id="j1")
 
     assert result["accepted"] == 3
     assert len(router._test_adapter.calls) == 1
@@ -75,7 +76,7 @@ async def test_batch_of_events_is_one_platform_send(router):
 async def test_duplicates_collapse_before_send(router):
     event = UserNotification(text="deploy done")
 
-    result = await router.deliver_events([event, event, event], TELEGRAM, job_id="j1")
+    result = await deliver_controller_events(router, [event, event, event], TELEGRAM, job_id="j1")
 
     assert result["accepted"] == 1
     assert result["deduped"] == 2
@@ -91,7 +92,7 @@ async def test_silent_events_never_reach_platform_but_audit_locally(router):
         ReconciliationEvent(kind="silent_suppression", subject="j1"),
     ]
 
-    result = await router.deliver_events(events, TELEGRAM, job_id="j1")
+    result = await deliver_controller_events(router, events, TELEGRAM, job_id="j1")
 
     assert router._test_adapter.calls == []
     assert result["suppressed_local_only"] == 2
@@ -109,7 +110,7 @@ async def test_mixed_batch_platform_gets_only_loud_events(router):
         ProjectProgress(project="alpha", stage="route_resolved", silent=True),
     ]
 
-    await router.deliver_events(events, TELEGRAM, job_id="j1")
+    await deliver_controller_events(router, events, TELEGRAM, job_id="j1")
 
     assert len(router._test_adapter.calls) == 1
     content = router._test_adapter.calls[0]["content"]
@@ -125,7 +126,7 @@ async def test_digest_metadata_carries_ui_roles_and_payloads(router):
         ReconciliationEvent(kind="route_migrated", subject="alpha", silent=False),
     ]
 
-    await router.deliver_events(events, TELEGRAM, job_id="j1")
+    await deliver_controller_events(router, events, TELEGRAM, job_id="j1")
 
     metadata = router._test_adapter.calls[0]["metadata"]
     assert metadata["ui_role"] == "assistant"  # any assistant beat wins the digest
@@ -142,7 +143,7 @@ async def test_digest_metadata_carries_ui_roles_and_payloads(router):
 
 @pytest.mark.asyncio
 async def test_system_only_digest_gets_system_role(router):
-    await router.deliver_events(
+    await deliver_controller_events(router, 
         [ReconciliationEvent(kind="route_migrated", subject="alpha", silent=False)],
         TELEGRAM,
         job_id="j1",
@@ -152,7 +153,7 @@ async def test_system_only_digest_gets_system_role(router):
 
 @pytest.mark.asyncio
 async def test_local_target_receives_loud_events_too(router):
-    await router.deliver_events(
+    await deliver_controller_events(router, 
         [UserNotification(text="kept locally")],
         [DeliveryTarget.parse("local")],
         job_id="j1",
@@ -167,7 +168,7 @@ async def test_max_batch_splits_into_multiple_digests(router):
     batcher = ControllerEventBatcher(max_batch=2)
     events = [UserNotification(text=f"n{i}") for i in range(5)]
 
-    await router.deliver_events(events, TELEGRAM, job_id="j1", batcher=batcher)
+    await deliver_controller_events(router, events, TELEGRAM, job_id="j1", batcher=batcher)
 
     assert len(router._test_adapter.calls) == 3  # 2 + 2 + 1
     assert router._test_adapter.calls[-1]["content"] == "n4"
@@ -181,8 +182,8 @@ async def test_shared_batcher_dedupes_across_concurrent_calls(router):
     fact = UserNotification(text="the one fact")
 
     results = await asyncio.gather(
-        router.deliver_events([fact], TELEGRAM, job_id="j1", batcher=batcher),
-        router.deliver_events([fact], TELEGRAM, job_id="j1", batcher=batcher),
+        deliver_controller_events(router, [fact], TELEGRAM, job_id="j1", batcher=batcher),
+        deliver_controller_events(router, [fact], TELEGRAM, job_id="j1", batcher=batcher),
     )
 
     assert sum(r["accepted"] for r in results) == 1
@@ -198,7 +199,7 @@ async def test_shared_batcher_does_not_flush_another_call_pending_queue(router):
     queued_elsewhere = UserNotification(text="belongs to another route")
     batcher.add(queued_elsewhere)
 
-    await router.deliver_events(
+    await deliver_controller_events(router, 
         [UserNotification(text="this route only")],
         TELEGRAM,
         job_id="j1",
@@ -212,7 +213,7 @@ async def test_shared_batcher_does_not_flush_another_call_pending_queue(router):
 
 @pytest.mark.asyncio
 async def test_empty_event_list_is_a_noop(router):
-    result = await router.deliver_events([], TELEGRAM, job_id="j1")
+    result = await deliver_controller_events(router, [], TELEGRAM, job_id="j1")
     assert result["accepted"] == 0
     assert router._test_adapter.calls == []
     assert _local_outputs(router) == []

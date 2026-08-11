@@ -303,9 +303,10 @@ class ControllerEventBatcher:
     ) -> List[ControllerEvent]:
         """Atomically deduplicate a call-local group without queueing it.
 
-        ``DeliveryRouter.deliver_events`` uses this path so two concurrent
-        callers can share the dedupe window without sharing pending delivery
-        state. Otherwise one caller could flush another caller's event and
+        The ``controller_events`` plugin's ``deliver_controller_events`` uses
+        this path so two concurrent callers can share the dedupe window without
+        sharing pending delivery state. Otherwise one caller could flush
+        another caller's event and
         send it to the wrong targets.
         """
         ts = time.time() if now is None else float(now)

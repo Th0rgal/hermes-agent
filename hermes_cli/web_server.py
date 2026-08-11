@@ -4793,12 +4793,10 @@ def _strip_session_list_rows(sessions: List[Dict[str, Any]]) -> List[Dict[str, A
 from hermes_cli.web_routers import sessions as _sessions_routes  # noqa: E402
 
 app.include_router(_sessions_routes.list_router)
-# Registered next to the session routes it extends. Read-only proxy to the
-# sandboxed.sh mission inventory so desktop clients need no backend credential
-# of their own.
-from hermes_cli.web_routers import missions as _missions_routes  # noqa: E402
-
-app.include_router(_missions_routes.router)
+# The mission-inventory proxy (/api/projects, /api/sessions/{id}/missions,
+# /api/missions/{id}/message) moved to the bundled `projects` dashboard
+# plugin (plugins/projects/dashboard/plugin_api.py), mounted at root via the
+# manifest's `api_prefix: ""`. See _plugin_api_mount_prefix.
 from hermes_cli.web_routers.sessions import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
     get_sessions,
 )
@@ -16726,6 +16724,12 @@ def _discover_dashboard_plugins() -> list:
                     "source": source,
                     "_dir": str(dashboard_dir),
                     "_api_file": safe_api,
+                    # Optional custom mount prefix for the plugin's API router.
+                    # Honored for BUNDLED plugins only (see _mount_plugin_api_routes),
+                    # so a trusted first-party plugin can serve fixed paths
+                    # (e.g. "/api" for /api/projects) instead of the forced
+                    # /api/plugins/<name> namespace.
+                    "api_prefix": data.get("api_prefix"),
                 })
             except Exception as exc:
                 _log.warning("Bad dashboard plugin manifest %s: %s", manifest_file, exc)
@@ -17231,12 +17235,39 @@ async def serve_plugin_asset(plugin_name: str, file_path: str):
     )
 
 
+def _plugin_api_mount_prefix(plugin: dict) -> str:
+    """The FastAPI mount prefix for a plugin's API router.
+
+    Default is the namespaced ``/api/plugins/<name>`` so an untrusted plugin
+    can never shadow a core route. A **bundled** (first-party, ships with the
+    release) plugin may opt into a custom prefix via the manifest's
+    ``api_prefix`` — e.g. ``"/api"`` so a router declaring ``/api/projects``
+    serves that exact path. Honored for bundled plugins ONLY; user/project
+    plugins always get the forced namespace regardless of what their manifest
+    asks for (GHSA-5qr3-c538-wm9j threat model). ``api_prefix: ""`` mounts at
+    root (the router's decorators carry absolute paths).
+    """
+    name = plugin.get("name", "")
+    default = f"/api/plugins/{name}"
+    if plugin.get("source") != "bundled":
+        return default
+    custom = plugin.get("api_prefix")
+    if custom is None:
+        return default
+    custom = str(custom).rstrip("/")
+    # Reject a namespace escape that isn't a plain absolute prefix.
+    if custom and not custom.startswith("/"):
+        return default
+    return custom
+
+
 def _mount_plugin_api_routes():
     """Import and mount backend API routes from plugins that declare them.
 
     Each plugin's ``api`` field points to a Python file that must expose
     a ``router`` (FastAPI APIRouter).  Routes are mounted under
-    ``/api/plugins/<name>/``.
+    ``/api/plugins/<name>/`` by default, or a bundled plugin's manifest
+    ``api_prefix`` (see :func:`_plugin_api_mount_prefix`).
 
     Backend import is restricted to ``bundled`` and ``user`` sources.
     Project plugins (``./.hermes/plugins/``) ship with the CWD and are
@@ -17339,8 +17370,9 @@ def _mount_plugin_api_routes():
             if router is None:
                 _log.warning("Plugin %s api file has no 'router' attribute", plugin["name"])
                 continue
-            app.include_router(router, prefix=f"/api/plugins/{plugin['name']}")
-            _log.info("Mounted plugin API routes: /api/plugins/%s/", plugin["name"])
+            mount_prefix = _plugin_api_mount_prefix(plugin)
+            app.include_router(router, prefix=mount_prefix)
+            _log.info("Mounted plugin API routes: %s (plugin %s)", mount_prefix or "/", plugin["name"])
         except Exception as exc:
             _log.warning("Failed to load plugin %s API routes: %s", plugin["name"], exc)
 

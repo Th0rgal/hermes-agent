@@ -56,7 +56,13 @@ import {
   type ProjectsResponse,
   selectChips
 } from './api'
-import { DeleteProjectDialog, SessionColorSwatchesRow, SteerInput, UnreadBadge } from './color-swatches'
+import {
+  DeleteProjectDialog,
+  RenameProjectDialog,
+  SessionColorSwatchesRow,
+  SteerInput,
+  UnreadBadge
+} from './color-swatches'
 import { ControllerStatusIcon } from './controller-status'
 import { ProjectDrawer } from './drawer'
 import { type BoardText, bucketHelp, bucketLabel, useBoard } from './i18n'
@@ -229,6 +235,7 @@ function Card({
   const [dragging, setDragging] = useState(false)
   const [steerId, setSteerId] = useState<null | string>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [confirmRename, setConfirmRename] = useState(false)
   const unreadCounts = useValue($sessionUnreadCounts)
   // Subscribe to the shared color map so the border repaints with the session.
   useValue($sessionColorById)
@@ -341,12 +348,17 @@ function Card({
           </ContextMenuItem>
         ))}
         <ContextMenuSeparator />
+        <ContextMenuItem onSelect={() => setConfirmRename(true)}>
+          <Codicon name="edit" size="0.85rem" />
+          {b.renameProject}
+        </ContextMenuItem>
         <ContextMenuItem className="text-destructive" onSelect={() => setConfirmDelete(true)}>
           <Codicon name="trash" size="0.85rem" />
           {b.deleteProject}
         </ContextMenuItem>
       </ContextMenuContent>
       <DeleteProjectDialog onClose={() => setConfirmDelete(false)} open={confirmDelete} project={project} />
+      <RenameProjectDialog onClose={() => setConfirmRename(false)} open={confirmRename} project={project} />
     </ContextMenu>
   )
 }

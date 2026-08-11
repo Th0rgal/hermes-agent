@@ -19,9 +19,9 @@ import {
   useMutation,
   useValue
 } from '@hermes/plugin-sdk'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
-import { projectAction, PROJECTS_KEY, steerMission } from './api'
+import { projectAction, PROJECTS_KEY, renameProject, steerMission } from './api'
 import { useBoard } from './i18n'
 
 // Local copy of board.tsx's errText (importing it would cycle board ↔ here).
@@ -150,6 +150,54 @@ export function DeleteProjectDialog({
       }}
       open={open}
       title={b.deleteProjectTitle(project.title?.trim() || project.slug)}
+    />
+  )
+}
+
+export function RenameProjectDialog({
+  onClose,
+  open,
+  project
+}: {
+  onClose: () => void
+  open: boolean
+  project: { slug: string; title?: null | string }
+}) {
+  const b = useBoard()
+  const current = project.title?.trim() || project.slug
+  const [title, setTitle] = useState(current)
+
+  // Reset the field to the project's current name each time the dialog opens
+  // (the dialog instance is reused across opens on a toggled `open` prop).
+  useEffect(() => {
+    if (open) {
+      setTitle(current)
+    }
+  }, [open, current])
+
+  return (
+    <ConfirmDialog
+      confirmLabel={b.renameConfirm}
+      description={
+        <Input
+          autoFocus
+          onChange={event => setTitle(event.target.value)}
+          placeholder={b.renamePlaceholder}
+          value={title}
+        />
+      }
+      dismissOnConfirm
+      onClose={onClose}
+      onConfirm={async () => {
+        const next = title.trim()
+        if (!next || next === current) {
+          return
+        }
+        await renameProject(project.slug, next)
+        await queryClient.invalidateQueries({ queryKey: PROJECTS_KEY })
+      }}
+      open={open}
+      title={b.renameProjectTitle(current)}
     />
   )
 }

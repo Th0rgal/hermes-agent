@@ -315,6 +315,9 @@ export type ProjectAction = 'archive' | 'delete' | 'pause' | 'resume' | 'unarchi
 export const projectAction = (slug: string, action: ProjectAction) =>
   call(`/projects/${encodeURIComponent(slug)}/action`, { body: { action }, method: 'POST' })
 
+export const renameProject = (slug: string, title: string) =>
+  call(`/projects/${encodeURIComponent(slug)}/rename`, { body: { title }, method: 'POST' })
+
 export const saveGrant = (slug: string, patch: Record<string, unknown>) =>
   call<{ grant: ProjectGrant }>(`/projects/${encodeURIComponent(slug)}/grant`, { body: patch, method: 'POST' })
 

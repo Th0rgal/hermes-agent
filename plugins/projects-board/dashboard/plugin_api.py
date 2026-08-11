@@ -144,8 +144,11 @@ async def rename_project(
     title = str(payload.get("title") or "").strip()
     if not title:
         raise HTTPException(status_code=400, detail="title must be a non-empty string")
+    # NB: no trailing slash — sandboxed.sh serves the upsert at
+    # `PUT /api/projects` (a trailing-slash `/api/projects/` 404s), so the rename
+    # relay must match it exactly or the desktop sees a 502.
     await _sandboxed_request(
-        "PUT", "/api/projects/", body={"slug": slug, "title": title}
+        "PUT", "/api/projects", body={"slug": slug, "title": title}
     )
     return {"ok": True, "slug": slug, "title": title}
 

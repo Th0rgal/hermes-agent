@@ -101,6 +101,7 @@ type BoardMessages = {
   pausedByYou: string
   controllerStopped: (cause: string) => string
   controllerSilent: (since: string) => string
+  controllerNeverEngaged: string
 }
 
 const en: BoardMessages = {
@@ -199,7 +200,8 @@ const en: BoardMessages = {
   needsYouTag: 'needs you',
   pausedByYou: 'Paused by you',
   controllerStopped: cause => (cause ? `Controller stopped itself: ${cause}` : 'Controller stopped itself'),
-  controllerSilent: since => `Controller silent since ${since}`
+  controllerSilent: since => `Controller silent since ${since}`,
+  controllerNeverEngaged: 'Controller attached but never engaged — nothing has run yet'
 }
 
 /** Registered via `ctx.i18n.register` at plugin load (disposer tracked). */

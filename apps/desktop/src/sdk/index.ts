@@ -143,6 +143,7 @@ export type { TitlebarTool } from '@/app/shell/titlebar-controls'
  *  `width`/`height`. */
 export type { FloatingAnchor } from '@/components/pane-shell/tree/renderer/floating-rect'
 export { StatusDot, type StatusTone } from '@/components/status-dot'
+export { SessionStatusDot } from '@/app/chat/session-status-dot'
 
 export { Badge } from '@/components/ui/badge'
 export { Button } from '@/components/ui/button'
@@ -269,6 +270,7 @@ export {
 export { evaluateRuntimeReadiness, type RuntimeReadinessResult } from '@/lib/runtime-readiness'
 
 export const PANES_AREA = 'panes'
+export const SESSIONS_SECTIONS_AREA = 'sidebar.sessions.sections'
 export { coarseElapsed, fmtDateTime, fmtDayTime, relativeTime } from '@/lib/time'
 export const STATUSBAR_AREAS = { left: 'statusBar.left', right: 'statusBar.right' } as const
 export const TITLEBAR_AREAS = { center: 'titleBar.center', left: 'titleBar.left', right: 'titleBar.right' } as const
@@ -276,7 +278,13 @@ export const TITLEBAR_AREAS = { center: 'titleBar.center', left: 'titleBar.left'
 export { cn } from '@/lib/utils'
 /** Per-session color overrides — the SAME store the sidebar/tabs resolve, so a
  *  plugin-set color agrees everywhere. Write under `sessionDurableId(id)`. */
-export { $sessionColorOverrides, sessionColorForId, sessionDurableId, setSessionColorOverride } from '@/store/session-color'
+export {
+  $sessionColorById,
+  $sessionColorOverrides,
+  sessionColorForId,
+  sessionDurableId,
+  setSessionColorOverride
+} from '@/store/session-color'
 /** Session id (live OR durable) → unread message count since last opened;
  *  nonzero entries only. Baselines stamp/clear on session open — the same
  *  signal that clears the core unread dot. */

@@ -23,6 +23,7 @@ import {
 } from '@/components/ui/sidebar'
 import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
 import { useContributions } from '@/contrib/react/use-contributions'
+import { Slot } from '@/contrib/react/slot'
 import { searchSessions, type SessionInfo, type SessionSearchResult } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { comboTokens } from '@/lib/keybinds/combo'
@@ -1754,6 +1755,8 @@ export function ChatSidebar({
                 open={cronOpen}
               />
             )}
+
+            {!trimmedQuery && <Slot area="sidebar.sessions.sections" />}
           </div>
         )}
 

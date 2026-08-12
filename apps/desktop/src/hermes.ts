@@ -752,6 +752,45 @@ export async function getAllSessionMessages(
   return { session_id: resolvedSessionId, messages }
 }
 
+/** A mission spawned from a conversation, as the gateway projects it. */
+export interface SessionMission {
+  id: string
+  status: string
+  title: string | null
+  short_description: string | null
+  project: string | null
+  track: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface SessionMissionsResponse {
+  session_id: string
+  missions: SessionMission[]
+}
+
+// Missions this conversation spawned, served by the gateway rather than read
+// from sandboxed.sh directly — the desktop holds no backend credential of its
+// own. Throws on 503 (no sandboxed.sh on this host) and 502 (backend
+// unreachable); callers must treat those as "hide the section", never as "this
+// conversation has no missions".
+export function getSessionMissions(
+  id: string,
+  profile?: string | null,
+  limit = 50
+): Promise<SessionMissionsResponse> {
+  const params = new URLSearchParams({ limit: String(limit) })
+
+  if (profile) {
+    params.set('profile', profile)
+  }
+
+  return window.hermesDesktop.api<SessionMissionsResponse>({
+    ...(profile ? { profile } : {}),
+    path: `/api/sessions/${encodeURIComponent(id)}/missions?${params.toString()}`
+  })
+}
+
 export function deleteSession(id: string, profile?: string | null): Promise<{ ok: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean }>({
     ...(profile ? { profile } : {}),

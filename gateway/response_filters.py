@@ -53,6 +53,26 @@ def _canonical_silence_candidates(text: str) -> tuple[str, ...]:
     return (exact, fallback)
 
 
+def _is_bracketish_silence_line(line: str) -> bool:
+    """Autonomous-lane only: recognize a bracket-opened silence sentinel even
+    when the closing bracket is missing/truncated.
+
+    Models running an autonomous tick sometimes emit a bare ``[SILENT`` (no
+    closing bracket) at the very end of a reasoning blob — the whole turn was
+    meant to be silent, but a truncated sentinel defeats the strict matchers and
+    the raw scratchpad gets delivered to Telegram.  A leading ``[`` is required
+    so ordinary prose like ``SILENT retry succeeded`` is unaffected (that word
+    case is already handled — or intentionally excluded — by ``_is_token``).
+    """
+    s = line.strip()
+    if not s.startswith("["):
+        return False
+    inner = s[1:]
+    if inner.endswith("]"):
+        inner = inner[:-1]
+    return _canonical_silence_candidate(inner) in LIVE_GATEWAY_SILENT_MARKERS
+
+
 def is_intentional_silence_response(response: Any) -> bool:
     """Return True only when ``response`` is exactly a silence marker.
 
@@ -108,7 +128,69 @@ def is_autonomous_silence_response(response: Any) -> bool:
     # bare word like "Silent retry succeeded" is NOT swallowed.
     if stripped.upper().startswith("[SILENT]"):
         return True
+    # Truncated/malformed bracket sentinel on the first or last line — a bare
+    # "[SILENT" (no closing bracket) that the model appended to a reasoning
+    # blob it intended to suppress.  Autonomous lane only; the strict
+    # interactive matcher above is unchanged.
+    if lines and (_is_bracketish_silence_line(lines[0]) or _is_bracketish_silence_line(lines[-1])):
+        return True
     return False
+
+
+# ── Human-facing delivery sanitation ─────────────────────────────────────────
+
+import re as _re
+
+# Machine-only trailers the controller-policy skill appends for the sandboxed.sh
+# ingestor (mode/state parse).  They must survive to ingestion on the *local
+# session* path, but must never be shown to a human on a *platform* delivery
+# (Telegram/Discord/…), which is terminal — no ingestor downstream.
+_CTRL_TRAILER_RE = _re.compile(r"\[CTRL:[^\]]*\]", _re.IGNORECASE)
+_STATE_SIG_TRAILER_RE = _re.compile(r"\[STATE_SIGNATURE:[^\]]*\]", _re.IGNORECASE)
+# Narrated tool calls: a model without its real tools echoes "[tool call: X]"
+# followed by a JSON object.  Strip the marker and an immediately-following
+# JSON blob line.
+_TOOL_CALL_MARKER_RE = _re.compile(r"\[tool[_ ]call:[^\]]*\]", _re.IGNORECASE)
+
+
+def sanitize_platform_delivery(text: Any) -> str:
+    """Strip machine-only scaffolding from a human-facing *platform* delivery.
+
+    Removes ``[CTRL: …]``/``[STATE_SIGNATURE: …]`` ingestor trailers, narrated
+    ``[tool call: …]`` markers and any JSON blob line immediately following one.
+    Returns the cleaned text (may be empty — callers should treat an empty
+    result as "nothing substantive to deliver" and suppress).
+
+    Only for terminal platform lanes.  The local-session lane keeps the raw
+    trailers so the sandboxed.sh ingestor can still parse mode/state.
+    """
+    if not isinstance(text, str):
+        return ""
+    cleaned = _CTRL_TRAILER_RE.sub("", text)
+    cleaned = _STATE_SIG_TRAILER_RE.sub("", cleaned)
+    out_lines: list[str] = []
+    drop_next_json = False
+    for line in cleaned.splitlines():
+        marker_hit = bool(_TOOL_CALL_MARKER_RE.search(line))
+        stripped_line = _TOOL_CALL_MARKER_RE.sub("", line).strip()
+        if marker_hit:
+            # If the marker leaves nothing behind, drop the line and arm the
+            # JSON-blob eater for the next line.
+            drop_next_json = True
+            if not stripped_line:
+                continue
+            out_lines.append(stripped_line)
+            continue
+        if drop_next_json:
+            ls = line.strip()
+            if ls.startswith("{") and ('"name"' in ls or '"arguments"' in ls or ls.endswith("}")):
+                continue
+            drop_next_json = False
+        out_lines.append(line)
+    # Collapse the runs of blank lines the stripping may leave behind.
+    result = "\n".join(out_lines)
+    result = _re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
 
 
 def is_intentional_silence_agent_result(agent_result: dict | None, response: Any) -> bool:

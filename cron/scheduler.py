@@ -1831,6 +1831,23 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         return "; ".join(delivery_errors) if delivery_errors else None
     targets = gateway_targets
 
+    # Human-facing platform lanes (Telegram/Discord/…) are terminal — no
+    # sandboxed.sh ingestor downstream — so strip machine-only CTRL/
+    # STATE_SIGNATURE trailers and narrated [tool call: …] scaffolding before
+    # the chat send.  The local-session targets above already received the RAW
+    # content, so mode/state ingestion is unaffected (D1/D2).
+    from gateway.response_filters import sanitize_platform_delivery
+
+    _sanitized = sanitize_platform_delivery(content)
+    if not _sanitized:
+        logger.info(
+            "Job '%s': platform delivery empty after sanitation "
+            "(scaffolding-only) — skipping send",
+            job.get("name", job.get("id", "?")),
+        )
+        return "; ".join(delivery_errors) if delivery_errors else None
+    content = _sanitized
+
     from tools.send_message_tool import _send_to_platform
     from gateway.config import load_gateway_config, Platform
 

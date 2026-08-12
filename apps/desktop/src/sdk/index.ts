@@ -117,6 +117,7 @@ export const host = {
 // commands, routes, themes, panes, composer extensions, and bar items with
 // the same area ids + payload types core uses.
 export { COMPOSER_AREAS, type ComposerAttachmentProvider, type ComposerMiddleware } from '@/app/chat/composer/contrib'
+export { SessionStatusDot } from '@/app/chat/session-status-dot'
 
 // -- ui: the design language --------------------------------------------------
 
@@ -143,7 +144,6 @@ export type { TitlebarTool } from '@/app/shell/titlebar-controls'
  *  `width`/`height`. */
 export type { FloatingAnchor } from '@/components/pane-shell/tree/renderer/floating-rect'
 export { StatusDot, type StatusTone } from '@/components/status-dot'
-export { SessionStatusDot } from '@/app/chat/session-status-dot'
 
 export { Badge } from '@/components/ui/badge'
 export { Button } from '@/components/ui/button'

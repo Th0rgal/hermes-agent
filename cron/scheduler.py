@@ -1327,6 +1327,88 @@ def cron_delivery_targets() -> list[dict]:
     return targets
 
 
+# WebUI and Desktop are local session-store surfaces, not gateway platforms.
+# They must never reach ``gateway.config.Platform(...)``. Tag their targets so
+# ``_deliver_result`` can split them out before the messaging-adapter loop.
+_LOCAL_SESSION_PLATFORMS = frozenset({"desktop", "webui"})
+_LOCAL_SESSION_TARGET_KIND = "local_session"
+
+
+def _local_session_platform(origin: Optional[dict]) -> Optional[str]:
+    if not origin:
+        return None
+    platform_name = str(origin.get("platform", "")).strip().lower()
+    return platform_name if platform_name in _LOCAL_SESSION_PLATFORMS else None
+
+
+def _local_session_delivery_target(
+    platform_name: str,
+    session_id: str,
+    thread_id: Optional[str] = None,
+) -> dict:
+    sid = str(session_id)
+    return {
+        "kind": _LOCAL_SESSION_TARGET_KIND,
+        "platform": platform_name,
+        "chat_id": sid,
+        "session_id": sid,
+        "thread_id": thread_id,
+    }
+
+
+def _resolve_project_route_target(job: dict, project_token: str) -> Optional[dict]:
+    """Resolve ``deliver=project:<id|slug>`` via the durable explicit route store.
+
+    Explicit-or-nothing (see ``hermes_cli/project_routes.py``): when the
+    project has no bound session — or the bound session is gone — the target
+    is dropped and the delivery reports an error. It must NEVER fall back to
+    the currently open Desktop session, the active project, or a platform
+    home channel: that fallback is exactly the misrouting this store exists
+    to prevent. Compression/continuation is handled inside
+    ``resolve_route_target``, which atomically migrates the stored route to
+    the live continuation tip before returning it.
+    """
+    token = (project_token or "").strip()
+    if not token:
+        return None
+    try:
+        from hermes_cli import project_routes as _routes
+        from hermes_cli import projects_db as _pdb
+
+        with _pdb.connect_closing() as conn:
+            target = _routes.resolve_route_target(conn, token)
+    except LookupError as e:
+        logger.warning(
+            "Job '%s': project route unresolved: %s — dropping target "
+            "(explicit routes never fall back to the current Desktop session)",
+            job.get("id", "?"), e,
+        )
+        return None
+    except Exception as e:
+        logger.warning(
+            "Job '%s': project route resolution failed for '%s': %s",
+            job.get("id", "?"), token, e,
+        )
+        return None
+
+    if target.source in _LOCAL_SESSION_PLATFORMS:
+        return _local_session_delivery_target(target.source, target.session_id)
+    if target.source == "api_server":
+        # _deliver_result routes api_server targets through the same durable
+        # local-session append; it just isn't tagged as a local platform.
+        return {
+            "platform": "api_server",
+            "chat_id": target.session_id,
+            "thread_id": None,
+        }
+    logger.warning(
+        "Job '%s': project '%s' routes to session %s with unsupported "
+        "source '%s' — dropping target",
+        job.get("id", "?"), token, target.session_id, target.source,
+    )
+    return None
+
+
 def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[dict]:
     """Resolve one concrete auto-delivery target for a cron job."""
 
@@ -1334,6 +1416,18 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
 
     if deliver_value == "local":
         return None
+
+    explicit_platform, separator, explicit_session_id = deliver_value.partition(":")
+    explicit_platform = explicit_platform.strip().lower()
+    if separator and explicit_platform in _LOCAL_SESSION_PLATFORMS:
+        session_id = explicit_session_id.strip()
+        return (
+            _local_session_delivery_target(explicit_platform, session_id)
+            if session_id
+            else None
+        )
+    if separator and explicit_platform == "project":
+        return _resolve_project_route_target(job, explicit_session_id)
 
     if deliver_value == "origin":
         if origin:

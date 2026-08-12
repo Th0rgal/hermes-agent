@@ -123,7 +123,8 @@ export function SessionStatusDot({ storedSessionId, session, branchStem, classNa
   const r = t.sidebar.row
 
   // Subscribe to the shared color map for reactivity; sessionColorFor falls
-  // back to the resolver for a session outside the recents page.
+  // back to the resolver for a session outside the recents page, and an
+  // id-only call sites use the current session row when one is available.
   useStore($sessionColorById)
   const color = sessionColorFor(session) ?? null
 

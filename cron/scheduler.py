@@ -3247,7 +3247,14 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
     platform_parts: list[str] = []
     for part in deliver_value.split(","):
         part = part.strip()
-        if not part or part.lower() in {"local", "origin", "all"}:
+        # `project:<id|slug>` is a fork routing scheme, NOT a messaging platform:
+        # it resolves to a live SessionDB session via _resolve_project_route_target,
+        # so it must be exempted from the known-platform credential check exactly
+        # like local/origin/all. Without this exemption every controller that
+        # delivers `project:X` fails blocked_config ("platform 'project' is not a
+        # known cron delivery target") — the fork-delta lost in the upstream
+        # migration. [fork-delta]
+        if not part or part.lower() in {"local", "origin", "all"} or part.lower().startswith("project:") or part.lower() == "project":
             continue
         platform_parts.append(part.split(":", 1)[0].strip())
     if not platform_parts:

@@ -132,6 +132,27 @@ async def project_action(
     return {"ok": True, "slug": slug, "action": action}
 
 
+@router.post("/projects/{slug}/rename")
+async def rename_project(
+    slug: str, payload: Dict[str, Any] = Body(default_factory=dict)
+) -> Dict[str, Any]:
+    """Rename a project (its display title). Relays to the sandboxed.sh
+    upsert, which COALESCEs the title — passing only slug+title leaves the
+    project's objective/repository/controller binding untouched.
+    """
+    slug = _clean_slug(slug)
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title must be a non-empty string")
+    # NB: no trailing slash — sandboxed.sh serves the upsert at
+    # `PUT /api/projects` (a trailing-slash `/api/projects/` 404s), so the rename
+    # relay must match it exactly or the desktop sees a 502.
+    await _sandboxed_request(
+        "PUT", "/api/projects", body={"slug": slug, "title": title}
+    )
+    return {"ok": True, "slug": slug, "title": title}
+
+
 @router.post("/projects/{slug}/grant")
 async def update_grant(
     slug: str, payload: Dict[str, Any] = Body(default_factory=dict)

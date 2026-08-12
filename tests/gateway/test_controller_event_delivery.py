@@ -143,7 +143,8 @@ async def test_digest_metadata_carries_ui_roles_and_payloads(router):
 
 @pytest.mark.asyncio
 async def test_system_only_digest_gets_system_role(router):
-    await deliver_controller_events(router, 
+    await deliver_controller_events(
+        router,
         [ReconciliationEvent(kind="route_migrated", subject="alpha", silent=False)],
         TELEGRAM,
         job_id="j1",
@@ -153,7 +154,8 @@ async def test_system_only_digest_gets_system_role(router):
 
 @pytest.mark.asyncio
 async def test_local_target_receives_loud_events_too(router):
-    await deliver_controller_events(router, 
+    await deliver_controller_events(
+        router,
         [UserNotification(text="kept locally")],
         [DeliveryTarget.parse("local")],
         job_id="j1",
@@ -199,7 +201,8 @@ async def test_shared_batcher_does_not_flush_another_call_pending_queue(router):
     queued_elsewhere = UserNotification(text="belongs to another route")
     batcher.add(queued_elsewhere)
 
-    await deliver_controller_events(router, 
+    await deliver_controller_events(
+        router,
         [UserNotification(text="this route only")],
         TELEGRAM,
         job_id="j1",

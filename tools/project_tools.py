@@ -208,5 +208,3 @@ def project_route_clear(project: str, task_id: Optional[str] = None) -> str:
             return json.dumps({"success": False, "error": f"no project matching '{project}'"})
         removed = routes.unbind_route(conn, proj.id)
     return json.dumps({"success": True, "project": proj.slug, "removed": removed})
-
-

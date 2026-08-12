@@ -3,7 +3,7 @@ import { useStore } from '@nanostores/react'
 import { type Translations, useI18n } from '@/i18n'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
-import { $sessionColorById, sessionColorFor } from '@/store/session-color'
+import { $sessionColorById, sessionColorFor, sessionColorForId } from '@/store/session-color'
 import { $sessionDotStateById, type SessionDotState } from '@/store/session-dot-state'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -126,7 +126,7 @@ export function SessionStatusDot({ storedSessionId, session, branchStem, classNa
   // back to the resolver for a session outside the recents page, and an
   // id-only call sites use the current session row when one is available.
   useStore($sessionColorById)
-  const color = sessionColorFor(session) ?? null
+  const color = sessionColorFor(session) ?? sessionColorForId(storedSessionId) ?? null
 
   // Selector, not a plain useStore: the map is rebuilt whenever any session's
   // status changes, but a given dot only repaints when ITS OWN state flips.

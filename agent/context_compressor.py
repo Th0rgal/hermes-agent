@@ -23,7 +23,7 @@ import sqlite3
 import re
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from agent.auxiliary_client import (
     AuxiliaryExplicitCancellation,
@@ -244,6 +244,66 @@ def _strip_persistence_markers(messages: List[Dict[str, Any]]) -> None:
     for msg in messages:
         if isinstance(msg, dict):
             msg.pop(_DB_PERSISTED_MARKER, None)
+
+
+_TOOL_ELISION_MARKER = "[tool output elided to fit context"
+
+
+def elide_bulky_tool_messages(
+    messages: List[Dict[str, Any]],
+    target_tokens: int,
+    *,
+    threshold_chars: int = 6000,
+    keep_head: int = 600,
+    keep_tail: int = 600,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Last-resort Tier-A fallback: truncate the ``content`` of the bulkiest
+    ``role == "tool"`` messages to a head+tail window (with an elision marker)
+    until the request fits ``target_tokens``.
+
+    This is the escape hatch for the "Cannot compress further" dead-end: the
+    normal summariser protects the head/tail and can leave a huge tool_result
+    sitting in a protected turn it cannot touch. We truncate the biggest tool
+    outputs oldest-first, keep the MOST-RECENT tool message intact (the output
+    the agent just acted on), and skip anything already elided so repeated
+    passes converge. Returns ``(messages, tokens_saved_estimate)``; a no-op
+    ``(messages, 0)`` when nothing qualifies.
+    """
+    from agent.model_metadata import estimate_messages_tokens_rough
+
+    total = estimate_messages_tokens_rough(messages)
+    if total <= target_tokens:
+        return messages, 0
+
+    tool_idxs = [i for i, m in enumerate(messages) if isinstance(m, dict) and m.get("role") == "tool"]
+    if not tool_idxs:
+        return messages, 0
+    last_tool = tool_idxs[-1]
+    candidates = [
+        i
+        for i in tool_idxs
+        if i != last_tool
+        and isinstance(messages[i].get("content"), str)
+        and len(messages[i]["content"]) > threshold_chars
+        and _TOOL_ELISION_MARKER not in messages[i]["content"]
+    ]
+    if not candidates:
+        return messages, 0
+
+    result = [dict(m) if isinstance(m, dict) else m for m in messages]
+    for i in candidates:  # ascending index == oldest-first
+        content = result[i].get("content", "")
+        if len(content) <= keep_head + keep_tail:
+            continue
+        result[i]["content"] = (
+            content[:keep_head]
+            + f"\n\n… {_TOOL_ELISION_MARKER}: {len(content):,} chars] …\n\n"
+            + content[-keep_tail:]
+        )
+        if estimate_messages_tokens_rough(result) <= target_tokens:
+            break
+    saved = total - estimate_messages_tokens_rough(result)
+    return (result, saved) if saved > 0 else (messages, 0)
 
 
 def _prune_stale_reasoning_replay(messages: List[Dict[str, Any]]) -> int:

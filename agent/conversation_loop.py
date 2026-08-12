@@ -5360,6 +5360,32 @@ def run_conversation(
                         _retry.restart_with_compressed_messages = True
                         break
                     else:
+                        # Last-resort Tier-A fallback before the dead-end: the
+                        # summariser is exhausted but the request still doesn't
+                        # fit — typically a huge tool_result sitting in a
+                        # PROTECTED head/tail turn the compressor can't touch.
+                        # Elide the bulkiest tool outputs to a head+tail window
+                        # and retry once. Already-elided messages are skipped, so
+                        # this converges and the max_compression_attempts cap
+                        # still bounds the loop.
+                        from agent.context_compressor import elide_bulky_tool_messages
+
+                        _elided_msgs, _elided_saved = elide_bulky_tool_messages(
+                            messages, max(int(old_ctx * 0.9), 1)
+                        )
+                        if _elided_saved > 0:
+                            messages = _elided_msgs
+                            agent._buffer_status(
+                                COMPRESSION_RETRY_TOKENS_STATUS_TEMPLATE.format(
+                                    before=new_tokens,
+                                    after=estimate_messages_tokens_rough(messages),
+                                )
+                            )
+                            agent._persist_session(messages, conversation_history)
+                            time.sleep(2)
+                            _retry.restart_with_compressed_messages = True
+                            break
+
                         # Can't compress further and already at minimum tier
                         agent._flush_status_buffer()
                         agent._vprint(f"{agent.log_prefix}❌ Context length exceeded and cannot compress further.", force=True)

@@ -17,6 +17,7 @@ import {
   $sessionUnreadCounts,
   cn,
   Codicon,
+  ConfirmDialog,
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
@@ -41,6 +42,7 @@ import {
   useQueryClient,
   useValue
 } from '@hermes/plugin-sdk'
+import { useState } from 'react'
 
 import {
   $openProjectSlug,
@@ -52,7 +54,7 @@ import {
   PROJECTS_KEY
 } from './api'
 import { errText } from './board'
-import { SessionColorSwatchesRow, UnreadBadge } from './color-swatches'
+import { RenameProjectDialog, SessionColorSwatchesRow, UnreadBadge } from './color-swatches'
 import { ControllerStatusIcon } from './controller-status'
 import { useBoard } from './i18n'
 
@@ -89,10 +91,14 @@ function useRowActions(project: BoundRow) {
 function RowMenuItems({
   actions,
   kit,
+  onDelete,
+  onRename,
   sessionId
 }: {
   actions: ReturnType<typeof useRowActions>
   kit: 'context' | 'dropdown'
+  onDelete: () => void
+  onRename: () => void
   sessionId: string
 }) {
   const { b, lifecycleLabel, onLifecycle, onOpenCard } = actions
@@ -123,10 +129,22 @@ function RowMenuItems({
         <Codicon name="project" size="0.85rem" />
         {b.openCard}
       </Item>
+      <Item onSelect={onRename}>
+        <Codicon name="edit" size="0.85rem" />
+        {b.renameProject}
+      </Item>
       <Separator />
       <Item onSelect={onLifecycle}>
         <Codicon name="debug-pause" size="0.85rem" />
         {lifecycleLabel}
+      </Item>
+      <Separator />
+      <Item
+        className="text-(--ui-text-danger) data-highlighted:text-(--ui-text-danger)"
+        onSelect={onDelete}
+      >
+        <Codicon name="trash" size="0.85rem" />
+        {b.deleteProject}
       </Item>
     </>
   )
@@ -134,12 +152,22 @@ function RowMenuItems({
 
 function ProjectRowItem({ project }: { project: BoundRow }) {
   const b = useBoard()
+  const qc = useQueryClient()
   const unreadCounts = useValue($sessionUnreadCounts)
   const sessionId = project.conversation.session_id
   const unread = unreadCounts[sessionId] ?? 0
   const actions = useRowActions(project)
+  const [renameOpen, setRenameOpen] = useState(false)
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false)
+
+  const remove = useMutation({
+    mutationFn: () => projectAction(project.slug, 'delete'),
+    onError: err => host.notify({ kind: 'error', message: errText(err) }),
+    onSettled: () => void qc.invalidateQueries({ queryKey: PROJECTS_KEY })
+  })
 
   return (
+    <>
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div className="group/mbrow relative">
@@ -178,15 +206,41 @@ function ProjectRowItem({ project }: { project: BoundRow }) {
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
-              <RowMenuItems actions={actions} kit="dropdown" sessionId={sessionId} />
+              <RowMenuItems
+                actions={actions}
+                kit="dropdown"
+                onDelete={() => setConfirmDeleteOpen(true)}
+                onRename={() => setRenameOpen(true)}
+                sessionId={sessionId}
+              />
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <RowMenuItems actions={actions} kit="context" sessionId={sessionId} />
+        <RowMenuItems
+          actions={actions}
+          kit="context"
+          onDelete={() => setConfirmDeleteOpen(true)}
+          onRename={() => setRenameOpen(true)}
+          sessionId={sessionId}
+        />
       </ContextMenuContent>
     </ContextMenu>
+    <RenameProjectDialog onClose={() => setRenameOpen(false)} open={renameOpen} project={project} />
+    <ConfirmDialog
+      confirmLabel={b.deleteConfirm}
+      description={b.deleteConfirmBody}
+      destructive
+      dismissOnConfirm
+      onClose={() => setConfirmDeleteOpen(false)}
+      onConfirm={async () => {
+        await remove.mutateAsync()
+      }}
+      open={confirmDeleteOpen}
+      title={b.deleteConfirmTitle(project.title?.trim() || project.slug)}
+    />
+    </>
   )
 }
 

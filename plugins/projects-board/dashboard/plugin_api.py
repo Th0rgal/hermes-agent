@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from fastapi import APIRouter, Body, HTTPException, WebSocket, WebSocketDisconnect, status as http_status
 
-from hermes_cli.web_routers.missions import _mint_token, _sandboxed_config, _sandboxed_request
+from plugins.projects.dashboard.plugin_api import _mint_token, _sandboxed_config, _sandboxed_request
 
 _log = logging.getLogger("hermes_cli.web_server")
 

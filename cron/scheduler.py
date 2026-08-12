@@ -13,6 +13,7 @@ import atexit
 import concurrent.futures
 import contextvars
 import json
+import hashlib
 import logging
 import os
 import re
@@ -1747,6 +1748,44 @@ def _is_channel_dm_topic(
     return is_channel
 
 
+def _deliver_to_local_session(
+    job: dict, platform_name: str, session_id: str, content: str
+) -> Optional[str]:
+    """Persist a cron result into the exact Desktop/WebUI session transcript."""
+    text = (content or "").strip()
+    if not text:
+        return None
+    label = job.get("name") or job.get("id") or "cron"
+    delivery_content = f"[Cron delivery: {label}]\n{text}"
+    try:
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            sid = session_id
+            for resolver_name in ("resolve_session_id", "resolve_resume_session_id"):
+                resolver = getattr(db, resolver_name, None)
+                if callable(resolver):
+                    sid = resolver(sid) or sid
+            if not db.get_session(sid):
+                return f"{platform_name} session '{session_id}' not found"
+            delivery_id = (
+                f"cron:{platform_name}:{sid}:{job.get('id', '?')}:"
+                f"{job.get('_delivery_run_id') or job.get('last_run_at') or hashlib.sha256(delivery_content.encode()).hexdigest()}"
+            )
+            if hasattr(db, "has_delivery_receipt") and db.has_delivery_receipt(delivery_id):
+                return None
+            db.append_message(sid, "assistant", delivery_content, observed=True)
+            if hasattr(db, "record_delivery_receipt"):
+                db.record_delivery_receipt(delivery_id, sid, platform_name)
+            return None
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("Job '%s': local session delivery failed: %s", job.get("id", "?"), exc)
+        return str(exc)
+
+
 def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
@@ -1779,6 +1818,18 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         msg = f"no delivery target resolved for deliver={deliver_value}"
         logger.warning("Job '%s': %s", job["id"], msg)
         return msg
+
+    local_targets = [target for target in targets if target.get("kind") == _LOCAL_SESSION_TARGET_KIND]
+    gateway_targets = [target for target in targets if target.get("kind") != _LOCAL_SESSION_TARGET_KIND]
+    delivery_errors = [
+        error for target in local_targets
+        if (error := _deliver_to_local_session(
+            job, target["platform"], target.get("session_id") or target["chat_id"], content
+        ))
+    ]
+    if not gateway_targets:
+        return "; ".join(delivery_errors) if delivery_errors else None
+    targets = gateway_targets
 
     from tools.send_message_tool import _send_to_platform
     from gateway.config import load_gateway_config, Platform
@@ -1832,7 +1883,8 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         logger.error("Job '%s': %s", job["id"], msg)
         return msg
 
-    delivery_errors = []
+    # Errors from local-session targets are retained and combined with any
+    # messaging-platform delivery errors below.
 
     for target in targets:
         platform_name = target["platform"]

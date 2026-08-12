@@ -175,9 +175,9 @@ describe('debounceAttentionNotifications', () => {
 describe('projectPaletteRows', () => {
   it('emits a card row per project and a chat row only when bound, skipping archived', () => {
     const rows = projectPaletteRows([
-      { ...row('verity', 'active'), conversation: { session_id: 's1', source: 'controller' } },
+      { ...row('verity', 'active'), conversation: { session_id: 's1', source: 'binding' } },
       row('paloma', 'paused'),
-      { ...row('old', 'archived'), conversation: { session_id: 's2', source: 'controller' } }
+      { ...row('old', 'archived'), conversation: { session_id: 's2', source: 'binding' } }
     ])
 
     expect(rows).toEqual([

@@ -27,6 +27,7 @@ import { type ReactNode, useEffect, useState } from 'react'
 import {
   fetchProject,
   fetchProjectState,
+  isBoundConversation,
   type MissionChip,
   type ProjectGrant,
   projectKey,
@@ -267,7 +268,7 @@ export function ProjectDrawer({
                 {project.repository && <MetaRow label={b.repository}>{project.repository}</MetaRow>}
               </div>
 
-              {conversation?.session_id && (
+              {isBoundConversation(conversation) && (
                 <Section label={b.conversation}>
                   <button
                     className="flex items-center gap-1.5 self-start rounded border border-(--ui-stroke-tertiary) px-2 py-1 text-[0.71rem] text-(--ui-text-secondary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground"

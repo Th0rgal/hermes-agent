@@ -23,7 +23,7 @@ afterEach(() => {
 const row = (slug: string, bucket: string, sessionId?: string): ProjectRow => ({
   attention_reasons: bucket === 'attention' ? ['blocked on CI'] : [],
   bucket,
-  conversation: sessionId ? { session_id: sessionId, source: 'controller' } : null,
+  conversation: sessionId ? { session_id: sessionId, source: 'binding' } : null,
   latest_update: null,
   missions: [],
   slug

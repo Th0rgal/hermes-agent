@@ -97,6 +97,15 @@ export interface ProjectDetail {
   tracks?: TrackHealth[]
 }
 
+/** Only an explicit binding is a writable Desktop conversation.  The
+ * `latest_update` fallback is usually a one-shot cron/webhook session and must
+ * never be offered as a chat target. */
+export function isBoundConversation(
+  conversation?: { session_id: string; source: string } | null
+): conversation is { session_id: string; source: 'binding' } {
+  return conversation?.source === 'binding' && Boolean(conversation.session_id)
+}
+
 export interface ProjectState {
   first_seen_at?: null | string
   headline: string
@@ -270,7 +279,7 @@ export function projectPaletteRows(projects: ProjectRow[], cap = 20): ProjectPal
     .slice(0, cap)
     .flatMap(p => {
       const rows: ProjectPaletteRow[] = []
-      const sessionId = p.conversation?.session_id
+      const sessionId = isBoundConversation(p.conversation) ? p.conversation.session_id : undefined
 
       if (sessionId) {
         rows.push({ kind: 'chat', sessionId, slug: p.slug })

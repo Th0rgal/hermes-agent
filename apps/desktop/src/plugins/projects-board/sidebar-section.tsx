@@ -48,6 +48,7 @@ import {
   type ProjectAction,
   projectAction,
   type ProjectRow,
+  isBoundConversation,
   PROJECTS_KEY
 } from './api'
 import { errText } from './board'
@@ -57,7 +58,7 @@ import { useBoard } from './i18n'
 type BoundRow = ProjectRow & { conversation: { session_id: string } }
 
 function hasBinding(project: ProjectRow): project is BoundRow {
-  return project.bucket !== 'archived' && Boolean(project.conversation?.session_id)
+  return project.bucket !== 'archived' && isBoundConversation(project.conversation)
 }
 
 /** The row's action set, rendered through either Radix kit (⋯ dropdown and

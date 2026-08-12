@@ -44,6 +44,7 @@ import {
   BOARD_BUCKETS,
   bucketAction,
   fetchProjects,
+  isBoundConversation,
   liveMissions,
   type MissionChip,
   moveProject,
@@ -237,7 +238,8 @@ function Card({
   // The bound conversation's resolved color owns the left edge — instant
   // project ↔ session matching against the sidebar; bucket tone is the
   // fallback for unbound/colorless projects.
-  const sessionTone = project.conversation?.session_id ? sessionColorForId(project.conversation.session_id) : undefined
+  const boundConversation = isBoundConversation(project.conversation) ? project.conversation : null
+  const sessionTone = boundConversation ? sessionColorForId(boundConversation.session_id) : undefined
   const update = project.latest_update
   const updateAgo = ago(update?.at)
   const draggable = project.bucket !== 'attention'
@@ -275,14 +277,14 @@ function Card({
           <div className="flex min-w-0 items-center gap-1.5">
             {/* The bound conversation's dot — the exact color/status primitive
                 the sidebar renders, so project ↔ session link visually. */}
-            {project.conversation?.session_id && (
-              <SessionStatusDot storedSessionId={project.conversation.session_id} />
+            {boundConversation && (
+              <SessionStatusDot storedSessionId={boundConversation.session_id} />
             )}
             <span className="min-w-0 flex-1 truncate text-[0.75rem] font-medium leading-snug text-foreground">
               {project.slug}
             </span>
-            {project.conversation?.session_id && (
-              <UnreadBadge count={unreadCounts[project.conversation.session_id] ?? 0} />
+            {boundConversation && (
+              <UnreadBadge count={unreadCounts[boundConversation.session_id] ?? 0} />
             )}
           </div>
           {/* Mode + relative time share one row — no per-line sprawl. */}
@@ -324,14 +326,14 @@ function Card({
           <Codicon name="link-external" size="0.85rem" />
           {b.openProject}
         </ContextMenuItem>
-        {project.conversation?.session_id && (
+        {boundConversation && (
           <ContextMenuSub>
             <ContextMenuSubTrigger>
               <Codicon name="symbol-color" size="0.85rem" />
               {b.setColor}
             </ContextMenuSubTrigger>
             <ContextMenuSubContent className="p-2">
-              <SessionColorSwatchesRow sessionId={project.conversation.session_id} />
+              <SessionColorSwatchesRow sessionId={boundConversation.session_id} />
             </ContextMenuSubContent>
           </ContextMenuSub>
         )}

@@ -4789,8 +4789,40 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         self._execute_write(_do)
 
     def reopen_session(self, session_id: str) -> None:
-        """Clear ended_at/end_reason so a session can be resumed."""
+        """Clear ended_at/end_reason so a session can be resumed.
+
+        Refuses (no-ops) when the row is a compression-rotated parent that
+        already has a continuation child (non-branch/non-delegate/non-tool):
+        reopening such a parent both re-arms ``publish_compression_child`` on
+        it — the next compression would fork a SIBLING of the real
+        continuation — and erases the ``'compression'`` marker that
+        ``get_compression_tip`` / ``find_live_compression_child`` / stale-agent
+        recovery depend on. Callers must resolve to the lineage tip (e.g.
+        ``resolve_resume_session_id``) and reopen that instead.
+        """
         def _do(conn):
+            row = conn.execute(
+                "SELECT end_reason FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is not None and row["end_reason"] == "compression":
+                child = conn.execute(
+                    """SELECT 1 FROM sessions
+                       WHERE parent_session_id = ?
+                         AND json_extract(COALESCE(model_config, '{}'), '$._branched_from') IS NULL
+                         AND json_extract(COALESCE(model_config, '{}'), '$._delegate_from') IS NULL
+                         AND COALESCE(source, '') != 'tool'
+                       LIMIT 1""",
+                    (session_id,),
+                ).fetchone()
+                if child is not None:
+                    logger.info(
+                        "reopen_session refused for %s: compression-rotated "
+                        "parent with a continuation child — resolve to the "
+                        "lineage tip and reopen that instead",
+                        session_id,
+                    )
+                    return
             conn.execute(
                 "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?",
                 (session_id,),
@@ -8582,31 +8614,31 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         If no descendant (including the starting session) has any messages,
         the original ``session_id`` is returned unchanged.
 
-        The chain is always walked via the child whose ``started_at`` is
-        latest; that matches the single-chain shape that compression creates.
-        A depth cap (32) guards against accidental loops in malformed data.
+        The chain is walked with the same deterministic per-hop preference as
+        the delivery resolver (compression-chain child, then live child, then
+        most recently active); "has messages" only acts as a tiebreak within
+        that ordering, never as the primary selector. A depth cap (32) guards
+        against accidental loops in malformed data.
         """
         if not session_id:
             return session_id
 
-        # Follow the compression-continuation chain forward to the live tip
-        # FIRST. Auto-compression ends the current session and forks a
-        # continuation child, but a long-lived parent keeps its own flushed
-        # message rows — so the empty-head walk below never redirects it, and
-        # resuming the parent id reloads the pre-compression transcript while
-        # the turns generated *after* compression (and their responses) sit in
-        # the continuation. ``get_compression_tip`` is lineage-aware: it only
-        # follows children whose parent ended with ``end_reason='compression'``
-        # (created after the parent was ended), so delegation / branch children
-        # never hijack the resume. This is the fix for the desktop "I came back
-        # and the reply isn't there" report on large sessions.
-        try:
-            tip = self.get_compression_tip(session_id)
-        except Exception:
-            tip = session_id
-        if tip and tip != session_id:
-            session_id = tip
-
+        # Single forward walk with the SAME per-hop ordering as the shared
+        # delivery resolver (``_walk_delivery_tip``): prefer a child that
+        # itself continued the compression chain, then a still-live child,
+        # then the most recently active one. Unlike the retired
+        # ``get_compression_tip`` pre-step this does NOT require the parent's
+        # ``end_reason='compression'`` marker — end-marker races and
+        # ``reopen_session`` can strip it, and the old started_at-DESC
+        # fallback then descended into a stale empty sibling and bounced the
+        # resume back to the root, arming the sibling-fork loop (the
+        # verity/lido lineages: submits on the reopened root re-compress and
+        # publish new SIBLINGS of the real continuation). "Has messages" is
+        # only the tiebreak along the walked path — the deepest node with
+        # messages wins, so a long-lived parent that kept its flushed rows is
+        # still projected forward to the continuation that holds the
+        # post-compression turns, while an empty stale leaf never captures
+        # the resume away from the transcript.
         with self._lock:
             current = session_id
             seen = {current}
@@ -8624,20 +8656,30 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 if row is not None:
                     best = current
 
-                # Walk to the most-recently-started child — but skip explicit
+                # Walk to the preferred continuation child — skip explicit
                 # branch (`_branched_from`), delegate/subagent (`_delegate_from`),
                 # and tool children. They also carry a ``parent_session_id`` yet
                 # are NOT compression continuations; following them would hijack
                 # the resume target to an unrelated session (e.g. a subagent
-                # run). This mirrors the child-exclusion in ``get_compression_tip``.
+                # run). The per-hop ordering matches ``_walk_delivery_tip``
+                # (compression-chain child, then live child, then most recently
+                # active) so this tiebreak walk can never diverge onto a stale
+                # sibling the delivery resolver would not pick.
                 try:
                     child_row = self._conn.execute(
-                        "SELECT id FROM sessions "
+                        f"SELECT id FROM sessions "
                         "WHERE parent_session_id = ? "
                         "  AND json_extract(COALESCE(model_config, '{}'), '$._branched_from') IS NULL "
                         "  AND json_extract(COALESCE(model_config, '{}'), '$._delegate_from') IS NULL "
                         "  AND COALESCE(source, '') != 'tool' "
-                        "ORDER BY started_at DESC, id DESC LIMIT 1",
+                        "ORDER BY "
+                        "  CASE "
+                        "    WHEN end_reason = 'compression' THEN 0 "
+                        "    WHEN ended_at IS NULL THEN 1 "
+                        "    ELSE 2 "
+                        "  END, "
+                        f"  {_sql_session_last_active('sessions')} DESC, "
+                        "  started_at DESC, id DESC LIMIT 1",
                         (current,),
                     ).fetchone()
                 except Exception:

@@ -54,11 +54,21 @@ export interface ProjectRow {
   attention_reasons: string[]
   bucket: string
   conversation?: { session_id: string; source: string } | null
+  /** The roster record's controller↔project link, when declared. */
+  controller_cron_id?: null | string
+  /** Honesty read-model axes (server-authoritative, from sandboxed.sh). */
+  controller_health?: 'healthy' | 'missing' | 'stale' | null
+  delivery_health?: 'dropped' | 'misrouted' | 'reaching_user' | null
   health?: ProjectHealth
   latest_update: DeliveryUpdate | null
   missions: MissionChip[]
+  /** The controller-reported mode (`active`/`blocked`/`paused`[:cause]). */
+  mode?: null | string
   /** Not in today's overview payload — rendered when the backend adds it. */
   next_action?: null | string
+  /** The operator's board override (`paused`/`archived`), when set. */
+  override?: null | string
+  progress_state?: 'blocked' | 'waiting_external' | 'working' | null
   slug: string
   /** The roster's display title (humanized slug fallback), served by
    *  sandboxed.sh; surfaces render it instead of the raw slug when present. */
@@ -355,6 +365,74 @@ export function projectMode(project: ProjectRow): { base: string; cause: null | 
   const cause = rest.join(':').trim()
 
   return { base, cause: cause.length > 0 ? cause : null }
+}
+
+// ── controller status (pure — unit-tested) ───────────────────────────────────
+
+/** How long without a controller signal before it reads as stale (2h). */
+export const STALE_CONTROLLER_MS = 2 * 60 * 60 * 1000
+
+/** Why a project's controller icon is showing. `degraded` is the
+ *  server-authoritative honesty signal (the controller is gone or its output
+ *  is not reaching a durable conversation); the others are client-derived from
+ *  the operator override, the controller's own mode, or signal staleness. */
+export type ControllerStop =
+  | { kind: 'degraded'; reason: 'dropped' | 'misrouted' | 'missing' }
+  | { cause: null | string; kind: 'self-stopped' }
+  | { kind: 'never-engaged' }
+  | { kind: 'operator-paused' }
+  | { kind: 'stale'; lastAt: number }
+
+/** Decide WHO/what stopped a project's controller. Server honesty axes
+ *  (`controller_health`/`delivery_health`, computed by sandboxed.sh from the
+ *  controller link + signal freshness + delivery route) win over the older
+ *  client-side derivation; active + reaching-user controllers return null. */
+export function controllerStop(project: ProjectRow, now = Date.now()): ControllerStop | null {
+  if (project.override === 'paused') {
+    return { kind: 'operator-paused' }
+  }
+  if (project.override) {
+    // Archived by the operator — the lifecycle column already says it all.
+    return null
+  }
+
+  // Server-authoritative: an active project whose engine is gone, or whose
+  // output does not reach a durable conversation, is degraded — the honest
+  // replacement for a lying "active".
+  if (project.controller_health === 'missing') {
+    return { kind: 'degraded', reason: 'missing' }
+  }
+  if (project.delivery_health === 'dropped') {
+    return { kind: 'degraded', reason: 'dropped' }
+  }
+  if (project.delivery_health === 'misrouted') {
+    return { kind: 'degraded', reason: 'misrouted' }
+  }
+
+  const raw = project.mode ?? project.latest_update?.mode
+  if (raw) {
+    const [base, ...rest] = raw.trim().toLowerCase().split(':')
+    if (base === 'paused' || base === 'blocked') {
+      const cause = rest.join(':').trim() || project.latest_update?.blocker?.trim() || null
+
+      return { cause, kind: 'self-stopped' }
+    }
+  }
+
+  const at = project.latest_update?.at
+  const lastAt = at ? Date.parse(at) : Number.NaN
+  if (project.controller_health === 'stale' || (!Number.isNaN(lastAt) && now - lastAt > STALE_CONTROLLER_MS)) {
+    return { kind: 'stale', lastAt }
+  }
+
+  // Declares a controller but never reported a mode and never posted an update:
+  // it never engaged (looks active, nothing runs). No link at all = deliberately
+  // unmanaged → no icon.
+  if (project.controller_cron_id && !raw && Number.isNaN(lastAt)) {
+    return { kind: 'never-engaged' }
+  }
+
+  return null
 }
 
 // ── card chip selection (pure — unit-tested) ─────────────────────────────────

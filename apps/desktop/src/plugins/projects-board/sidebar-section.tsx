@@ -53,6 +53,7 @@ import {
 } from './api'
 import { errText } from './board'
 import { SessionColorSwatchesRow, UnreadBadge } from './color-swatches'
+import { ControllerStatusIcon } from './controller-status'
 import { useBoard } from './i18n'
 
 type BoundRow = ProjectRow & { conversation: { session_id: string } }
@@ -152,7 +153,8 @@ function ProjectRowItem({ project }: { project: BoundRow }) {
           >
             {/* Same dot the sidebar's own rows render — same resolved color. */}
             <SessionStatusDot storedSessionId={sessionId} />
-            <span className="min-w-0 flex-1 truncate">{project.slug}</span>
+            <span className="min-w-0 flex-1 truncate">{project.title?.trim() || project.slug}</span>
+            <ControllerStatusIcon project={project} />
             <UnreadBadge count={unread} />
             {project.bucket === 'attention' && (
               <Tip label={project.attention_reasons[0] ?? b.col.attention.label}>

@@ -59,6 +59,7 @@ import {
   selectChips
 } from './api'
 import { RenameProjectDialog, SessionColorSwatchesRow, SteerInput, UnreadBadge } from './color-swatches'
+import { ControllerStatusIcon } from './controller-status'
 import { ProjectDrawer } from './drawer'
 import { type BoardText, bucketHelp, bucketLabel, useBoard } from './i18n'
 
@@ -288,6 +289,7 @@ function Card({
             <span className="min-w-0 flex-1 truncate text-[0.75rem] font-medium leading-snug text-foreground">
               {project.title?.trim() || project.slug}
             </span>
+            <ControllerStatusIcon project={project} />
             {boundConversation && (
               <UnreadBadge count={unreadCounts[boundConversation.session_id] ?? 0} />
             )}

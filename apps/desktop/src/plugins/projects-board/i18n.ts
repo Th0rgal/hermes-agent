@@ -34,6 +34,11 @@ type BoardMessages = {
   deleteConfirm: string
   deleteConfirmBody: string
   deleteConfirmTitle: (name: string) => string
+  pausedByYou: string
+  controllerStopped: (cause: string) => string
+  controllerSilent: (since: string) => string
+  controllerNeverEngaged: string
+  controllerDegraded: (reason: 'dropped' | 'misrouted' | 'missing') => string
   expand: (label: string) => string
   collapse: (label: string) => string
   colEmpty: string
@@ -127,6 +132,16 @@ const en: BoardMessages = {
   deleteConfirm: 'Delete',
   deleteConfirmBody: 'Removes the project from the board. Its missions and history are kept.',
   deleteConfirmTitle: name => `Delete “${name}”?`,
+  pausedByYou: 'Paused by you',
+  controllerStopped: cause => (cause ? `Controller stopped itself: ${cause}` : 'Controller stopped itself'),
+  controllerSilent: since => `Controller silent since ${since}`,
+  controllerNeverEngaged: 'Controller attached but never engaged — nothing has run yet',
+  controllerDegraded: reason =>
+    reason === 'missing'
+      ? 'Active, but no controller is running — nothing drives this project'
+      : reason === 'dropped'
+        ? 'Controller output is reaching no conversation'
+        : 'Controller output lands in a throwaway session, not the project conversation',
   expand: label => `Expand ${label}`,
   collapse: label => `Collapse ${label}`,
   colEmpty: 'Empty',

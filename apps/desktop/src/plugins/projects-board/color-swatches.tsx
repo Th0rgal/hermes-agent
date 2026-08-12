@@ -9,17 +9,19 @@
 import {
   $sessionColorOverrides,
   ColorSwatches,
+  ConfirmDialog,
   host,
   Input,
   PROFILE_SWATCHES,
   sessionDurableId,
   setSessionColorOverride,
   useMutation,
+  useQueryClient,
   useValue
 } from '@hermes/plugin-sdk'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
-import { steerMission } from './api'
+import { PROJECTS_KEY, renameProject, steerMission } from './api'
 import { useBoard } from './i18n'
 
 // Local copy of board.tsx's errText (importing it would cycle board ↔ here).
@@ -115,6 +117,59 @@ export function SessionColorSwatchesRow({ sessionId }: { sessionId: string }) {
       onChange={color => setSessionColorOverride(durableId, color)}
       swatches={PROFILE_SWATCHES}
       value={overrides[durableId] ?? null}
+    />
+  )
+}
+
+/** Rename a project's display title from the board card / sidebar menu. Reuses
+ *  the shared ConfirmDialog with an Input as its body; the /rename relay PUTs
+ *  the sandboxed.sh upsert with just {slug,title} (COALESCEd), so the project's
+ *  objective/repository/controller binding are untouched. */
+export function RenameProjectDialog({
+  onClose,
+  open,
+  project
+}: {
+  onClose: () => void
+  open: boolean
+  project: { slug: string; title?: null | string }
+}) {
+  const b = useBoard()
+  const queryClient = useQueryClient()
+  const current = project.title?.trim() || project.slug
+  const [title, setTitle] = useState(current)
+
+  // Reset the field to the project's current name each time the dialog opens
+  // (the dialog instance is reused across opens on a toggled `open` prop).
+  useEffect(() => {
+    if (open) {
+      setTitle(current)
+    }
+  }, [open, current])
+
+  return (
+    <ConfirmDialog
+      confirmLabel={b.renameConfirm}
+      description={
+        <Input
+          autoFocus
+          onChange={event => setTitle(event.target.value)}
+          placeholder={b.renamePlaceholder}
+          value={title}
+        />
+      }
+      dismissOnConfirm
+      onClose={onClose}
+      onConfirm={async () => {
+        const next = title.trim()
+        if (!next || next === current) {
+          return
+        }
+        await renameProject(project.slug, next)
+        await queryClient.invalidateQueries({ queryKey: PROJECTS_KEY })
+      }}
+      open={open}
+      title={b.renameProjectTitle(current)}
     />
   )
 }

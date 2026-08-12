@@ -26,6 +26,14 @@ type BoardMessages = {
   attentionLocked: string
   moveTo: (label: string) => string
   openProject: string
+  renameProject: string
+  renameConfirm: string
+  renamePlaceholder: string
+  renameProjectTitle: (current: string) => string
+  deleteProject: string
+  deleteConfirm: string
+  deleteConfirmBody: string
+  deleteConfirmTitle: (name: string) => string
   expand: (label: string) => string
   collapse: (label: string) => string
   colEmpty: string
@@ -111,6 +119,14 @@ const en: BoardMessages = {
   attentionLocked: 'Attention is computed from project health — resolve the reasons, don’t drag them away.',
   moveTo: label => `Move to ${label}`,
   openProject: 'Open',
+  renameProject: 'Rename…',
+  renameConfirm: 'Rename',
+  renamePlaceholder: 'Project name',
+  renameProjectTitle: current => `Rename “${current}”`,
+  deleteProject: 'Delete…',
+  deleteConfirm: 'Delete',
+  deleteConfirmBody: 'Removes the project from the board. Its missions and history are kept.',
+  deleteConfirmTitle: name => `Delete “${name}”?`,
   expand: label => `Expand ${label}`,
   collapse: label => `Collapse ${label}`,
   colEmpty: 'Empty',

@@ -13,6 +13,7 @@ import {
   Button,
   cn,
   Codicon,
+  ConfirmDialog,
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
@@ -57,7 +58,7 @@ import {
   type ProjectsResponse,
   selectChips
 } from './api'
-import { SessionColorSwatchesRow, SteerInput, UnreadBadge } from './color-swatches'
+import { RenameProjectDialog, SessionColorSwatchesRow, SteerInput, UnreadBadge } from './color-swatches'
 import { ProjectDrawer } from './drawer'
 import { type BoardText, bucketHelp, bucketLabel, useBoard } from './i18n'
 
@@ -226,8 +227,11 @@ function Card({
   project: ProjectRow
 }) {
   const b = useBoard()
+  const queryClient = useQueryClient()
   const [dragging, setDragging] = useState(false)
   const [steerId, setSteerId] = useState<null | string>(null)
+  const [renameOpen, setRenameOpen] = useState(false)
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false)
   const unreadCounts = useValue($sessionUnreadCounts)
   // Subscribe to the shared color map so the border repaints with the session.
   useValue($sessionColorById)
@@ -245,6 +249,7 @@ function Card({
   const draggable = project.bucket !== 'attention'
 
   return (
+    <>
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div
@@ -281,7 +286,7 @@ function Card({
               <SessionStatusDot storedSessionId={boundConversation.session_id} />
             )}
             <span className="min-w-0 flex-1 truncate text-[0.75rem] font-medium leading-snug text-foreground">
-              {project.slug}
+              {project.title?.trim() || project.slug}
             </span>
             {boundConversation && (
               <UnreadBadge count={unreadCounts[boundConversation.session_id] ?? 0} />
@@ -338,14 +343,41 @@ function Card({
           </ContextMenuSub>
         )}
         <ContextMenuSeparator />
+        <ContextMenuItem onSelect={() => setRenameOpen(true)}>
+          <Codicon name="edit" size="0.85rem" />
+          {b.renameProject}
+        </ContextMenuItem>
         {BOARD_BUCKETS.filter(name => bucketAction(project.bucket, name) !== null).map(name => (
           <ContextMenuItem key={name} onSelect={() => onMove(project.slug, name)}>
             <span className="size-2 rounded-full" style={{ backgroundColor: bucketTone(name) }} />
             {b.moveTo(bucketLabel(b, name))}
           </ContextMenuItem>
         ))}
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          className="text-(--ui-text-danger) data-highlighted:text-(--ui-text-danger)"
+          onSelect={() => setConfirmDeleteOpen(true)}
+        >
+          <Codicon name="trash" size="0.85rem" />
+          {b.deleteProject}
+        </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
+    <RenameProjectDialog onClose={() => setRenameOpen(false)} open={renameOpen} project={project} />
+    <ConfirmDialog
+      confirmLabel={b.deleteConfirm}
+      description={b.deleteConfirmBody}
+      destructive
+      dismissOnConfirm
+      onClose={() => setConfirmDeleteOpen(false)}
+      onConfirm={async () => {
+        await projectAction(project.slug, 'delete')
+        await queryClient.invalidateQueries({ queryKey: PROJECTS_KEY })
+      }}
+      open={confirmDeleteOpen}
+      title={b.deleteConfirmTitle(project.title?.trim() || project.slug)}
+    />
+    </>
   )
 }
 

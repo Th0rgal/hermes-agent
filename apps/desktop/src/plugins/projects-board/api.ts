@@ -60,6 +60,9 @@ export interface ProjectRow {
   /** Not in today's overview payload — rendered when the backend adds it. */
   next_action?: null | string
   slug: string
+  /** The roster's display title (humanized slug fallback), served by
+   *  sandboxed.sh; surfaces render it instead of the raw slug when present. */
+  title?: null | string
   updates_count?: number
 }
 
@@ -307,10 +310,15 @@ export const fetchProjectState = (slug: string, limit = 20) =>
 
 // ── writes ───────────────────────────────────────────────────────────────────
 
-export type ProjectAction = 'archive' | 'pause' | 'resume' | 'unarchive'
+export type ProjectAction = 'archive' | 'delete' | 'pause' | 'resume' | 'unarchive'
 
 export const projectAction = (slug: string, action: ProjectAction) =>
   call(`/projects/${encodeURIComponent(slug)}/action`, { body: { action }, method: 'POST' })
+
+/** Rename a project's display title. Relays to the sandboxed.sh upsert (which
+ *  COALESCEs the title), leaving objective/repository/controller untouched. */
+export const renameProject = (slug: string, title: string) =>
+  call(`/projects/${encodeURIComponent(slug)}/rename`, { body: { title }, method: 'POST' })
 
 export const saveGrant = (slug: string, patch: Record<string, unknown>) =>
   call<{ grant: ProjectGrant }>(`/projects/${encodeURIComponent(slug)}/grant`, { body: patch, method: 'POST' })

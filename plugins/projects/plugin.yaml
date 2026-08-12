@@ -1,0 +1,16 @@
+name: projects
+version: 0.1.0
+description: "Desktop Projects (named workspaces) + explicit project→session routing. Registers the project_* MCP tools from a plugin instead of the builtin tool registry, so the fork's tool wiring lives behind register(ctx)."
+author: NousResearch
+kind: standalone
+platforms:
+  - linux
+  - macos
+  - windows
+provides_tools:
+  - project_list
+  - project_create
+  - project_switch
+  - project_route_set
+  - project_route_get
+  - project_route_clear

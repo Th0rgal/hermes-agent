@@ -3983,6 +3983,36 @@ class TestDisplayMetadataPersistence:
         assert reloaded[0]["display_kind"] == "async_delegation_complete"
         assert reloaded[0]["display_metadata"] == meta
 
+    def test_marks_complete_intentional_silence_turn_for_display_only(self, db):
+        db.create_session("s1", source="gateway")
+        db.append_message("s1", "user", "visible question")
+        db.append_message("s1", "assistant", "visible answer")
+        db.append_message("s1", "user", "mission callback")
+        db.append_message(
+            "s1", "assistant", "", tool_calls=[{
+                "id": "tc-1",
+                "type": "function",
+                "function": {"name": "get_mission_digest", "arguments": "{}"},
+            }],
+        )
+        db.append_message(
+            "s1", "tool", "digest", tool_call_id="tc-1",
+            tool_name="get_mission_digest",
+        )
+        db.append_message("s1", "assistant", "[SILENT]")
+
+        assert db.mark_latest_intentional_silence_turn("s1", "[SILENT]") == 4
+
+        rows = db.get_messages_as_conversation("s1")
+        assert [row.get("display_kind") for row in rows] == [
+            None, None, "intentional_silence", "intentional_silence",
+            "intentional_silence", "intentional_silence",
+        ]
+        assert [row["content"] for row in rows] == [
+            "visible question", "visible answer", "mission callback", "",
+            "digest", "[SILENT]",
+        ]
+
 
 
 class TestDisplayMetadataReadPaths:

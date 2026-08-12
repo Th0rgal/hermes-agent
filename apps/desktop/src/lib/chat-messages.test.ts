@@ -59,6 +59,56 @@ describe('toChatMessages', () => {
     expect(chatMessageText(messages[0])).toBe('Planning.Done.')
   })
 
+  it('hides a durably marked intentional-silence turn', () => {
+    const messages = toChatMessages([
+      { role: 'user', content: 'visible question', timestamp: 1 },
+      { role: 'assistant', content: 'visible answer', timestamp: 2 },
+      { role: 'user', content: 'mission callback', display_kind: 'intentional_silence', timestamp: 3 },
+      {
+        role: 'assistant',
+        content: '',
+        display_kind: 'intentional_silence',
+        timestamp: 4,
+        tool_calls: [{ id: 'tc', function: { name: 'get_mission_digest', arguments: '{}' } }]
+      },
+      {
+        role: 'tool',
+        content: 'digest',
+        display_kind: 'intentional_silence',
+        tool_call_id: 'tc',
+        timestamp: 5
+      },
+      { role: 'assistant', content: '[SILENT]', display_kind: 'intentional_silence', timestamp: 6 }
+    ])
+
+    expect(messages.map(chatMessageText)).toEqual(['visible question', 'visible answer'])
+  })
+
+  it('hides legacy unmarked silence turns without matching prose mentions', () => {
+    const messages = toChatMessages([
+      { role: 'user', content: 'A sandboxed.sh mission changed status.', timestamp: 1 },
+      {
+        role: 'assistant',
+        content: '',
+        timestamp: 2,
+        tool_calls: [{ id: 'tc', function: { name: 'get_mission_digest', arguments: '{}' } }]
+      },
+      { role: 'tool', content: 'digest', tool_call_id: 'tc', timestamp: 3 },
+      { role: 'assistant', content: '[SILENT]', timestamp: 4 },
+      { role: 'user', content: 'what happened?', timestamp: 5 },
+      { role: 'assistant', content: 'The prior response was [SILENT], intentionally.', timestamp: 6 },
+      { role: 'user', content: 'ordinary question', timestamp: 7 },
+      { role: 'assistant', content: '[SILENT]', timestamp: 8 }
+    ])
+
+    expect(messages.map(chatMessageText)).toEqual([
+      'what happened?',
+      'The prior response was [SILENT], intentionally.',
+      'ordinary question',
+      '[SILENT]'
+    ])
+  })
+
   it('keeps assistant tool-call iterations in one loaded assistant bubble', () => {
     const messages = toChatMessages([
       { role: 'user', content: 'check this repo', timestamp: 1 },

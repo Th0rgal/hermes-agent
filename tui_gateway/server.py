@@ -7137,8 +7137,33 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
     messages = []
     tool_call_args = {}
 
-    for m in history:
+    # Compatibility for transcripts written before intentional-silence turns
+    # gained durable display metadata.  Omit the triggering user row and all
+    # intermediate tool activity through the exact silence marker.
+    from gateway.response_filters import is_intentional_silence_response
+
+    legacy_silent_indices: set[int] = set()
+    turn_start: int | None = None
+    for index, item in enumerate(history):
+        if not isinstance(item, dict):
+            continue
+        if item.get("role") == "user":
+            turn_start = index
+        if (
+            item.get("role") == "assistant"
+            and is_intentional_silence_response(
+                _coerce_message_text(item.get("content"))
+            )
+        ):
+            start = turn_start if turn_start is not None else index
+            trigger = _coerce_message_text(history[start].get("content"))
+            if "sandboxed.sh mission changed status" in trigger.lower():
+                legacy_silent_indices.update(range(start, index + 1))
+
+    for index, m in enumerate(history):
         if not isinstance(m, dict):
+            continue
+        if index in legacy_silent_indices:
             continue
         role = m.get("role")
         if role not in {"user", "assistant", "tool", "system"}:
@@ -7148,7 +7173,7 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
         # sniff below only catches the "[System:" convention; honor the
         # declared field too, or scaffolding reaches every surface that reads
         # this projection.
-        if m.get("display_kind") == "hidden":
+        if m.get("display_kind") in {"hidden", "intentional_silence"}:
             continue
         content_text = _coerce_message_text(m.get("content"))
         if _is_display_hidden_marker(role, content_text):

@@ -2402,6 +2402,59 @@ def test_history_to_messages_drops_display_hidden_scaffolding():
     assert all("api_content" not in m for m in projected)
 
 
+def test_history_to_messages_drops_intentional_silence_turns():
+    history = [
+        {"role": "user", "content": "visible question"},
+        {"role": "assistant", "content": "visible answer"},
+        {
+            "role": "user", "content": "mission callback",
+            "display_kind": "intentional_silence",
+        },
+        {
+            "role": "assistant", "content": "", "tool_calls": [{
+                "id": "tc-1",
+                "function": {"name": "get_mission_digest", "arguments": "{}"},
+            }], "display_kind": "intentional_silence",
+        },
+        {
+            "role": "tool", "content": "digest", "tool_call_id": "tc-1",
+            "display_kind": "intentional_silence",
+        },
+        {
+            "role": "assistant", "content": "[SILENT]",
+            "display_kind": "intentional_silence",
+        },
+    ]
+
+    assert server._history_to_messages(history) == [
+        {"role": "user", "text": "visible question"},
+        {"role": "assistant", "text": "visible answer"},
+    ]
+
+
+def test_history_to_messages_drops_legacy_unmarked_silence_turn():
+    history = [
+        {"role": "user", "content": "visible question"},
+        {"role": "assistant", "content": "visible answer"},
+        {"role": "user", "content": "A sandboxed.sh mission changed status."},
+        {"role": "assistant", "content": "", "tool_calls": [{
+            "id": "tc-1",
+            "function": {"name": "get_mission_digest", "arguments": "{}"},
+        }]},
+        {"role": "tool", "content": "digest", "tool_call_id": "tc-1"},
+        {"role": "assistant", "content": "[SILENT]"},
+        {"role": "user", "content": "ordinary question"},
+        {"role": "assistant", "content": "[SILENT]"},
+    ]
+
+    assert server._history_to_messages(history) == [
+        {"role": "user", "text": "visible question"},
+        {"role": "assistant", "text": "visible answer"},
+        {"role": "user", "text": "ordinary question"},
+        {"role": "assistant", "text": "[SILENT]"},
+    ]
+
+
 def test_history_to_messages_projects_a_skill_turn_to_its_invocation():
     # A /skill invocation is persisted EXPANDED: the activation note plus the
     # entire skill body. That payload is model-facing scaffolding -- this

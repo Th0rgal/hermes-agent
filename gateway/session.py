@@ -3460,6 +3460,16 @@ class SessionStore:
                 session_id = reroutes[session_id]
             self._append_to_transcript_serialized(session_id, message)
 
+    def mark_latest_intentional_silence_turn(
+        self, session_id: str, assistant_content: str,
+    ) -> int:
+        """Stamp a completed no-delivery turn without changing model history."""
+        if not self._db:
+            return 0
+        return self._db.mark_latest_intentional_silence_turn(
+            session_id, assistant_content,
+        )
+
     def _append_to_transcript_serialized(
         self, session_id: str, message: Dict[str, Any]
     ) -> None:

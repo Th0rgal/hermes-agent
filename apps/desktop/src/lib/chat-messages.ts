@@ -341,7 +341,40 @@ function displayContentForMessage(role: SessionMessage['role'], content: unknown
 }
 
 function transcriptContent(displayKind: SessionMessage['display_kind'], content: string): string | null {
-  return displayKind === 'hidden' ? null : content
+  return displayKind === 'hidden' || displayKind === 'intentional_silence' ? null : content
+}
+
+const INTENTIONAL_SILENCE_MARKERS = new Set(['[SILENT]', 'SILENT', 'NO_REPLY', 'NO REPLY'])
+
+function withoutIntentionalSilenceTurns(messages: SessionMessage[]): SessionMessage[] {
+  const hidden = new Set<number>()
+  let turnStart: null | number = null
+
+  messages.forEach((message, index) => {
+    if (message.role === 'user') {
+      turnStart = index
+    }
+
+    if (message.display_kind === 'intentional_silence') {
+      hidden.add(index)
+    }
+
+    const content = textFromUnknown(message.content || message.text || message.context || message.name)
+
+    if (message.role === 'assistant' && INTENTIONAL_SILENCE_MARKERS.has(content.trim().toUpperCase())) {
+      const start = turnStart ?? index
+      const trigger = messages[start]
+      const triggerContent = textFromUnknown(trigger.content || trigger.text || trigger.context || trigger.name)
+
+      if (triggerContent.toLowerCase().includes('sandboxed.sh mission changed status')) {
+        for (let turnIndex = start; turnIndex <= index; turnIndex += 1) {
+          hidden.add(turnIndex)
+        }
+      }
+    }
+  })
+
+  return messages.filter((_message, index) => !hidden.has(index))
 }
 
 // A remote backend older than this app serves display_metadata as raw JSON text,
@@ -920,6 +953,7 @@ function withUniqueToolCallIds(messages: ChatMessage[]): ChatMessage[] {
 }
 
 export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
+  const visibleMessages = withoutIntentionalSilenceTurns(messages)
   const result: ChatMessage[] = []
   let pendingToolParts: ChatMessagePart[] = []
   let pendingToolTimestamp: number | undefined
@@ -967,7 +1001,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     clearPendingTools()
   }
 
-  messages.forEach((message, index) => {
+  visibleMessages.forEach((message, index) => {
     if (message.role === 'tool') {
       const updatedPendingToolParts = applyStoredToolResultToParts(pendingToolParts, message)
 
@@ -1096,7 +1130,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
 
     activeAssistantIndex = message.role === 'assistant' ? result.length - 1 : null
   })
-  flushPendingTools(messages.length)
+  flushPendingTools(visibleMessages.length)
 
   const withoutGeneratedImageEchoes = result.map(message =>
     message.role === 'assistant' ? { ...message, parts: dedupeGeneratedImageEchoesInParts(message.parts) } : message

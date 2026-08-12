@@ -18857,6 +18857,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
             )
 
+            # Silence is still part of model history, but it is not a visible
+            # chat turn. Stamp the entire freshly persisted turn so transcript
+            # projections can omit its user/tool/assistant rows structurally.
+            if _intentional_silence:
+                try:
+                    _silence_rows = await self.async_session_store.mark_latest_intentional_silence_turn(
+                        session_entry.session_id, response,
+                    )
+                    if not _silence_rows:
+                        logger.warning(
+                            "Could not mark intentional silence turn for session %s",
+                            session_entry.session_id,
+                        )
+                except Exception:
+                    logger.warning(
+                        "Failed to mark intentional silence turn for session %s",
+                        session_entry.session_id,
+                        exc_info=True,
+                    )
+
             # Re-baseline the cached agent's message_count snapshot now that
             # ALL of this turn's transcript writes are done — the agent's
             # flushed user/assistant/tool rows AND the first-turn `session_meta`
@@ -18879,11 +18899,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 session_key, session_entry.session_id
             )
 
-            # Intentional silence is a delivery decision, not a transcript
-            # mutation.  The agent's [SILENT]/NO_REPLY assistant turn above is
-            # still persisted in session history so later turns keep normal
-            # user/assistant alternation; only the outbound chat delivery is
-            # suppressed.
+            # Keep the marker in model history for normal role alternation;
+            # only outbound delivery and transcript presentation are suppressed.
             if _intentional_silence:
                 logger.info(
                     "Suppressing intentional silence marker for session %s",

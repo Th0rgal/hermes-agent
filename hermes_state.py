@@ -7917,6 +7917,44 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
         return bool(self._execute_write(_do))
 
+    def mark_latest_intentional_silence_turn(
+        self, session_id: str, assistant_content: str,
+    ) -> int:
+        """Hide the latest completed silence turn from transcript projections.
+
+        The rows remain active and their role/content stay unchanged for model
+        replay.  Only durable presentation metadata is stamped, covering the
+        triggering user row plus every assistant/tool row through the final
+        silence marker so tool-only iterations cannot leak into clients.
+        """
+        if not session_id or not assistant_content:
+            return 0
+
+        def _do(conn):
+            assistant_row = conn.execute(
+                "SELECT id FROM messages WHERE session_id = ? AND role = 'assistant' "
+                "AND content = ? AND active = 1 ORDER BY id DESC LIMIT 1",
+                (session_id, self._encode_content(assistant_content)),
+            ).fetchone()
+            if assistant_row is None:
+                return 0
+
+            assistant_id = int(assistant_row[0])
+            user_row = conn.execute(
+                "SELECT id FROM messages WHERE session_id = ? AND role = 'user' "
+                "AND active = 1 AND id <= ? ORDER BY id DESC LIMIT 1",
+                (session_id, assistant_id),
+            ).fetchone()
+            start_id = int(user_row[0]) if user_row is not None else assistant_id
+            cursor = conn.execute(
+                "UPDATE messages SET display_kind = 'intentional_silence' "
+                "WHERE session_id = ? AND active = 1 AND id BETWEEN ? AND ?",
+                (session_id, start_id, assistant_id),
+            )
+            return max(0, int(cursor.rowcount))
+
+        return int(self._execute_write(_do))
+
     #: Key under which message reactions live inside ``display_metadata``.
     #: Reactions share the existing per-message JSON column rather than a side
     #: table so they survive rewind/compaction row rewrites with the row itself.

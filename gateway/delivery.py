@@ -389,7 +389,6 @@ class DeliveryRouter:
                 }
         
         return results
-    
     def _deliver_local(
         self,
         content: str,
@@ -640,7 +639,6 @@ class DeliveryRouter:
             if _send_result_failed(result):
                 raise RuntimeError(_send_result_error(result) or f"{target.platform.value} delivery failed")
         return result
-
 
 
 

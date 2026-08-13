@@ -73,6 +73,11 @@ function assistantMessage(id: string, text: string): ChatMessage {
 
 describe('ChatView render isolation', () => {
   beforeEach(() => {
+    // MissionTag fetches the session's missions on mount; jsdom has no
+    // preload bridge, so stub the door it goes through.
+    ;(window as { hermesDesktop?: unknown }).hermesDesktop = {
+      api: vi.fn().mockResolvedValue({ missions: [] })
+    }
     threadRenderCount.current = 0
     $activeSessionId.set('runtime-1')
     $awaitingResponse.set(false)

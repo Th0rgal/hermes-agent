@@ -552,6 +552,10 @@ export interface SessionMessage {
   content: unknown
   context?: unknown
   name?: string
+  /** Scheduler-written provenance: a durable cron/callback delivery. Persisted
+   *  as SQLite 1/0 or a JSON boolean. Paired with the `[Cron delivery: …]`
+   *  sentinel it identifies a row the UI lifts into a delivery divider. */
+  observed?: boolean | number
   reasoning?: null | string
   reasoning_content?: null | string
   reasoning_details?: unknown

@@ -139,7 +139,7 @@ const _chatMessageFieldsExhaustive: {
   [K in Exclude<keyof ChatMessage, (typeof COMPARED_FIELDS)[number] | (typeof IGNORED_FIELDS)[number]>]: never
 } = {}
 
-const COMPARED_FIELDS = ['id', 'role', 'pending', 'error', 'hidden', 'branchGroupId', 'interim', 'reactions'] as const
+const COMPARED_FIELDS = ['id', 'role', 'pending', 'error', 'hidden', 'branchGroupId', 'interim', 'reactions', 'delivery'] as const
 
 const IGNORED_FIELDS = ['timestamp', 'attachmentRefs', 'parts', 'rowId'] as const
 
@@ -239,7 +239,10 @@ export function chatMessagesEquivalent(a: ChatMessage, b: ChatMessage): boolean 
     // Interim gates the action footer, so flipping it must repaint (e.g. a
     // previewed final settling onto a sealed interim bubble restores the bar).
     (a.interim ?? false) !== (b.interim ?? false) ||
-    !chatReactionsEquivalent(a.reactions, b.reactions)
+    !chatReactionsEquivalent(a.reactions, b.reactions) ||
+    // Compared by label, not identity — projection rebuilds the object on
+    // every pass, and only a visible label change should repaint the divider.
+    a.delivery?.label !== b.delivery?.label
   ) {
     return false
   }
@@ -462,6 +465,14 @@ const withAuthoritativeTurnState = (local: ChatMessage, authoritative: ChatMessa
 
   return merged
 }
+const isObservedCronDisplayMessage = (message: ChatMessage): boolean =>
+  message.role === 'assistant' &&
+  // Projection lifts the scheduler sentinel into ChatMessage.delivery; the
+  // raw-sentinel fallback covers rows built outside toChatMessages.
+  (message.delivery !== undefined || chatMessageText(message).trimStart().startsWith('[Cron delivery:'))
+
+const isNonTurnDisplayMessage = (message: ChatMessage): boolean =>
+  isGatewaySystemMarker(message) || isObservedCronDisplayMessage(message)
 
 export function preserveLocalPendingTurnMessages(
   nextMessages: ChatMessage[],

@@ -56,6 +56,9 @@ export interface ProjectRow {
   conversation?: { session_id: string; source: string } | null
   /** The roster record's controller↔project link, when declared. */
   controller_cron_id?: null | string
+  /** Last successful scheduler run of the linked controller job — proves the
+   *  controller is alive even when [SILENT] ticks deliver no update. */
+  controller_heartbeat_at?: null | string
   /** Honesty read-model axes (server-authoritative, from sandboxed.sh). */
   controller_health?: 'healthy' | 'missing' | 'stale' | null
   delivery_health?: 'dropped' | 'misrouted' | 'reaching_user' | null
@@ -427,8 +430,22 @@ export function controllerStop(project: ProjectRow, now = Date.now()): Controlle
 
   const at = project.latest_update?.at
   const lastAt = at ? Date.parse(at) : Number.NaN
-  if (project.controller_health === 'stale' || (!Number.isNaN(lastAt) && now - lastAt > STALE_CONTROLLER_MS)) {
-    return { kind: 'stale', lastAt }
+  // The freshest proof of life wins: a scheduler heartbeat (the job ran, even
+  // if its [SILENT] tick delivered nothing) counts as much as a delivery.
+  const heartbeatAt = project.controller_heartbeat_at
+    ? Date.parse(project.controller_heartbeat_at)
+    : Number.NaN
+  const freshestAt =
+    Number.isNaN(lastAt) || (!Number.isNaN(heartbeatAt) && heartbeatAt > lastAt) ? heartbeatAt : lastAt
+  // The server saw the controller link + heartbeat; when it says healthy, the
+  // client's 2h delivery-age heuristic must not overrule it into "stale" — a
+  // quiet controller is not a dead one.
+  const serverSaysHealthy = project.controller_health === 'healthy'
+  if (
+    project.controller_health === 'stale' ||
+    (!serverSaysHealthy && !Number.isNaN(freshestAt) && now - freshestAt > STALE_CONTROLLER_MS)
+  ) {
+    return { kind: 'stale', lastAt: freshestAt }
   }
 
   // Declares a controller but never reported a mode and never posted an update:

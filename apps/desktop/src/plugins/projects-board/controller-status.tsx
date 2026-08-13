@@ -93,6 +93,7 @@ export function ControllerStatusIcon({ project }: { project: ProjectRow }) {
   // rest are quiet provenance markers.
   const tone =
     stop.kind === 'degraded' ? 'text-(--ui-text-danger)' : 'text-(--ui-text-tertiary)'
+
   const glyph =
     stop.kind === 'operator-paused' ? (
       <PauseGlyph />

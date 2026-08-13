@@ -162,9 +162,11 @@ export function RenameProjectDialog({
       onClose={onClose}
       onConfirm={async () => {
         const next = title.trim()
+
         if (!next || next === current) {
           return
         }
+
         await renameProject(project.slug, next)
         await queryClient.invalidateQueries({ queryKey: PROJECTS_KEY })
       }}

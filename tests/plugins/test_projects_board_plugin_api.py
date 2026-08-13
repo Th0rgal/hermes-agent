@@ -168,6 +168,79 @@ async def test_grant_rejects_an_empty_patch(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_tasks_forwards_the_roadmap(monkeypatch: pytest.MonkeyPatch) -> None:
+    roadmap = {"slug": "verity", "tasks": [{"task_key": "t1", "status": "accepted"}], "summary": {"total": 1}}
+    calls = _stub_backend(monkeypatch, lambda m, p: roadmap)
+
+    result = await board_api.get_project_tasks("verity")
+
+    assert result["summary"]["total"] == 1
+    assert calls[0]["path"] == "/api/projects/verity/tasks"
+
+
+@pytest.mark.asyncio
+async def test_answer_decision_marks_answered_and_injects_into_the_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def responder(method: str, path: str):
+        if path.endswith("/decision/answer"):
+            return {"ok": True}
+        return {"conversation": {"session_id": "20260806_abc", "source": "binding"}}
+
+    calls = _stub_backend(monkeypatch, responder)
+    injected: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        board_api,
+        "_inject_owner_answer",
+        lambda session, text: injected.append((session, text)) or True,
+    )
+
+    result = await board_api.answer_decision(
+        "verity", {"at": "2026-08-13T10:00:00Z", "answer": "yes, ship", "question": "Ship v2?"}
+    )
+
+    assert result == {"ok": True, "slug": "verity", "at": "2026-08-13T10:00:00Z", "injected": True}
+    assert calls[0] == {
+        "method": "POST",
+        "path": "/api/projects/verity/decision/answer",
+        "params": None,
+        "body": {"at": "2026-08-13T10:00:00Z", "answer": "yes, ship"},
+    }
+    assert injected == [("20260806_abc", "[Owner decision re: Ship v2?] yes, ship")]
+
+
+@pytest.mark.asyncio
+async def test_answer_decision_degrades_without_a_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def responder(method: str, path: str):
+        if path.endswith("/decision/answer"):
+            return {"ok": True}
+        # Inferred conversation (latest_update) must never be injected into.
+        return {"conversation": {"session_id": "cron_dead", "source": "latest_update"}}
+
+    _stub_backend(monkeypatch, responder)
+    monkeypatch.setattr(
+        board_api,
+        "_inject_owner_answer",
+        lambda session, text: (_ for _ in ()).throw(AssertionError("must not inject")),
+    )
+
+    result = await board_api.answer_decision("verity", {"at": "t", "answer": "ok"})
+
+    assert result["injected"] is False
+
+
+@pytest.mark.asyncio
+async def test_answer_decision_requires_at_and_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_backend(monkeypatch, lambda m, p: None)
+    with pytest.raises(HTTPException) as excinfo:
+        await board_api.answer_decision("verity", {"answer": "  "})
+    assert excinfo.value.status_code == 400
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_steer_mission_posts_content(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _stub_backend(monkeypatch, lambda m, p: None)
 

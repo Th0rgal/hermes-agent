@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import APIRouter, Body, HTTPException, WebSocket, WebSocketDisconnect, status as http_status
+from starlette.concurrency import run_in_threadpool
 
 from plugins.projects.dashboard.plugin_api import _mint_token, _sandboxed_config, _sandboxed_request
 
@@ -170,6 +172,101 @@ async def update_grant(
             status_code=502, detail="sandboxed.sh returned an unexpected grant shape"
         )
     return body
+
+
+@router.get("/projects/{slug}/tasks")
+async def get_project_tasks(slug: str) -> Dict[str, Any]:
+    """The project's roadmap: board tasks aggregated across its boss missions
+    (status, dependencies, result digest, PR link, worker mission), plus a
+    done/running/failed summary — the drawer's checklist source.
+    """
+    slug = _clean_slug(slug)
+    body = await _sandboxed_request("GET", f"/api/projects/{slug}/tasks")
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=502, detail="sandboxed.sh returned an unexpected tasks shape"
+        )
+    return body
+
+
+def _inject_owner_answer(session_key: str, text: str) -> bool:
+    """Deliver the owner's answer into the bound Hermes session, in-process.
+
+    The dashboard runs the tui_gateway dispatcher in this very process
+    (`/api/ws` → `tui_gateway.ws.handle_ws` → `server.dispatch`), so no WS
+    client or token is needed. `queued=True` makes the note the session's NEXT
+    turn instead of hijacking an in-flight one (server-side queue semantics —
+    prompt.submit is never rejected). Only live sessions are addressed: waking
+    a cold session from here would need a capture transport for the LONG
+    `session.resume` handler; the ledger keeps the answer either way, so we
+    degrade to injected=false rather than half-resume.
+    """
+    try:
+        from tui_gateway import server as gw
+    except Exception:
+        return False
+    try:
+        hit = gw._find_live_session_by_key(session_key)
+        if hit is None:
+            return False
+        sid, session = hit
+        response = gw.dispatch(
+            {
+                "id": f"projects-board-{uuid.uuid4().hex[:8]}",
+                "method": "prompt.submit",
+                "params": {"session_id": sid, "text": text, "queued": True},
+            },
+            transport=session.get("transport"),
+        )
+        return isinstance(response, dict) and "error" not in response
+    except Exception as error:  # pragma: no cover - defensive
+        _log.warning("projects-board: owner-answer injection failed: %s", error)
+        return False
+
+
+@router.post("/projects/{slug}/decisions/answer")
+async def answer_decision(
+    slug: str, payload: Dict[str, Any] = Body(default_factory=dict)
+) -> Dict[str, Any]:
+    """Answer a pending owner decision from the project card.
+
+    Two effects: (1) the ledger row flips to answered in sandboxed.sh —
+    authoritative; (2) best-effort, the answer is queued into the bound
+    control conversation so the controller acts on it next turn without
+    waiting for its own poll.
+    """
+    slug = _clean_slug(slug)
+    at = str(payload.get("at") or "").strip()
+    answer = str(payload.get("answer") or "").strip()
+    if not at or not answer:
+        raise HTTPException(status_code=400, detail="at and answer are required")
+    question = str(payload.get("question") or "").strip()
+
+    await _sandboxed_request(
+        "POST", f"/api/projects/{slug}/decision/answer", body={"at": at, "answer": answer}
+    )
+
+    # The ledger flip above is the authoritative effect. Everything below is
+    # best-effort delivery: a transient failure here must not surface as an
+    # error, or the renderer would prompt the user to re-answer a decision
+    # that is already answered.
+    injected = False
+    try:
+        detail = await _sandboxed_request("GET", f"/api/projects/{slug}")
+    except Exception as error:
+        _log.warning("projects-board: post-answer lookup failed for %s: %s", slug, error)
+        return {"ok": True, "slug": slug, "at": at, "injected": False}
+    conversation = detail.get("conversation") if isinstance(detail, dict) else None
+    if isinstance(conversation, dict) and conversation.get("source") == "binding":
+        session_key = str(conversation.get("session_id") or "")
+        if session_key:
+            excerpt = (question[:120] + "…") if len(question) > 120 else question
+            prefix = f"[Owner decision re: {excerpt}] " if excerpt else "[Owner decision] "
+            injected = await run_in_threadpool(
+                _inject_owner_answer, session_key, prefix + answer
+            )
+
+    return {"ok": True, "slug": slug, "at": at, "injected": injected}
 
 
 @router.post("/missions/{mission_id}/message")

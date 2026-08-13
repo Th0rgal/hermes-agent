@@ -50,8 +50,12 @@ export interface DeliveryUpdate {
 
 export type ProjectBucket = 'active' | 'archived' | 'attention' | 'paused'
 
+export type AutonomyLevel = 'act_full' | 'act_reversible' | 'observe' | 'propose'
+
 export interface ProjectRow {
   attention_reasons: string[]
+  /** The grant's normalized autonomy level; absent on older backends. */
+  autonomy_level?: AutonomyLevel | null
   bucket: string
   conversation?: { session_id: string; source: string } | null
   /** The roster record's controller↔project link, when declared. */
@@ -71,6 +75,8 @@ export interface ProjectRow {
   next_action?: null | string
   /** The operator's board override (`paused`/`archived`), when set. */
   override?: null | string
+  /** Ledger decisions waiting on the owner; absent on older backends. */
+  pending_decisions?: number
   progress_state?: 'blocked' | 'waiting_external' | 'working' | null
   slug: string
   /** The roster's display title (humanized slug fallback), served by
@@ -97,6 +103,7 @@ export interface ProjectRecord {
 }
 
 export interface ProjectGrant {
+  autonomy_level?: AutonomyLevel | null
   budget_per_tick?: null | string
   material_bar?: null | string
   merge_authority?: null | string
@@ -105,12 +112,51 @@ export interface ProjectGrant {
   resume_condition?: null | string
 }
 
+/** One ledger row: an owner escalation or a declared autonomous act. The new
+ *  fields are absent on older backends — render as a plain question then. */
+export interface ProjectDecision {
+  answer?: null | string
+  answered_at?: null | string
+  at: string
+  /** granted (autonomous act) | escalation (question for the owner). */
+  authority?: null | string
+  evidence?: null | { mission_id?: null | string; pr_url?: null | string }
+  kind?: null | string
+  question: string
+  rationale?: null | string
+  /** decided | pending_user | answered | expired. */
+  status?: null | string
+}
+
 export interface ProjectDetail {
   conversation?: { session_id: string; source: string } | null
   grant?: null | ProjectGrant
-  open_decisions?: Array<{ at: string; question: string; rationale?: null | string }>
+  open_decisions?: ProjectDecision[]
   project: ProjectRecord
+  /** Autonomous acts + answered escalations, newest first. */
+  recent_decisions?: ProjectDecision[]
   tracks?: TrackHealth[]
+}
+
+/** One roadmap item — a board task aggregated up to the project. */
+export interface ProjectTask {
+  acceptance_criteria?: string[]
+  attempts?: number
+  boss_mission_id?: null | string
+  depends_on?: string[]
+  id?: null | string
+  pr_url?: null | string
+  result_digest?: null | string
+  status: string
+  task_key: string
+  title: string
+  updated_at?: null | string
+  worker_mission_id?: null | string
+}
+
+export interface ProjectTasksResponse {
+  summary?: { done: number; failed: number; running: number; total: number }
+  tasks: ProjectTask[]
 }
 
 /** Only an explicit binding is a writable Desktop conversation.  The
@@ -222,6 +268,7 @@ function call<T>(path: string, opts?: PluginRestOptions): Promise<T> {
 export const PROJECTS_KEY = ['projects-board', 'projects'] as const
 export const projectKey = (slug: string) => ['projects-board', 'project', slug] as const
 export const stateKey = (slug: string) => ['projects-board', 'state', slug] as const
+export const tasksKey = (slug: string) => ['projects-board', 'tasks', slug] as const
 
 // ── attention transitions (pure — unit-tested) ───────────────────────────────
 
@@ -276,6 +323,7 @@ function observeRoster(projects: ProjectRow[]): void {
   // ProjectRow.title (humanize_slug fallback), so a raw slug should never
   // surface. Debounce still keys on slugs; only the shown label changes.
   const labels = Object.fromEntries(projects.map(p => [p.slug, p.title?.trim() || p.slug]))
+
   for (const slug of debounceAttentionNotifications(entered)) {
     notifyAttentionFn(labels[slug] ?? slug)
   }
@@ -327,6 +375,9 @@ export const fetchProject = (slug: string) => call<ProjectDetail>(`/projects/${e
 export const fetchProjectState = (slug: string, limit = 20) =>
   call<{ states: ProjectState[] }>(`/projects/${encodeURIComponent(slug)}/state?limit=${limit}`)
 
+export const fetchProjectTasks = (slug: string) =>
+  call<ProjectTasksResponse>(`/projects/${encodeURIComponent(slug)}/tasks`)
+
 // ── writes ───────────────────────────────────────────────────────────────────
 
 export type ProjectAction = 'archive' | 'delete' | 'pause' | 'resume' | 'unarchive'
@@ -341,6 +392,14 @@ export const renameProject = (slug: string, title: string) =>
 
 export const saveGrant = (slug: string, patch: Record<string, unknown>) =>
   call<{ grant: ProjectGrant }>(`/projects/${encodeURIComponent(slug)}/grant`, { body: patch, method: 'POST' })
+
+/** Answer a pending owner decision. The relay flips the ledger row AND queues
+ *  the answer into the bound control conversation (best-effort `injected`). */
+export const answerDecision = (slug: string, at: string, answer: string, question?: string) =>
+  call<{ injected: boolean; ok: boolean }>(`/projects/${encodeURIComponent(slug)}/decisions/answer`, {
+    body: { answer, at, question },
+    method: 'POST'
+  })
 
 export const steerMission = (missionId: string, content: string) =>
   call(`/missions/${encodeURIComponent(missionId)}/message`, { body: { content }, method: 'POST' })
@@ -400,6 +459,7 @@ export function controllerStop(project: ProjectRow, now = Date.now()): Controlle
   if (project.override === 'paused') {
     return { kind: 'operator-paused' }
   }
+
   if (project.override) {
     // Archived by the operator — the lifecycle column already says it all.
     return null
@@ -411,16 +471,20 @@ export function controllerStop(project: ProjectRow, now = Date.now()): Controlle
   if (project.controller_health === 'missing') {
     return { kind: 'degraded', reason: 'missing' }
   }
+
   if (project.delivery_health === 'dropped') {
     return { kind: 'degraded', reason: 'dropped' }
   }
+
   if (project.delivery_health === 'misrouted') {
     return { kind: 'degraded', reason: 'misrouted' }
   }
 
   const raw = project.mode ?? project.latest_update?.mode
+
   if (raw) {
     const [base, ...rest] = raw.trim().toLowerCase().split(':')
+
     if (base === 'paused' || base === 'blocked') {
       const cause = rest.join(':').trim() || project.latest_update?.blocker?.trim() || null
 

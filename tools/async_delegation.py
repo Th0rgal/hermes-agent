@@ -163,7 +163,8 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             task_json TEXT,
             delivery_claim TEXT,
             delivery_claimed_at REAL,
-            origin_session_id TEXT NOT NULL DEFAULT ''
+            origin_session_id TEXT NOT NULL DEFAULT '',
+            mission_id TEXT
         )"""
     )
     columns = {row[1] for row in conn.execute("PRAGMA table_info(async_delegations)")}
@@ -178,9 +179,20 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
         # completions recovered after a process restart are unroutable on
         # api_server (the in-memory record that carried it is gone).
         ("origin_session_id", "TEXT"),
+        # sandboxed.sh mission id backing a delegation dispatched with
+        # backend="mission". NULL for in-process delegations. The (mission_id →
+        # delegation row) lookup is the AUTHENTICATION anchor: a mission webhook
+        # is only folded into a parent turn when it resolves to a pending row
+        # Hermes itself created, and parent/origin are read from the row, never
+        # from the (untrusted) webhook payload. See tools/mission_delegation.py.
+        ("mission_id", "TEXT"),
     ):
         if name not in columns:
             conn.execute(f"ALTER TABLE async_delegations ADD COLUMN {name} {sql_type}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_async_delegations_mission_id "
+        "ON async_delegations(mission_id)"
+    )
 
 
 @contextmanager
@@ -485,6 +497,49 @@ def claim_event_delivery(evt: Dict[str, Any], consumer: str) -> Optional[str]:
         return ""
     claim_id = f"{consumer}:{__import__('os').getpid()}:{uuid.uuid4().hex}"
     return claim_id if claim_completion_delivery(delegation_id, claim_id) else None
+
+
+def find_delegation_by_mission_id(mission_id: str) -> Optional[Dict[str, Any]]:
+    """Resolve a sandboxed.sh ``mission_id`` to the delegation row Hermes created
+    for it (backend="mission"), or None.
+
+    This is the authentication anchor for the webhook fork: a mission result is
+    folded into a parent turn ONLY when this returns a row, and the caller must
+    read ``parent_session_id``/``origin_session_id`` from the returned row —
+    never from the (untrusted) webhook payload. Returns the routing fields plus
+    ``delivery_state`` so the caller can ignore already-delivered/dropped rows.
+    """
+    mid = (mission_id or "").strip()
+    if not mid:
+        return None
+    with _DB_LOCK, _transaction() as conn:
+        row = conn.execute(
+            """SELECT delegation_id, parent_session_id, origin_session,
+                      origin_session_id, origin_ui_session_id, delivery_state,
+                      state, task_json, event_json, mission_id
+               FROM async_delegations WHERE mission_id=?""",
+            (mid,),
+        ).fetchone()
+    if row is None:
+        return None
+    keys = (
+        "delegation_id", "parent_session_id", "origin_session",
+        "origin_session_id", "origin_ui_session_id", "delivery_state",
+        "state", "task_json", "event_json", "mission_id",
+    )
+    return dict(zip(keys, row))
+
+
+def set_delegation_mission_id(delegation_id: str, mission_id: str) -> bool:
+    """Bind a mission id to a pending delegation row after the mission POST is
+    confirmed. Called by tools/mission_delegation.py immediately after dispatch."""
+    now = time.time()
+    with _DB_LOCK, _transaction() as conn:
+        cur = conn.execute(
+            "UPDATE async_delegations SET mission_id=?, updated_at=? WHERE delegation_id=?",
+            ((mission_id or "").strip() or None, now, delegation_id),
+        )
+        return cur.rowcount == 1
 
 
 def release_completion_delivery(delegation_id: str, claim_id: str) -> bool:

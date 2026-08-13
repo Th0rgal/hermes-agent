@@ -1392,7 +1392,15 @@ def _resolve_project_route_target(job: dict, project_token: str) -> Optional[dic
         )
         return None
 
-    if target.source in _LOCAL_SESSION_PLATFORMS:
+    if target.source in _LOCAL_SESSION_PLATFORMS or target.source == "webhook":
+        # A route only exists because an operator explicitly bound this session.
+        # `webhook` sessions are not routable by default (ROUTABLE_SESSION_SOURCES
+        # in hermes_cli/project_routes.py) — they can only be bound via
+        # allow_unroutable_source=True, which is exactly how a live project
+        # conversation backed by the Hermes Conversations bridge gets bound.
+        # Honor that binding: append to the session like any other local
+        # surface, rather than silently dropping every controller delivery for
+        # not being desktop/webui (the bug that made active projects look dead).
         return _local_session_delivery_target(target.source, target.session_id)
     if target.source == "api_server":
         # _deliver_result routes api_server targets through the same durable

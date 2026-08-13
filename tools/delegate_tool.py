@@ -3193,7 +3193,13 @@ def _dispatch_mission_backend(
             goal=task.get("goal") or "",
             context=task.get("context"),
             role=_normalize_role(task.get("role")),
-            model=task.get("model") or getattr(parent_agent, "model", None),
+            # Only override the mission's model when the task EXPLICITLY asks.
+            # The parent's model (e.g. an OpenAI/codex id like gpt-5.6-sol) is not
+            # necessarily valid for the mission's default backend (Anthropic),
+            # and forcing it makes start_mission reject the create ("model not
+            # found in catalog" — caught in E2E). Unset → the mission uses its
+            # own backend-appropriate default.
+            model=task.get("model"),
             session_key=session_key,
             parent_session_id=parent_session_id,
             origin_ui_session_id=origin_ui_session_id,

@@ -534,6 +534,75 @@ def find_delegation_by_mission_id(mission_id: str) -> Optional[Dict[str, Any]]:
     return dict(zip(keys, row))
 
 
+def fold_mission_completion(
+    *,
+    mission_id: str,
+    status: str,
+    summary: str = "",
+    error: Optional[str] = None,
+    live_transcript: Optional[str] = None,
+    duration_seconds: Optional[float] = None,
+) -> str:
+    """Fold a sandboxed.sh mission's TERMINAL result into the delegating turn.
+
+    Resolves ``mission_id`` → the pending delegation row Hermes created, builds
+    the async-delegation completion event (parent/origin read from the ROW,
+    never the caller — the auth anchor), and enqueues it through the shared
+    completion path so it re-enters the conversation as an
+    ``async_delegation_complete`` row (exactly-once via the ledger claim).
+
+    Returns one of:
+      - ``"folded"``        : enqueued (first terminal delivery for this row)
+      - ``"duplicate"``     : row already delivered/dropped — idempotent no-op
+      - ``"not_delegated"`` : mission_id is not a Hermes mission delegation
+                              (the caller should fall back to its normal path)
+    """
+    row = find_delegation_by_mission_id(mission_id)
+    if row is None:
+        return "not_delegated"
+    if (row.get("delivery_state") or "") != "pending":
+        return "duplicate"
+    try:
+        task = json.loads(row.get("task_json") or "{}")
+    except Exception:
+        task = {}
+    event_record: Dict[str, Any] = {
+        "delegation_id": row["delegation_id"],
+        "session_key": row.get("origin_session") or "",
+        "origin_ui_session_id": row.get("origin_ui_session_id") or "",
+        "origin_session_id": row.get("origin_session_id") or "",
+        "parent_session_id": row.get("parent_session_id"),
+        "goal": task.get("goal", ""),
+        "role": task.get("role"),
+        "model": task.get("model"),
+        "completed_at": time.time(),
+    }
+    for _k in ("scope_id", "user_id", "user_name"):
+        if task.get(_k):
+            event_record[_k] = task[_k]
+    combined: Dict[str, Any] = {
+        "results": [
+            {
+                "status": status,
+                "summary": summary or "",
+                "error": error,
+                "goal": task.get("goal", ""),
+                "mission_id": mission_id,
+            }
+        ],
+        "error": error,
+        "total_duration_seconds": duration_seconds,
+    }
+    if live_transcript:
+        combined["live_transcripts"] = [live_transcript]
+    _push_batch_completion_event(event_record, combined, status)
+    logger.info(
+        "mission %s folded into delegation %s (status=%s)",
+        mission_id, row["delegation_id"], status,
+    )
+    return "folded"
+
+
 def set_delegation_mission_id(delegation_id: str, mission_id: str) -> bool:
     """Bind a mission id to a pending delegation row after the mission POST is
     confirmed. Called by tools/mission_delegation.py immediately after dispatch."""

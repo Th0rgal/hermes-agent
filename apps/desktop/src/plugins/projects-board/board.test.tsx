@@ -206,6 +206,7 @@ describe('projectPaletteRows', () => {
 
 describe('controllerStop staleness', () => {
   const NOW = Date.parse('2026-08-13T12:00:00Z')
+
   const base = (over: Partial<ProjectRow>): ProjectRow => ({
     ...row('lean-silicon', 'active'),
     controller_cron_id: 'job42',

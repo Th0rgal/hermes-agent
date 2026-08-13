@@ -320,6 +320,7 @@ function observeRoster(projects: ProjectRow[]): void {
   // ProjectRow.title (humanize_slug fallback), so a raw slug should never
   // surface. Debounce still keys on slugs; only the shown label changes.
   const labels = Object.fromEntries(projects.map(p => [p.slug, p.title?.trim() || p.slug]))
+
   for (const slug of debounceAttentionNotifications(entered)) {
     notifyAttentionFn(labels[slug] ?? slug)
   }
@@ -455,6 +456,7 @@ export function controllerStop(project: ProjectRow, now = Date.now()): Controlle
   if (project.override === 'paused') {
     return { kind: 'operator-paused' }
   }
+
   if (project.override) {
     // Archived by the operator — the lifecycle column already says it all.
     return null
@@ -466,16 +468,20 @@ export function controllerStop(project: ProjectRow, now = Date.now()): Controlle
   if (project.controller_health === 'missing') {
     return { kind: 'degraded', reason: 'missing' }
   }
+
   if (project.delivery_health === 'dropped') {
     return { kind: 'degraded', reason: 'dropped' }
   }
+
   if (project.delivery_health === 'misrouted') {
     return { kind: 'degraded', reason: 'misrouted' }
   }
 
   const raw = project.mode ?? project.latest_update?.mode
+
   if (raw) {
     const [base, ...rest] = raw.trim().toLowerCase().split(':')
+
     if (base === 'paused' || base === 'blocked') {
       const cause = rest.join(':').trim() || project.latest_update?.blocker?.trim() || null
 
@@ -485,6 +491,7 @@ export function controllerStop(project: ProjectRow, now = Date.now()): Controlle
 
   const at = project.latest_update?.at
   const lastAt = at ? Date.parse(at) : Number.NaN
+
   if (project.controller_health === 'stale' || (!Number.isNaN(lastAt) && now - lastAt > STALE_CONTROLLER_MS)) {
     return { kind: 'stale', lastAt }
   }

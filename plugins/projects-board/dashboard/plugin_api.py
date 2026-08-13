@@ -246,8 +246,16 @@ async def answer_decision(
         "POST", f"/api/projects/{slug}/decision/answer", body={"at": at, "answer": answer}
     )
 
+    # The ledger flip above is the authoritative effect. Everything below is
+    # best-effort delivery: a transient failure here must not surface as an
+    # error, or the renderer would prompt the user to re-answer a decision
+    # that is already answered.
     injected = False
-    detail = await _sandboxed_request("GET", f"/api/projects/{slug}")
+    try:
+        detail = await _sandboxed_request("GET", f"/api/projects/{slug}")
+    except Exception as error:
+        _log.warning("projects-board: post-answer lookup failed for %s: %s", slug, error)
+        return {"ok": True, "slug": slug, "at": at, "injected": False}
     conversation = detail.get("conversation") if isinstance(detail, dict) else None
     if isinstance(conversation, dict) and conversation.get("source") == "binding":
         session_key = str(conversation.get("session_id") or "")

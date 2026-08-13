@@ -47,10 +47,10 @@ import { useState } from 'react'
 import {
   $openProjectSlug,
   fetchProjects,
+  isBoundConversation,
   type ProjectAction,
   projectAction,
   type ProjectRow,
-  isBoundConversation,
   PROJECTS_KEY
 } from './api'
 import { errText } from './board'

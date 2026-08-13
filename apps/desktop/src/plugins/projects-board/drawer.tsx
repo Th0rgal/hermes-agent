@@ -172,6 +172,7 @@ function PendingDecisionRow({ decision, slug }: { decision: ProjectDecision; slu
         className="mt-0.5 flex items-center gap-1.5"
         onSubmit={event => {
           event.preventDefault()
+
           if (answer.trim() && !mut.isPending) {
             mut.mutate()
           }
@@ -212,6 +213,7 @@ function TaskRow({ task }: { task: ProjectTask }) {
   const b = useBoard()
   const [open, setOpen] = useState(false)
   const glyph = TASK_GLYPH[task.status] ?? TASK_GLYPH.pending
+
   const expandable = Boolean(
     task.result_digest || task.pr_url || task.worker_mission_id || task.acceptance_criteria?.length
   )
@@ -480,11 +482,17 @@ export function ProjectDrawer({
     queryKey: stateKey(slug ?? '')
   })
 
-  const { data: roadmap } = useQuery({
+  const { data: roadmap, error: roadmapError } = useQuery({
     enabled: Boolean(slug),
     queryFn: () => fetchProjectTasks(slug!),
     queryKey: tasksKey(slug ?? '')
   })
+
+  // An older backend/relay without the endpoint (404, or 503 = no sandboxed.sh)
+  // legitimately has no roadmap — stay silent. Any other failure is a transient
+  // outage and must not masquerade as "empty roadmap".
+  const roadmapStatus = (roadmapError as { status?: number } | null)?.status
+  const roadmapUnavailable = Boolean(roadmapError) && roadmapStatus !== 404 && roadmapStatus !== 503
 
   if (!slug) {
     return null
@@ -498,6 +506,7 @@ export function ProjectDrawer({
   const activity = detail?.recent_decisions ?? []
   const tasks = roadmap?.tasks ?? []
   const summary = roadmap?.summary
+
   const autonomyLevel = (detail?.grant?.autonomy_level ?? row?.autonomy_level) as
     | AutonomyLevel
     | null
@@ -572,6 +581,11 @@ export function ProjectDrawer({
               )}
 
               {/* Roadmap — the project's checklist, from the task board. */}
+              {roadmapUnavailable && (
+                <Section label={b.roadmap}>
+                  <span className="text-[0.71rem] text-amber-500">{b.roadmapUnavailable}</span>
+                </Section>
+              )}
               {tasks.length > 0 && (
                 <Section
                   label={

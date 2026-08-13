@@ -88,6 +88,7 @@ type BoardMessages = {
   decisionsBadge: (n: number) => string
   roadmap: string
   roadmapEmpty: string
+  roadmapUnavailable: string
   roadmapProgress: (done: number, total: number) => string
   taskAttempts: (n: number) => string
   openPr: string
@@ -224,6 +225,7 @@ const en: BoardMessages = {
   decisionsBadge: n => `${n} decision${n === 1 ? '' : 's'}`,
   roadmap: 'Roadmap',
   roadmapEmpty: 'No planned tasks yet.',
+  roadmapUnavailable: 'Roadmap temporarily unavailable — retrying.',
   roadmapProgress: (done, total) => `${done}/${total} done`,
   taskAttempts: n => `${n} attempt${n === 1 ? '' : 's'}`,
   openPr: 'Open PR',

@@ -190,6 +190,14 @@ function Card({
   const sessionTone = boundConversation ? sessionColorForId(boundConversation.session_id) : undefined
   const update = project.latest_update
   const updateAgo = ago(update?.at)
+  // Freshest proof of life for the card's time chip: a SILENT heartbeat (the
+  // controller ran but had nothing to say) still counts as "checked N ago", so
+  // a quiet-but-alive controller does not look frozen. A subtle dot marks a
+  // silent check apart from a delivered update.
+  const heartbeatMs = project.controller_heartbeat_at ? Date.parse(project.controller_heartbeat_at) : Number.NaN
+  const updateMs = update?.at ? Date.parse(update.at) : Number.NaN
+  const silentCheck = !Number.isNaN(heartbeatMs) && (Number.isNaN(updateMs) || heartbeatMs > updateMs)
+  const activityAgo = silentCheck ? ago(project.controller_heartbeat_at) : updateAgo
   const draggable = project.bucket !== 'attention'
 
   return (
@@ -237,12 +245,21 @@ function Card({
               <UnreadBadge count={unreadCounts[boundConversation.session_id] ?? 0} />
             )}
           </div>
-          {/* Mode + relative time share one row — no per-line sprawl. */}
-          {(projectMode(project) || updateAgo) && (
+          {/* Mode + last-activity time share one row — no per-line sprawl.
+              The time is the freshest proof of life; a subtle dot marks a
+              silent controller check (alive, nothing new) apart from a
+              delivered update. */}
+          {(projectMode(project) || activityAgo) && (
             <div className="flex items-center gap-2">
               <ModeChip project={project} />
-              {updateAgo && (
-                <span className="ml-auto shrink-0 text-[0.5625rem] text-(--ui-text-quaternary)">{updateAgo}</span>
+              {activityAgo && (
+                <span
+                  className="ml-auto inline-flex shrink-0 items-center gap-1 text-[0.5625rem] text-(--ui-text-quaternary)"
+                  title={silentCheck ? b.controllerCheckedTip(activityAgo) : undefined}
+                >
+                  {silentCheck && <span aria-hidden className="h-1 w-1 shrink-0 rounded-full bg-current opacity-50" />}
+                  {activityAgo}
+                </span>
               )}
             </div>
           )}

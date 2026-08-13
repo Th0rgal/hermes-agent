@@ -37,6 +37,7 @@ type BoardMessages = {
   pausedByYou: string
   controllerStopped: (cause: string) => string
   controllerSilent: (since: string) => string
+  controllerCheckedTip: (ago: string) => string
   controllerNeverEngaged: string
   controllerDegraded: (reason: 'dropped' | 'misrouted' | 'missing') => string
   expand: (label: string) => string
@@ -159,6 +160,7 @@ const en: BoardMessages = {
   pausedByYou: 'Paused by you',
   controllerStopped: cause => (cause ? `Controller stopped itself: ${cause}` : 'Controller stopped itself'),
   controllerSilent: since => `Controller silent since ${since}`,
+  controllerCheckedTip: ago => `Controller checked ${ago} — nothing new to report`,
   controllerNeverEngaged: 'Controller attached but never engaged — nothing has run yet',
   controllerDegraded: reason =>
     reason === 'missing'

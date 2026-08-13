@@ -8,6 +8,7 @@ import {
   attentionTransitions,
   bindApi,
   bucketAction,
+  controllerStop,
   debounceAttentionNotifications,
   type MissionChip,
   moveProject,
@@ -200,6 +201,58 @@ describe('projectPaletteRows', () => {
     ])
 
     expect(rows.map(r => r.label)).toEqual(['Verity Lido', 'paloma'])
+  })
+})
+
+describe('controllerStop staleness', () => {
+  const NOW = Date.parse('2026-08-13T12:00:00Z')
+  const base = (over: Partial<ProjectRow>): ProjectRow => ({
+    ...row('lean-silicon', 'active'),
+    controller_cron_id: 'job42',
+    mode: 'active',
+    ...over
+  })
+
+  it('does not read a quiet-but-heartbeating controller as stale when the server says healthy', () => {
+    const project = base({
+      controller_health: 'healthy',
+      // Last delivery 5h ago — [SILENT] ticks since…
+      latest_update: { at: '2026-08-13T07:00:00Z', headline: 'x', session_id: 's' } as never,
+      // …but the scheduler ran the job 10 minutes ago.
+      controller_heartbeat_at: '2026-08-13T11:50:00Z'
+    })
+
+    expect(controllerStop(project, NOW)).toBeNull()
+  })
+
+  it('a fresh heartbeat alone (no server verdict) also clears the 2h heuristic', () => {
+    const project = base({
+      latest_update: { at: '2026-08-13T07:00:00Z', headline: 'x', session_id: 's' } as never,
+      controller_heartbeat_at: '2026-08-13T11:50:00Z'
+    })
+
+    expect(controllerStop(project, NOW)).toBeNull()
+  })
+
+  it('still reads stale when both the delivery and the heartbeat are old', () => {
+    const project = base({
+      latest_update: { at: '2026-08-13T07:00:00Z', headline: 'x', session_id: 's' } as never,
+      controller_heartbeat_at: '2026-08-13T08:00:00Z'
+    })
+
+    expect(controllerStop(project, NOW)).toEqual({
+      kind: 'stale',
+      lastAt: Date.parse('2026-08-13T08:00:00Z')
+    })
+  })
+
+  it('a server stale verdict wins regardless of client timestamps', () => {
+    const project = base({
+      controller_health: 'stale',
+      latest_update: { at: '2026-08-13T11:59:00Z', headline: 'x', session_id: 's' } as never
+    })
+
+    expect(controllerStop(project, NOW)?.kind).toBe('stale')
   })
 })
 

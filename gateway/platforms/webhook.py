@@ -589,6 +589,84 @@ class WebhookAdapter(BasePlatformAdapter):
         effective_profile = request_profile or "default"
         return configured_profile == effective_profile
 
+    # Terminal sandboxed.sh mission statuses that a delegated mission reports.
+    # completed → success; every other terminal state folds as a failure with
+    # the detail in the summary/error (Phase 1). Non-terminal transitions from a
+    # delegated mission are acked without folding (no isolated session either).
+    _MISSION_TERMINAL_STATUS = {
+        "completed": "completed",
+        "failed": "failed",
+        "not_feasible": "failed",
+        "notfeasible": "failed",
+        "blocked": "failed",
+        "interrupted": "failed",
+        "awaiting_user": "needs_input",
+        "awaitinguser": "needs_input",
+    }
+
+    def _maybe_fold_mission_delegation(self, payload: dict) -> "Optional[web.Response]":
+        """If this webhook is a terminal transition of a mission that Hermes
+        dispatched via delegate_task(backend='mission'), fold its result into the
+        delegating conversation and return a 200; otherwise return None so the
+        normal webhook path runs.
+
+        The mission_id → pending-delegation-row lookup is the authenticator: a
+        forged payload with a random mission_id resolves to nothing and falls
+        through (and never reaches here without passing the route's HMAC check).
+        """
+        from aiohttp import web
+
+        mission_id = str(payload.get("mission_id") or "").strip()
+        if not mission_id:
+            return None
+        raw_status = str(
+            payload.get("status") or payload.get("type") or payload.get("event_type") or ""
+        ).strip().lower()
+        try:
+            from tools.async_delegation import fold_mission_completion, find_delegation_by_mission_id
+        except Exception:
+            return None
+        # Only claim this payload if the mission is a Hermes delegation.
+        if find_delegation_by_mission_id(mission_id) is None:
+            return None
+        mapped = self._MISSION_TERMINAL_STATUS.get(raw_status)
+        if mapped is None:
+            # Delegated mission, but a non-terminal transition — ack without
+            # folding or spawning a session (the terminal one will fold later).
+            return web.json_response(
+                {"status": "ack", "mission_id": mission_id, "folded": False}
+            )
+        # Compose a human summary from the fields the mission webhook already
+        # carries (a dedicated mission-output summary is a follow-up on the
+        # sandboxed.sh side). Prefer an explicit summary if a future payload
+        # adds one.
+        _summary_bits = [
+            payload.get("summary"),
+            payload.get("result_summary"),
+            payload.get("short_description"),
+            payload.get("recommended_action"),
+            payload.get("terminal_evidence") if mapped != "completed" else None,
+        ]
+        summary = "\n".join(str(b).strip() for b in _summary_bits if b and str(b).strip())
+        if not summary:
+            summary = str(payload.get("title") or f"Mission {raw_status}")
+        error = (
+            payload.get("error") or payload.get("terminal_reason")
+            if mapped == "failed" else None
+        )
+        outcome = fold_mission_completion(
+            mission_id=mission_id,
+            status=mapped,
+            summary=summary,
+            error=str(error) if error else None,
+            live_transcript=payload.get("transcript") or payload.get("transcript_url"),
+        )
+        if outcome == "not_delegated":
+            return None  # race: bound between the two lookups — fall through
+        return web.json_response(
+            {"status": "delivered", "mission_id": mission_id, "outcome": outcome}
+        )
+
     async def _handle_webhook(self, request: "web.Request") -> "web.Response":
         """POST /webhooks/{route_name} — receive and process a webhook event."""
         # Hot-reload dynamic subscriptions on each request (mtime-gated, cheap)
@@ -739,6 +817,19 @@ class WebhookAdapter(BasePlatformAdapter):
                     "route": route_name,
                 }
             )
+
+        # ── Mission-backed delegation fold ──────────────────────────────────
+        # A sandboxed.sh mission started via delegate_task(backend="mission")
+        # reports its terminal transition here. If this payload's mission_id
+        # resolves to a pending delegation slot Hermes created, fold the result
+        # back into the DELEGATING conversation (as an async_delegation_complete
+        # row) instead of spawning an isolated `webhook:{route}:{delivery_id}`
+        # session. Parent/origin routing come from the LEDGER, never the payload
+        # (the auth anchor). Unknown / non-delegated missions fall through to the
+        # normal webhook path untouched.
+        _folded = self._maybe_fold_mission_delegation(payload)
+        if _folded is not None:
+            return _folded
 
         if route_config.get("script"):
             # run_route_script shells out (subprocess.run, up to its timeout);

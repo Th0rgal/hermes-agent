@@ -163,7 +163,8 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             task_json TEXT,
             delivery_claim TEXT,
             delivery_claimed_at REAL,
-            origin_session_id TEXT NOT NULL DEFAULT ''
+            origin_session_id TEXT NOT NULL DEFAULT '',
+            mission_id TEXT
         )"""
     )
     columns = {row[1] for row in conn.execute("PRAGMA table_info(async_delegations)")}
@@ -178,9 +179,20 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
         # completions recovered after a process restart are unroutable on
         # api_server (the in-memory record that carried it is gone).
         ("origin_session_id", "TEXT"),
+        # sandboxed.sh mission id backing a delegation dispatched with
+        # backend="mission". NULL for in-process delegations. The (mission_id →
+        # delegation row) lookup is the AUTHENTICATION anchor: a mission webhook
+        # is only folded into a parent turn when it resolves to a pending row
+        # Hermes itself created, and parent/origin are read from the row, never
+        # from the (untrusted) webhook payload. See tools/mission_delegation.py.
+        ("mission_id", "TEXT"),
     ):
         if name not in columns:
             conn.execute(f"ALTER TABLE async_delegations ADD COLUMN {name} {sql_type}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_async_delegations_mission_id "
+        "ON async_delegations(mission_id)"
+    )
 
 
 @contextmanager
@@ -248,6 +260,10 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
             # restart-recovered completion can reconstruct a full
             # SessionSource — see _capture_routing_origin.
             "scope_id", "user_id", "user_name",
+            # Mission-backed delegation fields (backend="mission"): persisted so
+            # the webhook fork can reconstruct the completion event and so a
+            # restart-recovered mission slot keeps its provenance.
+            "backend", "workspace_id", "project",
         )
         if key in record
     }
@@ -485,6 +501,131 @@ def claim_event_delivery(evt: Dict[str, Any], consumer: str) -> Optional[str]:
         return ""
     claim_id = f"{consumer}:{__import__('os').getpid()}:{uuid.uuid4().hex}"
     return claim_id if claim_completion_delivery(delegation_id, claim_id) else None
+
+
+def find_delegation_by_mission_id(mission_id: str) -> Optional[Dict[str, Any]]:
+    """Resolve a sandboxed.sh ``mission_id`` to the delegation row Hermes created
+    for it (backend="mission"), or None.
+
+    This is the authentication anchor for the webhook fork: a mission result is
+    folded into a parent turn ONLY when this returns a row, and the caller must
+    read ``parent_session_id``/``origin_session_id`` from the returned row —
+    never from the (untrusted) webhook payload. Returns the routing fields plus
+    ``delivery_state`` so the caller can ignore already-delivered/dropped rows.
+    """
+    mid = (mission_id or "").strip()
+    if not mid:
+        return None
+    with _DB_LOCK, _transaction() as conn:
+        row = conn.execute(
+            """SELECT delegation_id, parent_session_id, origin_session,
+                      origin_session_id, origin_ui_session_id, delivery_state,
+                      state, task_json, event_json, mission_id
+               FROM async_delegations WHERE mission_id=?""",
+            (mid,),
+        ).fetchone()
+    if row is None:
+        return None
+    keys = (
+        "delegation_id", "parent_session_id", "origin_session",
+        "origin_session_id", "origin_ui_session_id", "delivery_state",
+        "state", "task_json", "event_json", "mission_id",
+    )
+    return dict(zip(keys, row))
+
+
+def fold_mission_completion(
+    *,
+    mission_id: str,
+    status: str,
+    summary: str = "",
+    error: Optional[str] = None,
+    live_transcript: Optional[str] = None,
+    duration_seconds: Optional[float] = None,
+) -> str:
+    """Fold a sandboxed.sh mission's TERMINAL result into the delegating turn.
+
+    Resolves ``mission_id`` → the pending delegation row Hermes created, builds
+    the async-delegation completion event (parent/origin read from the ROW,
+    never the caller — the auth anchor), and enqueues it through the shared
+    completion path so it re-enters the conversation as an
+    ``async_delegation_complete`` row (exactly-once via the ledger claim).
+
+    Returns one of:
+      - ``"folded"``        : enqueued (first terminal delivery for this row)
+      - ``"duplicate"``     : row already delivered/dropped — idempotent no-op
+      - ``"not_delegated"`` : mission_id is not a Hermes mission delegation
+                              (the caller should fall back to its normal path)
+    """
+    row = find_delegation_by_mission_id(mission_id)
+    if row is None:
+        return "not_delegated"
+    if (row.get("delivery_state") or "") != "pending":
+        return "duplicate"
+    try:
+        task = json.loads(row.get("task_json") or "{}")
+    except Exception:
+        task = {}
+    event_record: Dict[str, Any] = {
+        "delegation_id": row["delegation_id"],
+        "session_key": row.get("origin_session") or "",
+        "origin_ui_session_id": row.get("origin_ui_session_id") or "",
+        "origin_session_id": row.get("origin_session_id") or "",
+        "parent_session_id": row.get("parent_session_id"),
+        "goal": task.get("goal", ""),
+        "role": task.get("role"),
+        "model": task.get("model"),
+        "completed_at": time.time(),
+    }
+    for _k in ("scope_id", "user_id", "user_name"):
+        if task.get(_k):
+            event_record[_k] = task[_k]
+    combined: Dict[str, Any] = {
+        "results": [
+            {
+                "status": status,
+                "summary": summary or "",
+                "error": error,
+                "goal": task.get("goal", ""),
+                "mission_id": mission_id,
+            }
+        ],
+        "error": error,
+        "total_duration_seconds": duration_seconds,
+    }
+    if live_transcript:
+        combined["live_transcripts"] = [live_transcript]
+    _push_batch_completion_event(event_record, combined, status)
+    logger.info(
+        "mission %s folded into delegation %s (status=%s)",
+        mission_id, row["delegation_id"], status,
+    )
+    return "folded"
+
+
+def get_delegation_mission_id(delegation_id: str) -> Optional[str]:
+    """Resolve a delegation_id to its bound sandboxed.sh mission id (or None)."""
+    did = (delegation_id or "").strip()
+    if not did:
+        return None
+    with _DB_LOCK, _transaction() as conn:
+        row = conn.execute(
+            "SELECT mission_id FROM async_delegations WHERE delegation_id=?",
+            (did,),
+        ).fetchone()
+    return (row[0] if row and row[0] else None)
+
+
+def set_delegation_mission_id(delegation_id: str, mission_id: str) -> bool:
+    """Bind a mission id to a pending delegation row after the mission POST is
+    confirmed. Called by tools/mission_delegation.py immediately after dispatch."""
+    now = time.time()
+    with _DB_LOCK, _transaction() as conn:
+        cur = conn.execute(
+            "UPDATE async_delegations SET mission_id=?, updated_at=? WHERE delegation_id=?",
+            ((mission_id or "").strip() or None, now, delegation_id),
+        )
+        return cur.rowcount == 1
 
 
 def release_completion_delivery(delegation_id: str, claim_id: str) -> bool:
@@ -1010,6 +1151,87 @@ def _push_completion_event(
             "result lost: %s",
             record.get("delegation_id"), exc,
         )
+
+
+def abandon_pending_delegation(delegation_id: str) -> None:
+    """Remove a pending slot that never actually dispatched (e.g. the mission
+    POST failed), so no phantom row lingers to be resolved by a stray webhook."""
+    with _records_lock:
+        _records.pop(delegation_id, None)
+    try:
+        _delete_durable_delegation(delegation_id)
+    except Exception:
+        logger.debug("abandon_pending_delegation: durable delete failed for %s",
+                     delegation_id, exc_info=True)
+
+
+def register_mission_delegation(
+    *,
+    goal: str,
+    context: Optional[str] = None,
+    role: Optional[str] = None,
+    model: Optional[str] = None,
+    session_key: str,
+    parent_session_id: Optional[str] = None,
+    origin_ui_session_id: str = "",
+    origin_session_id: str = "",
+    workspace_id: Optional[str] = None,
+    project: Optional[str] = None,
+    max_async_children: int = _DEFAULT_MAX_ASYNC_CHILDREN,
+    delegation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Register a durable *pending* ledger slot for a sandboxed.sh mission-backed
+    delegation (``backend="mission"``).
+
+    Unlike :func:`dispatch_async_delegation_batch` there is NO local runner or
+    thread — the mission runs remotely and its terminal webhook (folded in
+    ``gateway/platforms/webhook.py``) pushes the completion event later, keyed on
+    the mission id bound via :func:`set_delegation_mission_id`. The pending row is
+    created BEFORE the mission POST so a racing completion is resolvable (and, if
+    it races ahead of the mission-id bind, the webhook's durable markers re-POST).
+
+    Occupies one async slot (same capacity gate as the batch path). Returns
+    ``{"status":"dispatched","delegation_id":...}`` or ``{"status":"rejected",...}``.
+    """
+    delegation_id = delegation_id or _new_delegation_id()
+    dispatched_at = time.time()
+    record: Dict[str, Any] = {
+        "delegation_id": delegation_id,
+        "goal": goal,
+        "context": context,
+        "role": role,
+        "model": model,
+        "session_key": session_key,
+        "origin_ui_session_id": origin_ui_session_id,
+        "origin_session_id": origin_session_id,
+        "parent_session_id": parent_session_id,
+        **_capture_routing_origin(),
+        "status": "running",
+        "dispatched_at": dispatched_at,
+        "completed_at": None,
+        # A single mission renders like a one-task fan-out on completion.
+        "is_batch": True,
+        "backend": "mission",
+        "workspace_id": workspace_id,
+        "project": project,
+    }
+    with _records_lock:
+        running = sum(
+            1 for r in _records.values()
+            if r.get("status") in ("running", "stalling")
+        )
+        if running >= max_async_children:
+            return {
+                "status": "rejected",
+                "error": (
+                    f"Async delegation capacity reached ({max_async_children} "
+                    f"running). Wait for one to finish, or raise "
+                    f"delegation.max_concurrent_children in config.yaml."
+                ),
+            }
+        _records[delegation_id] = record
+    _persist_dispatch(record)
+    return {"status": "dispatched", "delegation_id": delegation_id}
 
 
 def dispatch_async_delegation_batch(

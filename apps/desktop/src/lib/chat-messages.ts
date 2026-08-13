@@ -57,7 +57,8 @@ const STATE_SIGNATURE_RE = /[ \t]*(?:\*\*[^*\n]{0,64}?\*\*[ \t]*:?[ \t]*)?`?\[(?
 
 /** Remove the controller markers and the blank line(s) they leave behind. */
 export function stripStateSignature<T extends string | null | undefined>(text: T): T {
-  if (!text || !(text.includes('[STATE_SIGNATURE:') || text.includes('[CTRL:'))) return text
+  if (!text || !(text.includes('[STATE_SIGNATURE:') || text.includes('[CTRL:'))) {return text}
+
   return text.replace(STATE_SIGNATURE_RE, '').replace(/\n[ \t]*\n[ \t]*\n+/g, '\n\n').trim() as T
 }
 

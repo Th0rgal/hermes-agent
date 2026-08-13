@@ -77,6 +77,49 @@ def _extract_mission_id(result_str: str) -> Optional[str]:
     return None
 
 
+_SEND_MESSAGE_TOOL = "send_message_to_mission"
+_ANSWER_QUESTION_TOOL = "answer_mission_question"
+
+
+def steer_mission_delegation(
+    *,
+    message: str,
+    mission_id: Optional[str] = None,
+    delegation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Forward a steering message from the delegating agent INTO a running
+    mission delegation (next-turn, not mid-turn — a plain message queues behind
+    the mission's current turn; a mission parked on a question needs
+    answer_mission_question instead).
+
+    Accepts either a ``mission_id`` (surfaced in the dispatch return) or a
+    ``delegation_id`` (resolved via the ledger). Returns
+    ``{"status":"sent"/"error", ...}``.
+    """
+    from tools.async_delegation import get_delegation_mission_id
+
+    mid = (mission_id or "").strip()
+    if not mid and delegation_id:
+        mid = get_delegation_mission_id(delegation_id) or ""
+    if not mid:
+        return {
+            "status": "error",
+            "error": "steer requires a known mission_id or delegation_id.",
+        }
+    if not (message or "").strip():
+        return {"status": "error", "error": "steer requires a non-empty message."}
+    try:
+        from tools.mcp_tool import _make_tool_handler
+
+        handler = _make_tool_handler(
+            _MCP_SERVER_NAME, _SEND_MESSAGE_TOOL, _START_MISSION_TIMEOUT
+        )
+        result_str = handler({"mission_id": mid, "content": message})
+    except Exception as exc:  # pragma: no cover
+        return {"status": "error", "error": f"steer dispatch failed: {exc}"}
+    return {"status": "sent", "mission_id": mid, "response": str(result_str)[:500]}
+
+
 def await_mission_completion(
     *,
     delegation_id: str,

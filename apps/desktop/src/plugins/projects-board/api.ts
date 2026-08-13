@@ -494,17 +494,21 @@ export function controllerStop(project: ProjectRow, now = Date.now()): Controlle
 
   const at = project.latest_update?.at
   const lastAt = at ? Date.parse(at) : Number.NaN
+
   // The freshest proof of life wins: a scheduler heartbeat (the job ran, even
   // if its [SILENT] tick delivered nothing) counts as much as a delivery.
   const heartbeatAt = project.controller_heartbeat_at
     ? Date.parse(project.controller_heartbeat_at)
     : Number.NaN
+
   const freshestAt =
     Number.isNaN(lastAt) || (!Number.isNaN(heartbeatAt) && heartbeatAt > lastAt) ? heartbeatAt : lastAt
+
   // The server saw the controller link + heartbeat; when it says healthy, the
   // client's 2h delivery-age heuristic must not overrule it into "stale" — a
   // quiet controller is not a dead one.
   const serverSaysHealthy = project.controller_health === 'healthy'
+
   if (
     project.controller_health === 'stale' ||
     (!serverSaysHealthy && !Number.isNaN(freshestAt) && now - freshestAt > STALE_CONTROLLER_MS)

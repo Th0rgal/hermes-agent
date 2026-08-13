@@ -45,6 +45,7 @@ import {
   BOARD_BUCKETS,
   bucketAction,
   fetchProjects,
+  fetchProjectTasks,
   isBoundConversation,
   liveMissions,
   moveProject,
@@ -54,7 +55,8 @@ import {
   projectMode,
   type ProjectRow,
   PROJECTS_KEY,
-  type ProjectsResponse
+  type ProjectsResponse,
+  tasksKey
 } from './api'
 import { RenameProjectDialog, SessionColorSwatchesRow, UnreadBadge } from './color-swatches'
 import { ControllerStatusIcon } from './controller-status'
@@ -200,6 +202,18 @@ function Card({
   const activityAgo = silentCheck ? ago(project.controller_heartbeat_at) : updateAgo
   const draggable = project.bucket !== 'attention'
 
+  // Roadmap progress at a glance. Shares the drawer's query key, so opening a
+  // card costs nothing extra; long staleTime keeps the board from re-fetching
+  // every project's tasks on each poll.
+  const { data: roadmap } = useQuery({
+    queryFn: () => fetchProjectTasks(project.slug),
+    queryKey: tasksKey(project.slug),
+    retry: false,
+    staleTime: 120_000
+  })
+
+  const roadmapSummary = roadmap?.summary && roadmap.summary.total > 0 ? roadmap.summary : null
+
   return (
     <>
     <ContextMenu>
@@ -249,9 +263,18 @@ function Card({
               The time is the freshest proof of life; a subtle dot marks a
               silent controller check (alive, nothing new) apart from a
               delivered update. */}
-          {(projectMode(project) || activityAgo) && (
+          {(projectMode(project) || activityAgo || roadmapSummary) && (
             <div className="flex items-center gap-2">
               <ModeChip project={project} />
+              {roadmapSummary && (
+                <span
+                  className="inline-flex shrink-0 items-center gap-1 text-[0.5625rem] tabular-nums text-(--ui-text-quaternary)"
+                  title={b.roadmapProgress(roadmapSummary.done, roadmapSummary.total)}
+                >
+                  <Codicon name="checklist" size="0.65rem" />
+                  {roadmapSummary.done}/{roadmapSummary.total}
+                </span>
+              )}
               {activityAgo && (
                 <span
                   className="ml-auto inline-flex shrink-0 items-center gap-1 text-[0.5625rem] text-(--ui-text-quaternary)"

@@ -67,9 +67,23 @@ type BoardMessages = {
   tracks: string
   grant: string
   grantHint: string
+  grantEdit: string
+  grantUnset: string
   mergeAuthority: string
+  mergeAuthorityTip: string
+  mergeSummary: (value: string) => string
+  budgetSummary: (value: string) => string
+  parallelSummary: (n: number) => string
+  merge: Record<'custom' | 'full' | 'repos' | 'review-first', string>
+  mergeReposPlaceholder: string
+  mergeCustomPlaceholder: string
   budgetPerTick: string
+  budgetPerTickTip: string
+  budget: Record<'1 mission' | '2 missions' | 'custom' | 'unbounded', string>
+  budgetCustomPlaceholder: string
   parallelMissions: string
+  parallelMissionsTip: string
+  parallelUnlimited: string
   pauseReason: string
   resumeCondition: string
   materialBar: string
@@ -194,10 +208,34 @@ const en: BoardMessages = {
   waitTicks: 'Wait ticks',
   tracks: 'Tracks',
   grant: 'Autonomy grant',
-  grantHint: 'What the controller may do without asking.',
+  grantHint: 'Guidance the controller follows, not a hard limit — the scheduler does not enforce it.',
+  grantEdit: 'Edit grant',
+  grantUnset: "controller's judgment",
   mergeAuthority: 'Merge authority',
+  mergeAuthorityTip: 'Whether the controller may merge PRs itself, or must wait for your review.',
+  mergeSummary: value => `merge: ${value}`,
+  budgetSummary: value => `budget: ${value}`,
+  parallelSummary: n => `parallel: ${n}`,
+  merge: {
+    custom: 'Custom…',
+    full: 'Merges freely',
+    repos: 'Only these repos…',
+    'review-first': 'Review first'
+  },
+  mergeReposPlaceholder: 'owner/repo, owner/other',
+  mergeCustomPlaceholder: 'custom merge rule',
   budgetPerTick: 'Budget per tick',
+  budgetPerTickTip: 'How much new work the controller may start each time it wakes.',
+  budget: {
+    '1 mission': '1 mission',
+    '2 missions': '2 missions',
+    custom: 'Custom…',
+    unbounded: 'Unbounded'
+  },
+  budgetCustomPlaceholder: 'e.g. 2 missions',
   parallelMissions: 'Parallel missions',
+  parallelMissionsTip: 'Maximum missions the controller may keep running at once.',
+  parallelUnlimited: 'unlimited',
   pauseReason: 'Pause reason',
   resumeCondition: 'Resume condition',
   materialBar: 'Material bar',

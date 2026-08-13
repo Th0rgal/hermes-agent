@@ -3132,18 +3132,25 @@ def _validate_batch_tasks(task_list: List[Dict[str, Any]]) -> Optional[str]:
 def _resolve_delegation_backend(
     backend: Optional[str], task_list: List[Dict[str, Any]]
 ) -> str:
-    """Resolve the effective delegation backend ('in_process' | 'mission').
+    """Resolve the effective delegation backend across the task list.
 
-    Per-task ``backend`` beats the top-level one. Phase 1 requires a single,
-    uniform backend across the task list; a mixed batch is Phase 3. Default is
-    ``in_process`` so existing behavior is unchanged."""
+    Returns 'in_process' (all in-process — the default, unchanged behavior),
+    'mission' (all tasks target a sandboxed.sh mission), or 'mixed' (both — not
+    supported in one call; the caller errors and asks to split). Per-task
+    ``backend`` beats the top-level one."""
     values = {
         str(t.get("backend") or backend or "in_process").strip().lower()
         for t in (task_list or [{}])
     }
     if values == {"mission"}:
         return "mission"
+    if "mission" in values:
+        return "mixed"
     return "in_process"
+
+
+# Bound on how long a bounded-await mission delegation may block the turn.
+_MISSION_AWAIT_MAX_SECONDS = 600
 
 
 def _dispatch_mission_backend(
@@ -3153,54 +3160,83 @@ def _dispatch_mission_backend(
     parent_agent,
     origin_session_id: str,
     origin_ui_session_id: str,
+    await_seconds: Optional[int] = None,
 ) -> str:
-    """Phase 1: dispatch a single delegated task to a sandboxed.sh mission.
+    """Dispatch one or more delegated tasks to sandboxed.sh missions.
 
-    Skips in-process child construction entirely; the mission's terminal webhook
-    folds the result back into the delegating turn (see gateway/platforms/
-    webhook.py). Batch/mixed backends and bounded-await are Phases 2-3."""
-    if not background:
-        return tool_error(
-            "backend='mission' currently requires background=true (the mission "
-            "runs out-of-band and its result folds back into the conversation "
-            "when it completes). Bounded synchronous 'await' mode is planned."
-        )
-    if len(task_list) != 1:
-        return tool_error(
-            "backend='mission' currently supports a single task (a mission batch "
-            "is a later phase). Dispatch one delegate_task per mission for now."
-        )
-    task = task_list[0]
-    goal = task.get("goal") or ""
-    if not goal.strip():
-        return tool_error("backend='mission' requires a non-empty goal.")
+    Skips in-process child construction entirely; each mission's terminal webhook
+    folds its result back into the delegating turn (gateway/platforms/webhook.py).
 
+    Modes:
+      - async (default): return handles immediately; results fold in on completion.
+      - bounded await (single task + await_seconds>0): block up to await_seconds,
+        return the result inline; on timeout return the handle and fold later.
+    Batch: multiple mission tasks are each dispatched independently (one
+    async_delegation_complete row per mission)."""
     from tools.approval import get_current_session_key
-    from tools.mission_delegation import dispatch_mission_delegation
+    from tools.mission_delegation import (
+        await_mission_completion,
+        dispatch_mission_delegation,
+    )
+
+    for _t in task_list:
+        if not str(_t.get("goal") or "").strip():
+            return tool_error("backend='mission' requires a non-empty goal per task.")
 
     session_key = get_current_session_key(default="") or str(
         getattr(parent_agent, "session_id", "") or ""
     )
-    result = dispatch_mission_delegation(
-        goal=goal,
-        context=task.get("context"),
-        role=_normalize_role(task.get("role")),
-        model=task.get("model") or getattr(parent_agent, "model", None),
-        session_key=session_key,
-        parent_session_id=getattr(parent_agent, "session_id", None),
-        origin_ui_session_id=origin_ui_session_id,
-        origin_session_id=origin_session_id,
-        workspace_id=task.get("workspace_id"),
-        project=task.get("project"),
-        title=task.get("title"),
-    )
-    if result.get("status") == "dispatched":
-        result["note"] = (
-            "Delegated to a sandboxed.sh mission (isolated workspace, durable). "
-            "End your turn — the result folds back into this conversation when "
-            "the mission completes; do NOT poll."
+    parent_session_id = getattr(parent_agent, "session_id", None)
+
+    def _one(task: Dict[str, Any]) -> Dict[str, Any]:
+        return dispatch_mission_delegation(
+            goal=task.get("goal") or "",
+            context=task.get("context"),
+            role=_normalize_role(task.get("role")),
+            model=task.get("model") or getattr(parent_agent, "model", None),
+            session_key=session_key,
+            parent_session_id=parent_session_id,
+            origin_ui_session_id=origin_ui_session_id,
+            origin_session_id=origin_session_id,
+            workspace_id=task.get("workspace_id"),
+            project=task.get("project"),
+            title=task.get("title"),
         )
-    return json.dumps(result, ensure_ascii=False)
+
+    # Bounded-await: single task only (awaiting a whole batch inline is out of
+    # scope — dispatch a batch async instead).
+    _await = min(int(await_seconds or 0), _MISSION_AWAIT_MAX_SECONDS)
+    if _await > 0 and len(task_list) == 1:
+        dispatched = _one(task_list[0])
+        if dispatched.get("status") != "dispatched":
+            return json.dumps(dispatched, ensure_ascii=False)
+        inline = await_mission_completion(
+            delegation_id=dispatched["delegation_id"],
+            mission_id=dispatched["mission_id"],
+            timeout_seconds=_await,
+        )
+        if inline is not None:
+            return json.dumps(inline, ensure_ascii=False)
+        dispatched["note"] = (
+            f"Mission still running after {_await}s await — its result folds "
+            "back into this conversation when it completes; do NOT poll."
+        )
+        return json.dumps(dispatched, ensure_ascii=False)
+
+    # Async: dispatch each mission independently.
+    results = [_one(t) for t in task_list]
+    ok = [r for r in results if r.get("status") == "dispatched"]
+    out: Dict[str, Any] = {
+        "status": "dispatched" if ok else "error",
+        "dispatched": len(ok),
+        "missions": results,
+        "note": (
+            "Delegated to sandboxed.sh mission(s) (isolated workspace, durable). "
+            "End your turn — each result folds back into this conversation when "
+            "its mission completes; do NOT poll."
+        ),
+    }
+    return json.dumps(out, ensure_ascii=False)
 
 
 def delegate_task(
@@ -3214,6 +3250,7 @@ def delegate_task(
     backend: Optional[str] = None,
     workspace_id: Optional[str] = None,
     project: Optional[str] = None,
+    await_seconds: Optional[int] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -3409,13 +3446,20 @@ def delegate_task(
     # instead of an in-process child. Intercept BEFORE child construction so no
     # AIAgent is built. The mission's terminal webhook folds the result back
     # into this conversation via the async-delegation ledger (webhook.py).
-    if _resolve_delegation_backend(backend, task_list) == "mission":
+    _mission_backend = _resolve_delegation_backend(backend, task_list)
+    if _mission_backend == "mixed":
+        return tool_error(
+            "A single delegate_task call cannot mix backend='mission' and "
+            "'in_process' tasks. Split them into separate delegate_task calls."
+        )
+    if _mission_backend == "mission":
         return _dispatch_mission_backend(
             task_list=task_list,
             background=background,
             parent_agent=parent_agent,
             origin_session_id=_origin_wake_sid,
             origin_ui_session_id=_origin_ui_session_id,
+            await_seconds=await_seconds,
         )
 
     # Build all child agents on the main thread (thread-safe construction).
@@ -4410,6 +4454,15 @@ DELEGATE_TASK_SCHEMA = {
                     "with (optional)."
                 ),
             },
+            "await_seconds": {
+                "type": "integer",
+                "description": (
+                    "backend='mission', single goal only: block up to this many "
+                    "seconds for the mission to finish and return its result "
+                    "INLINE in this turn (like a synchronous subagent). Omit for "
+                    "the default fire-and-forget behavior. Capped server-side."
+                ),
+            },
         },
         "required": [],
     },
@@ -4474,6 +4527,7 @@ registry.register(
         backend=args.get("backend"),
         workspace_id=args.get("workspace_id"),
         project=args.get("project"),
+        await_seconds=args.get("await_seconds"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,

@@ -77,6 +77,65 @@ def _extract_mission_id(result_str: str) -> Optional[str]:
     return None
 
 
+def await_mission_completion(
+    *,
+    delegation_id: str,
+    mission_id: str,
+    timeout_seconds: float,
+    poll_interval: float = 2.0,
+) -> Optional[Dict[str, Any]]:
+    """Block up to ``timeout_seconds`` for a dispatched mission delegation to
+    reach a terminal state, then CLAIM its delivery and return the result inline.
+
+    Claiming is the anti-double-delivery arbiter: if the await-loop claims, it
+    owns the delivery and returns the result inline (the async watcher, seeing
+    the same queued event, finds the row already delivered and skips it). On
+    timeout returns None — the caller returns a "dispatched" handle and the
+    watcher folds the result later.
+    """
+    import os
+    import time
+    import uuid
+
+    from tools.async_delegation import (
+        claim_completion_delivery,
+        complete_completion_delivery,
+        find_delegation_by_mission_id,
+    )
+
+    deadline = time.time() + max(0.0, float(timeout_seconds))
+    while True:
+        row = find_delegation_by_mission_id(mission_id)
+        state = str((row or {}).get("state") or "running").lower()
+        if row is not None and state not in ("running", "finalizing"):
+            claim_id = f"await:{os.getpid()}:{uuid.uuid4().hex}"
+            if claim_completion_delivery(delegation_id, claim_id):
+                complete_completion_delivery(delegation_id, claim_id)
+                try:
+                    evt = json.loads(row.get("event_json") or "{}")
+                except Exception:
+                    evt = {}
+                return {
+                    "status": evt.get("status") or "completed",
+                    "results": evt.get("results") or [],
+                    "delegation_id": delegation_id,
+                    "mission_id": mission_id,
+                    "delivered": "inline",
+                }
+            # The async watcher already claimed this completion — it will inject
+            # the result as a message. Don't return it inline too (double).
+            return {
+                "status": "delivered_async",
+                "delegation_id": delegation_id,
+                "mission_id": mission_id,
+                "note": "The mission result was delivered to the conversation.",
+            }
+        now = time.time()
+        if now >= deadline:
+            return None
+        time.sleep(min(poll_interval, max(0.05, deadline - now)))
+
+
 def dispatch_mission_delegation(
     *,
     goal: str,

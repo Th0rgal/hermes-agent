@@ -7802,6 +7802,7 @@ class AIAgent:
             backend=function_args.get("backend"),
             workspace_id=function_args.get("workspace_id"),
             project=function_args.get("project"),
+            await_seconds=function_args.get("await_seconds"),
             parent_agent=self,
         )
 

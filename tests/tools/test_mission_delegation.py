@@ -84,6 +84,36 @@ def test_unknown_mission_falls_through(ad):
     assert ad.fold_mission_completion(mission_id="ghost", status="completed") == "not_delegated"
 
 
+def test_await_returns_inline_and_marks_delivered(ad):
+    from tools.mission_delegation import await_mission_completion
+
+    reg = ad.register_mission_delegation(goal="g", session_key="sk", parent_session_id="p")
+    ad.set_delegation_mission_id(reg["delegation_id"], "mx")
+    ad.fold_mission_completion(mission_id="mx", status="completed", summary="the answer")
+    inline = await_mission_completion(
+        delegation_id=reg["delegation_id"], mission_id="mx", timeout_seconds=5
+    )
+    assert inline and inline["delivered"] == "inline"
+    assert inline["results"][0]["summary"] == "the answer"
+    # Claimed+completed so the async watcher will skip it (no double delivery).
+    assert ad.find_delegation_by_mission_id("mx")["delivery_state"] == "delivered"
+
+
+def test_await_times_out_when_mission_unfinished(ad):
+    import time
+
+    from tools.mission_delegation import await_mission_completion
+
+    reg = ad.register_mission_delegation(goal="g", session_key="sk")
+    ad.set_delegation_mission_id(reg["delegation_id"], "my")
+    t0 = time.time()
+    out = await_mission_completion(
+        delegation_id=reg["delegation_id"], mission_id="my",
+        timeout_seconds=1, poll_interval=0.2,
+    )
+    assert out is None and 0.8 < time.time() - t0 < 2.5
+
+
 def test_abandon_removes_phantom_slot(ad):
     reg = ad.register_mission_delegation(goal="g", session_key="sk")
     ad.set_delegation_mission_id(reg["delegation_id"], "m4")

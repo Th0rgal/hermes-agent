@@ -603,6 +603,19 @@ def fold_mission_completion(
     return "folded"
 
 
+def get_delegation_mission_id(delegation_id: str) -> Optional[str]:
+    """Resolve a delegation_id to its bound sandboxed.sh mission id (or None)."""
+    did = (delegation_id or "").strip()
+    if not did:
+        return None
+    with _DB_LOCK, _transaction() as conn:
+        row = conn.execute(
+            "SELECT mission_id FROM async_delegations WHERE delegation_id=?",
+            (did,),
+        ).fetchone()
+    return (row[0] if row and row[0] else None)
+
+
 def set_delegation_mission_id(delegation_id: str, mission_id: str) -> bool:
     """Bind a mission id to a pending delegation row after the mission POST is
     confirmed. Called by tools/mission_delegation.py immediately after dispatch."""

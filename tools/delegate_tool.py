@@ -4534,3 +4534,75 @@ registry.register(
     emoji="🔀",
     dynamic_schema_overrides=_build_dynamic_schema_overrides,
 )
+
+
+def delegate_steer(
+    message: Optional[str] = None,
+    mission_id: Optional[str] = None,
+    delegation_id: Optional[str] = None,
+    parent_agent=None,
+) -> str:
+    """Steer a running mission delegation (backend='mission') by forwarding a
+    message into it. Next-turn only. See tools/mission_delegation.py."""
+    if not str(message or "").strip():
+        return tool_error("delegate_steer requires a 'message'.")
+    if not (mission_id or delegation_id):
+        return tool_error(
+            "delegate_steer requires a 'mission_id' or 'delegation_id' "
+            "(both are returned by delegate_task(backend='mission'))."
+        )
+    from tools.mission_delegation import steer_mission_delegation
+
+    return json.dumps(
+        steer_mission_delegation(
+            message=message, mission_id=mission_id, delegation_id=delegation_id
+        ),
+        ensure_ascii=False,
+    )
+
+
+DELEGATE_STEER_SCHEMA = {
+    "name": "delegate_steer",
+    "description": (
+        "Send a steering message INTO a running mission delegation (one you "
+        "started with delegate_task(backend='mission')). Next-turn only: a plain "
+        "message queues behind the mission's current turn and is picked up when "
+        "it next runs. Pass the mission_id (or delegation_id) from the "
+        "delegate_task result."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "message": {
+                "type": "string",
+                "description": "The steering message to deliver to the mission.",
+            },
+            "mission_id": {
+                "type": "string",
+                "description": "Mission id from the delegate_task dispatch result.",
+            },
+            "delegation_id": {
+                "type": "string",
+                "description": (
+                    "Alternatively the delegation_id from the dispatch result "
+                    "(resolved to the mission id via the ledger)."
+                ),
+            },
+        },
+        "required": ["message"],
+    },
+}
+
+
+registry.register(
+    name="delegate_steer",
+    toolset="delegation",
+    schema=DELEGATE_STEER_SCHEMA,
+    handler=lambda args, **kw: delegate_steer(
+        message=args.get("message"),
+        mission_id=args.get("mission_id"),
+        delegation_id=args.get("delegation_id"),
+        parent_agent=kw.get("parent_agent"),
+    ),
+    emoji="🎯",
+)

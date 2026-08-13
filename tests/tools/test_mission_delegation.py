@@ -114,6 +114,26 @@ def test_await_times_out_when_mission_unfinished(ad):
     assert out is None and 0.8 < time.time() - t0 < 2.5
 
 
+def test_get_delegation_mission_id(ad):
+    reg = ad.register_mission_delegation(goal="g", session_key="sk")
+    ad.set_delegation_mission_id(reg["delegation_id"], "m-steer")
+    assert ad.get_delegation_mission_id(reg["delegation_id"]) == "m-steer"
+    assert ad.get_delegation_mission_id("nope") is None
+
+
+def test_steer_validation(ad):
+    from tools.mission_delegation import steer_mission_delegation
+
+    # No target → error (never touches the MCP transport).
+    assert steer_mission_delegation(message="hi")["status"] == "error"
+    # Known delegation but empty message → error.
+    reg = ad.register_mission_delegation(goal="g", session_key="sk")
+    ad.set_delegation_mission_id(reg["delegation_id"], "m1")
+    assert steer_mission_delegation(
+        message="", delegation_id=reg["delegation_id"]
+    )["status"] == "error"
+
+
 def test_abandon_removes_phantom_slot(ad):
     reg = ad.register_mission_delegation(goal="g", session_key="sk")
     ad.set_delegation_mission_id(reg["delegation_id"], "m4")

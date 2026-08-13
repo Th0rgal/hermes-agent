@@ -35,7 +35,7 @@ except ImportError:
     except ImportError:
         msvcrt = None
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 # Add parent directory to path for imports BEFORE repo-level imports.
 # Without this, standalone invocations (e.g. after `hermes update` reloads
@@ -1748,6 +1748,31 @@ def _is_channel_dm_topic(
     return is_channel
 
 
+# Monitor controllers re-emit the same material state every tick with a moving
+# checkpoint number (e.g. "SCANNER DEAD - checkpoint=<N>"), which defeats the
+# exact-content delivery-receipt dedup and floods the Desktop conversation.  We
+# collapse consecutive deliveries whose STATE_SIGNATURE — with volatile numerals
+# normalized away — is unchanged from the previous one for the same (session,
+# job).  A genuine state change (different signature tokens) still delivers.
+# In-memory + per-process: a scheduler restart re-delivers once (acceptable).
+_STATE_SIG_EXTRACT_RE = re.compile(r"\[STATE_SIGNATURE:\s*([^\]]*)\]", re.IGNORECASE)
+_STATE_SIG_VOLATILE_NUM_RE = re.compile(r"\d[\d.,_/]*")
+_last_delivered_signature: Dict[str, str] = {}
+_last_delivered_signature_lock = threading.Lock()
+
+
+def _normalized_state_signature(text: str) -> Optional[str]:
+    """Extract the ``[STATE_SIGNATURE: …]`` trailer with volatile numerals
+    collapsed, so a monitor re-emitting the same state with a moving checkpoint
+    yields a stable key.  Returns None when no signature is present (ordinary
+    cron output is never signature-deduped)."""
+    m = _STATE_SIG_EXTRACT_RE.search(text or "")
+    if not m:
+        return None
+    sig = _STATE_SIG_VOLATILE_NUM_RE.sub("#", m.group(1).strip().lower())
+    return " ".join(sig.split())
+
+
 def _deliver_to_local_session(
     job: dict, platform_name: str, session_id: str, content: str
 ) -> Optional[str]:
@@ -1769,6 +1794,21 @@ def _deliver_to_local_session(
                     sid = resolver(sid) or sid
             if not db.get_session(sid):
                 return f"{platform_name} session '{session_id}' not found"
+            # Signature-based flood suppression: skip when this controller's
+            # normalized STATE_SIGNATURE is identical to the last one delivered
+            # into this session (unchanged material state).
+            norm_sig = _normalized_state_signature(text)
+            if norm_sig is not None:
+                sig_key = f"{platform_name}:{sid}:{job.get('id', '?')}"
+                with _last_delivered_signature_lock:
+                    if _last_delivered_signature.get(sig_key) == norm_sig:
+                        logger.info(
+                            "Job '%s': suppressing repeat delivery — unchanged "
+                            "state signature (%s)",
+                            job.get("id", "?"), norm_sig,
+                        )
+                        return None
+                    _last_delivered_signature[sig_key] = norm_sig
             delivery_id = (
                 f"cron:{platform_name}:{sid}:{job.get('id', '?')}:"
                 f"{job.get('_delivery_run_id') or job.get('last_run_at') or hashlib.sha256(delivery_content.encode()).hexdigest()}"

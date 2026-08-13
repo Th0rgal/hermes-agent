@@ -3129,6 +3129,80 @@ def _validate_batch_tasks(task_list: List[Dict[str, Any]]) -> Optional[str]:
     return None
 
 
+def _resolve_delegation_backend(
+    backend: Optional[str], task_list: List[Dict[str, Any]]
+) -> str:
+    """Resolve the effective delegation backend ('in_process' | 'mission').
+
+    Per-task ``backend`` beats the top-level one. Phase 1 requires a single,
+    uniform backend across the task list; a mixed batch is Phase 3. Default is
+    ``in_process`` so existing behavior is unchanged."""
+    values = {
+        str(t.get("backend") or backend or "in_process").strip().lower()
+        for t in (task_list or [{}])
+    }
+    if values == {"mission"}:
+        return "mission"
+    return "in_process"
+
+
+def _dispatch_mission_backend(
+    *,
+    task_list: List[Dict[str, Any]],
+    background: bool,
+    parent_agent,
+    origin_session_id: str,
+    origin_ui_session_id: str,
+) -> str:
+    """Phase 1: dispatch a single delegated task to a sandboxed.sh mission.
+
+    Skips in-process child construction entirely; the mission's terminal webhook
+    folds the result back into the delegating turn (see gateway/platforms/
+    webhook.py). Batch/mixed backends and bounded-await are Phases 2-3."""
+    if not background:
+        return tool_error(
+            "backend='mission' currently requires background=true (the mission "
+            "runs out-of-band and its result folds back into the conversation "
+            "when it completes). Bounded synchronous 'await' mode is planned."
+        )
+    if len(task_list) != 1:
+        return tool_error(
+            "backend='mission' currently supports a single task (a mission batch "
+            "is a later phase). Dispatch one delegate_task per mission for now."
+        )
+    task = task_list[0]
+    goal = task.get("goal") or ""
+    if not goal.strip():
+        return tool_error("backend='mission' requires a non-empty goal.")
+
+    from tools.approval import get_current_session_key
+    from tools.mission_delegation import dispatch_mission_delegation
+
+    session_key = get_current_session_key(default="") or str(
+        getattr(parent_agent, "session_id", "") or ""
+    )
+    result = dispatch_mission_delegation(
+        goal=goal,
+        context=task.get("context"),
+        role=_normalize_role(task.get("role")),
+        model=task.get("model") or getattr(parent_agent, "model", None),
+        session_key=session_key,
+        parent_session_id=getattr(parent_agent, "session_id", None),
+        origin_ui_session_id=origin_ui_session_id,
+        origin_session_id=origin_session_id,
+        workspace_id=task.get("workspace_id"),
+        project=task.get("project"),
+        title=task.get("title"),
+    )
+    if result.get("status") == "dispatched":
+        result["note"] = (
+            "Delegated to a sandboxed.sh mission (isolated workspace, durable). "
+            "End your turn — the result folds back into this conversation when "
+            "the mission completes; do NOT poll."
+        )
+    return json.dumps(result, ensure_ascii=False)
+
+
 def delegate_task(
     goal: Optional[str] = None,
     context: Optional[str] = None,
@@ -3137,6 +3211,9 @@ def delegate_task(
     role: Optional[str] = None,
     background: Optional[bool] = None,
     output_schema: Optional[Dict[str, Any]] = None,
+    backend: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    project: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -3236,6 +3313,10 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         single_task: Dict[str, Any] = {"goal": goal, "context": context, "role": top_role}
+        # backend='mission' single-task passthroughs (caller-specified workspace).
+        for _k, _v in (("backend", backend), ("workspace_id", workspace_id), ("project", project)):
+            if _v is not None:
+                single_task[_k] = _v
         if output_schema is not None:
             single_task["output_schema"] = output_schema
         task_list = [single_task]
@@ -3323,6 +3404,19 @@ def delegate_task(
     _origin_owner_transport, _origin_owner_session_record = (
         _capture_gateway_steer_authority(_origin_ui_session_id)
     )
+
+    # backend="mission": route to a durable, isolated sandboxed.sh mission
+    # instead of an in-process child. Intercept BEFORE child construction so no
+    # AIAgent is built. The mission's terminal webhook folds the result back
+    # into this conversation via the async-delegation ledger (webhook.py).
+    if _resolve_delegation_backend(backend, task_list) == "mission":
+        return _dispatch_mission_backend(
+            task_list=task_list,
+            background=background,
+            parent_agent=parent_agent,
+            origin_session_id=_origin_wake_sid,
+            origin_ui_session_id=_origin_ui_session_id,
+        )
 
     # Build all child agents on the main thread (thread-safe construction).
     # _build_child_preserving_parent_tools saves/restores the parent's
@@ -4287,6 +4381,35 @@ DELEGATE_TASK_SCHEMA = {
                     "backward compatibility."
                 ),
             },
+            "backend": {
+                "type": "string",
+                "enum": ["in_process", "mission"],
+                "description": (
+                    "Where the delegated work runs. 'in_process' (default) spawns "
+                    "an in-process subagent — fast, ephemeral, shares this host. "
+                    "'mission' dispatches a durable sandboxed.sh mission in its "
+                    "own isolated workspace/container (survives restarts, its own "
+                    "backend/model). Use 'mission' for long, isolated, or "
+                    "file-writing work; its result folds back into this "
+                    "conversation when it completes. Currently 'mission' supports "
+                    "a single goal (not the tasks[] batch)."
+                ),
+            },
+            "workspace_id": {
+                "type": "string",
+                "description": (
+                    "backend='mission' only: the sandboxed.sh workspace to run "
+                    "the mission in. Omit to use the conversation's project "
+                    "workspace."
+                ),
+            },
+            "project": {
+                "type": "string",
+                "description": (
+                    "backend='mission' only: project slug to tag the mission "
+                    "with (optional)."
+                ),
+            },
         },
         "required": [],
     },
@@ -4348,6 +4471,9 @@ registry.register(
         role=args.get("role"),
         background=_model_background_value(args, kw.get("parent_agent")),
         output_schema=args.get("output_schema"),
+        backend=args.get("backend"),
+        workspace_id=args.get("workspace_id"),
+        project=args.get("project"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,

@@ -7799,6 +7799,9 @@ class AIAgent:
             max_iterations=function_args.get("max_iterations"),
             role=function_args.get("role"),
             background=(not _is_subagent),
+            backend=function_args.get("backend"),
+            workspace_id=function_args.get("workspace_id"),
+            project=function_args.get("project"),
             parent_agent=self,
         )
 

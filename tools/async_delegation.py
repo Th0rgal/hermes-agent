@@ -260,6 +260,10 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
             # restart-recovered completion can reconstruct a full
             # SessionSource — see _capture_routing_origin.
             "scope_id", "user_id", "user_name",
+            # Mission-backed delegation fields (backend="mission"): persisted so
+            # the webhook fork can reconstruct the completion event and so a
+            # restart-recovered mission slot keeps its provenance.
+            "backend", "workspace_id", "project",
         )
         if key in record
     }
@@ -1065,6 +1069,87 @@ def _push_completion_event(
             "result lost: %s",
             record.get("delegation_id"), exc,
         )
+
+
+def abandon_pending_delegation(delegation_id: str) -> None:
+    """Remove a pending slot that never actually dispatched (e.g. the mission
+    POST failed), so no phantom row lingers to be resolved by a stray webhook."""
+    with _records_lock:
+        _records.pop(delegation_id, None)
+    try:
+        _delete_durable_delegation(delegation_id)
+    except Exception:
+        logger.debug("abandon_pending_delegation: durable delete failed for %s",
+                     delegation_id, exc_info=True)
+
+
+def register_mission_delegation(
+    *,
+    goal: str,
+    context: Optional[str] = None,
+    role: Optional[str] = None,
+    model: Optional[str] = None,
+    session_key: str,
+    parent_session_id: Optional[str] = None,
+    origin_ui_session_id: str = "",
+    origin_session_id: str = "",
+    workspace_id: Optional[str] = None,
+    project: Optional[str] = None,
+    max_async_children: int = _DEFAULT_MAX_ASYNC_CHILDREN,
+    delegation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Register a durable *pending* ledger slot for a sandboxed.sh mission-backed
+    delegation (``backend="mission"``).
+
+    Unlike :func:`dispatch_async_delegation_batch` there is NO local runner or
+    thread — the mission runs remotely and its terminal webhook (folded in
+    ``gateway/platforms/webhook.py``) pushes the completion event later, keyed on
+    the mission id bound via :func:`set_delegation_mission_id`. The pending row is
+    created BEFORE the mission POST so a racing completion is resolvable (and, if
+    it races ahead of the mission-id bind, the webhook's durable markers re-POST).
+
+    Occupies one async slot (same capacity gate as the batch path). Returns
+    ``{"status":"dispatched","delegation_id":...}`` or ``{"status":"rejected",...}``.
+    """
+    delegation_id = delegation_id or _new_delegation_id()
+    dispatched_at = time.time()
+    record: Dict[str, Any] = {
+        "delegation_id": delegation_id,
+        "goal": goal,
+        "context": context,
+        "role": role,
+        "model": model,
+        "session_key": session_key,
+        "origin_ui_session_id": origin_ui_session_id,
+        "origin_session_id": origin_session_id,
+        "parent_session_id": parent_session_id,
+        **_capture_routing_origin(),
+        "status": "running",
+        "dispatched_at": dispatched_at,
+        "completed_at": None,
+        # A single mission renders like a one-task fan-out on completion.
+        "is_batch": True,
+        "backend": "mission",
+        "workspace_id": workspace_id,
+        "project": project,
+    }
+    with _records_lock:
+        running = sum(
+            1 for r in _records.values()
+            if r.get("status") in ("running", "stalling")
+        )
+        if running >= max_async_children:
+            return {
+                "status": "rejected",
+                "error": (
+                    f"Async delegation capacity reached ({max_async_children} "
+                    f"running). Wait for one to finish, or raise "
+                    f"delegation.max_concurrent_children in config.yaml."
+                ),
+            }
+        _records[delegation_id] = record
+    _persist_dispatch(record)
+    return {"status": "dispatched", "delegation_id": delegation_id}
 
 
 def dispatch_async_delegation_batch(

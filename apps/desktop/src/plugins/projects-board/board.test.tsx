@@ -181,9 +181,9 @@ describe('projectPaletteRows', () => {
     ])
 
     expect(rows).toEqual([
-      { kind: 'chat', sessionId: 's1', slug: 'verity' },
-      { kind: 'card', slug: 'verity' },
-      { kind: 'card', slug: 'paloma' }
+      { kind: 'chat', label: 'verity', sessionId: 's1', slug: 'verity' },
+      { kind: 'card', label: 'verity', slug: 'verity' },
+      { kind: 'card', label: 'paloma', slug: 'paloma' }
     ])
   })
 
@@ -191,6 +191,15 @@ describe('projectPaletteRows', () => {
     const projects = Array.from({ length: 40 }, (_, i) => row(`p${i}`, 'active'))
 
     expect(projectPaletteRows(projects, 20)).toHaveLength(20)
+  })
+
+  it('labels rows by the display title, falling back to slug', () => {
+    const rows = projectPaletteRows([
+      { ...row('verity-lido', 'active'), title: 'Verity Lido' },
+      { ...row('paloma', 'active'), title: null }
+    ])
+
+    expect(rows.map(r => r.label)).toEqual(['Verity Lido', 'paloma'])
   })
 })
 

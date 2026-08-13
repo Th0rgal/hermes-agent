@@ -254,10 +254,10 @@ export function debounceAttentionNotifications(slugs: string[], now = Date.now()
 
 // The plugin shell owns presentation (i18n'd copy, the notification door);
 // the data layer only detects transitions on each roster arrival.
-let notifyAttentionFn: ((slug: string) => void) | null = null
+let notifyAttentionFn: ((label: string) => void) | null = null
 let previousBuckets: null | Record<string, string> = null
 
-export function setAttentionNotifier(fn: ((slug: string) => void) | null): void {
+export function setAttentionNotifier(fn: ((label: string) => void) | null): void {
   notifyAttentionFn = fn
 }
 
@@ -269,8 +269,12 @@ function observeRoster(projects: ProjectRow[]): void {
     return
   }
 
+  // Notify by the human display label — the backend always populates
+  // ProjectRow.title (humanize_slug fallback), so a raw slug should never
+  // surface. Debounce still keys on slugs; only the shown label changes.
+  const labels = Object.fromEntries(projects.map(p => [p.slug, p.title?.trim() || p.slug]))
   for (const slug of debounceAttentionNotifications(entered)) {
-    notifyAttentionFn(slug)
+    notifyAttentionFn(labels[slug] ?? slug)
   }
 }
 
@@ -278,27 +282,29 @@ function observeRoster(projects: ProjectRow[]): void {
 
 export interface ProjectPaletteRow {
   kind: 'card' | 'chat'
+  label: string
   sessionId?: string
   slug: string
 }
 
 /** ⌘K rows from the roster: an "open board card" row per non-archived project
  *  and an "open conversation" row when it has a binding. Capped (by project)
- *  so a huge roster can't flood the palette. The overview payload carries no
- *  project title, so rows are labeled by slug. */
+ *  so a huge roster can't flood the palette. The overview payload carries the
+ *  display title (humanize_slug fallback), so rows are labeled by it. */
 export function projectPaletteRows(projects: ProjectRow[], cap = 20): ProjectPaletteRow[] {
   return projects
     .filter(p => p.bucket !== 'archived')
     .slice(0, cap)
     .flatMap(p => {
       const rows: ProjectPaletteRow[] = []
+      const label = p.title?.trim() || p.slug
       const sessionId = isBoundConversation(p.conversation) ? p.conversation.session_id : undefined
 
       if (sessionId) {
-        rows.push({ kind: 'chat', sessionId, slug: p.slug })
+        rows.push({ kind: 'chat', label, sessionId, slug: p.slug })
       }
 
-      rows.push({ kind: 'card', slug: p.slug })
+      rows.push({ kind: 'card', label, slug: p.slug })
 
       return rows
     })

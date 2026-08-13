@@ -83,11 +83,11 @@ type BoardMessages = {
   menuOptions: string
   nextActionArrow: (action: string) => string
   focusAttentionTip: string
-  paletteOpenConversation: (slug: string) => string
-  paletteOpenCard: (slug: string) => string
+  paletteOpenConversation: (label: string) => string
+  paletteOpenCard: (label: string) => string
   steerMissionTip: string
   attentionNotifTitle: string
-  attentionNotifBody: (slug: string) => string
+  attentionNotifBody: (label: string) => string
   openBoardAction: string
   notifyToggleOn: string
   notifyToggleOff: string
@@ -186,11 +186,11 @@ const en: BoardMessages = {
   menuOptions: 'Project options',
   nextActionArrow: action => `→ ${action}`,
   focusAttentionTip: 'Show projects needing attention',
-  paletteOpenConversation: slug => `Project: ${slug} — open conversation`,
-  paletteOpenCard: slug => `Project: ${slug} — open board card`,
+  paletteOpenConversation: label => `Project: ${label} — open conversation`,
+  paletteOpenCard: label => `Project: ${label} — open board card`,
   steerMissionTip: 'Steer this mission',
   attentionNotifTitle: 'Project needs attention',
-  attentionNotifBody: slug => `${slug} needs your attention`,
+  attentionNotifBody: label => `${label} needs your attention`,
   openBoardAction: 'Open board',
   notifyToggleOn: 'Attention notifications on — click to mute',
   notifyToggleOff: 'Attention notifications off — click to enable',

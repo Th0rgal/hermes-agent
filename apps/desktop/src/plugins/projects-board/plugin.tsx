@@ -135,7 +135,7 @@ const plugin: HermesPlugin = {
     // Desktop notification when a project ENTERS attention (the data layer
     // detects transitions + debounces; this owns the i18n'd presentation).
     // Clicking through opens the board focused on the attention column.
-    setAttentionNotifier(slug =>
+    setAttentionNotifier(label =>
       host.notify({
         action: {
           label: ctx.i18n.t('openBoardAction'),
@@ -145,7 +145,7 @@ const plugin: HermesPlugin = {
           }
         },
         kind: 'warning',
-        message: ctx.i18n.t('attentionNotifBody', slug),
+        message: ctx.i18n.t('attentionNotifBody', label),
         title: ctx.i18n.t('attentionNotifTitle')
       })
     )
@@ -190,9 +190,9 @@ const plugin: HermesPlugin = {
             id: `projects-board.${row.kind}.${row.slug}`,
             label:
               row.kind === 'chat'
-                ? ctx.i18n.t('paletteOpenConversation', row.slug)
-                : ctx.i18n.t('paletteOpenCard', row.slug),
-            keywords: ['project', row.slug, 'missions', 'board'],
+                ? ctx.i18n.t('paletteOpenConversation', row.label)
+                : ctx.i18n.t('paletteOpenCard', row.label),
+            keywords: ['project', row.slug, row.label, 'missions', 'board'],
             run: paletteRun(row)
           } satisfies PaletteContribution
         }))

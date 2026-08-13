@@ -636,13 +636,24 @@ class WebhookAdapter(BasePlatformAdapter):
             return web.json_response(
                 {"status": "ack", "mission_id": mission_id, "folded": False}
             )
-        summary = str(
-            payload.get("summary")
-            or payload.get("result_summary")
-            or payload.get("recommended_action")
-            or ""
+        # Compose a human summary from the fields the mission webhook already
+        # carries (a dedicated mission-output summary is a follow-up on the
+        # sandboxed.sh side). Prefer an explicit summary if a future payload
+        # adds one.
+        _summary_bits = [
+            payload.get("summary"),
+            payload.get("result_summary"),
+            payload.get("short_description"),
+            payload.get("recommended_action"),
+            payload.get("terminal_evidence") if mapped != "completed" else None,
+        ]
+        summary = "\n".join(str(b).strip() for b in _summary_bits if b and str(b).strip())
+        if not summary:
+            summary = str(payload.get("title") or f"Mission {raw_status}")
+        error = (
+            payload.get("error") or payload.get("terminal_reason")
+            if mapped == "failed" else None
         )
-        error = payload.get("error") if mapped == "failed" else None
         outcome = fold_mission_completion(
             mission_id=mission_id,
             status=mapped,

@@ -273,13 +273,36 @@ describe('the board page', () => {
     expect(screen.getByText('controller blocked on CI')).toBeTruthy()
     expect(screen.getByText(/Shipping PR #42/)).toBeTruthy()
 
-    // Chip cap: 3 rendered (live + most-recent failed), the dead 5 folded
-    // into one muted "+5" — never a wall of stopped/interrupted chips.
-    expect(screen.getByText('Ship PR')).toBeTruthy()
-    expect(screen.getByText('f1')).toBeTruthy()
-    expect(screen.getByText('f2')).toBeTruthy()
-    expect(screen.getByText('+5')).toBeTruthy()
+    // The card no longer renders per-mission chips — the drawer owns the
+    // mission list. The health digest carries the counts instead.
+    expect(screen.queryByText('Ship PR')).toBeNull()
     expect(screen.queryByText('dead-1')).toBeNull()
+
+    dispose()
+  })
+
+  it('shows the decisions badge and autonomy chip when the row carries them', async () => {
+    const { dispose } = renderBoard([
+      {
+        ...row('verity', 'attention'),
+        attention_reasons: ['2 decisions awaiting you'],
+        autonomy_level: 'act_reversible',
+        pending_decisions: 2
+      }
+    ])
+
+    expect(await screen.findByText('2 decisions')).toBeTruthy()
+    expect(screen.getByText('acts (reversible)')).toBeTruthy()
+
+    dispose()
+  })
+
+  it('renders plainly when the row predates the ledger fields', async () => {
+    // Old backend: no autonomy_level, no pending_decisions — no chip, no badge.
+    const { dispose } = renderBoard([row('verity', 'active')])
+
+    expect(await screen.findByText('verity')).toBeTruthy()
+    expect(screen.queryByText(/decision/)).toBeNull()
 
     dispose()
   })

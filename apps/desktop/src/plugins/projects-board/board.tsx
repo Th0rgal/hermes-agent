@@ -47,7 +47,6 @@ import {
   fetchProjects,
   isBoundConversation,
   liveMissions,
-  type MissionChip,
   moveProject,
   needsAttention,
   type ProjectAction,
@@ -55,12 +54,11 @@ import {
   projectMode,
   type ProjectRow,
   PROJECTS_KEY,
-  type ProjectsResponse,
-  selectChips
+  type ProjectsResponse
 } from './api'
-import { RenameProjectDialog, SessionColorSwatchesRow, SteerInput, UnreadBadge } from './color-swatches'
+import { RenameProjectDialog, SessionColorSwatchesRow, UnreadBadge } from './color-swatches'
 import { ControllerStatusIcon } from './controller-status'
-import { ProjectDrawer } from './drawer'
+import { AutonomyChip, ProjectDrawer } from './drawer'
 import { type BoardText, bucketHelp, bucketLabel, useBoard } from './i18n'
 
 // Column dot/accent tones, all UI tokens or the shared amber/indigo accents.
@@ -162,60 +160,6 @@ function HealthDigest({ b, project }: { b: BoardText; project: ProjectRow }) {
   )
 }
 
-const CHIP_DOT: Record<string, string> = {
-  active: 'animate-pulse bg-indigo-400/80',
-  awaiting_user: 'bg-amber-400/90',
-  failed: 'bg-destructive'
-}
-
-const LIVE_CHIP = new Set(['active', 'awaiting_user', 'queued'])
-
-/** At most 3 chips — live first, then most-recent failed — and one muted
- *  "+N" for the rest (selectChips). The drawer keeps the full list. A live
- *  chip grows a hover reply affordance that opens the inline steer input. */
-function MissionDots({ b, missions, onSteer }: { b: BoardText; missions: MissionChip[]; onSteer?: (id: string) => void }) {
-  if (missions.length === 0) {
-    return null
-  }
-
-  const { chips, overflow } = selectChips(missions)
-
-  return (
-    <div className="flex flex-wrap items-center gap-1">
-      {chips.map((mission, index) => (
-        <Tip key={mission.id ?? index} label={mission.title ?? mission.id ?? mission.status}>
-          <span
-            className={cn(
-              'group/chip inline-flex max-w-28 items-center gap-1 rounded-full bg-(--ui-bg-quaternary) px-1.5 py-px text-[0.5625rem] text-(--ui-text-tertiary)'
-            )}
-          >
-            <span className={cn('size-1 shrink-0 rounded-full', CHIP_DOT[mission.status] ?? 'bg-(--ui-text-quaternary)')} />
-            <span className="truncate">{mission.title ?? mission.id?.slice(0, 8) ?? mission.status}</span>
-            {onSteer && mission.id && LIVE_CHIP.has(mission.status) && (
-              <button
-                aria-label={b.steerMissionTip}
-                className="hidden shrink-0 text-(--ui-text-quaternary) hover:text-foreground group-hover/chip:inline-flex"
-                onClick={event => {
-                  event.stopPropagation()
-                  onSteer(mission.id!)
-                }}
-                type="button"
-              >
-                <Codicon name="reply" size="0.65rem" />
-              </button>
-            )}
-          </span>
-        </Tip>
-      ))}
-      {overflow > 0 && (
-        <span className="inline-flex items-center rounded-full bg-(--ui-bg-quaternary) px-1.5 py-px text-[0.5625rem] tabular-nums text-(--ui-text-quaternary)">
-          {b.moreChips(overflow)}
-        </span>
-      )}
-    </div>
-  )
-}
-
 // ── card ─────────────────────────────────────────────────────────────────────
 
 function Card({
@@ -230,7 +174,6 @@ function Card({
   const b = useBoard()
   const queryClient = useQueryClient()
   const [dragging, setDragging] = useState(false)
-  const [steerId, setSteerId] = useState<null | string>(null)
   const [renameOpen, setRenameOpen] = useState(false)
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false)
   const unreadCounts = useValue($sessionUnreadCounts)
@@ -317,14 +260,23 @@ function Card({
             <div className="line-clamp-2 text-[0.625rem] leading-snug text-(--ui-text-tertiary)">{update.headline}</div>
           )}
           <HealthDigest b={b} project={project} />
-          <MissionDots b={b} missions={project.missions} onSteer={setSteerId} />
-          {steerId && (
-            <div onClick={event => event.stopPropagation()}>
-              <SteerInput missionId={steerId} onDone={() => setSteerId(null)} />
+          {/* Attention accents: owner decisions + parked missions. The full
+              mission list lives in the drawer, not on the card. */}
+          {((project.pending_decisions ?? 0) > 0 || waiting.length > 0 || project.autonomy_level) && (
+            <div className="flex flex-wrap items-center gap-2">
+              {(project.pending_decisions ?? 0) > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-amber-400/15 px-1.5 py-px text-[0.5625rem] uppercase tracking-wide text-amber-500">
+                  <Codicon name="question" size="0.65rem" />
+                  {b.decisionsBadge(project.pending_decisions!)}
+                </span>
+              )}
+              {waiting.length > 0 && (
+                <span className="text-[0.5625rem] uppercase tracking-wide text-amber-500">{b.needsYou(waiting.length)}</span>
+              )}
+              <span className="ml-auto">
+                <AutonomyChip level={project.autonomy_level} />
+              </span>
             </div>
-          )}
-          {waiting.length > 0 && (
-            <span className="text-[0.5625rem] uppercase tracking-wide text-amber-500">{b.needsYou(waiting.length)}</span>
           )}
         </div>
       </ContextMenuTrigger>

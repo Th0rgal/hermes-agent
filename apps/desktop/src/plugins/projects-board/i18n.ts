@@ -75,6 +75,29 @@ type BoardMessages = {
   saveGrant: string
   grantSaved: string
   openDecisions: string
+  autonomyLevel: string
+  autonomyLevelUnset: string
+  autonomy: Record<'act_full' | 'act_reversible' | 'observe' | 'propose', string>
+  autonomyTip: Record<'act_full' | 'act_reversible' | 'observe' | 'propose', string>
+  needsYouSection: string
+  needsYouEmpty: string
+  answerPlaceholder: string
+  answerSend: string
+  answerDelivered: string
+  answerRecorded: string
+  decisionsBadge: (n: number) => string
+  roadmap: string
+  roadmapEmpty: string
+  roadmapProgress: (done: number, total: number) => string
+  taskAttempts: (n: number) => string
+  openPr: string
+  workerMission: string
+  acceptanceCriteria: string
+  recentActivity: string
+  recentActivityEmpty: string
+  answeredLabel: string
+  decidedLabel: string
+  debugSection: string
   stateTimeline: string
   observations: (n: number) => string
   conversation: string
@@ -178,6 +201,39 @@ const en: BoardMessages = {
   saveGrant: 'Save grant',
   grantSaved: 'Grant updated.',
   openDecisions: 'Open decisions',
+  autonomyLevel: 'Autonomy',
+  autonomyLevelUnset: 'Not set',
+  autonomy: {
+    act_full: 'acts freely',
+    act_reversible: 'acts (reversible)',
+    observe: 'observes',
+    propose: 'proposes'
+  },
+  autonomyTip: {
+    act_full: 'The controller acts without asking, including irreversible steps.',
+    act_reversible: 'The controller acts without asking, except irreversible steps.',
+    observe: 'The controller only reports — every action needs you.',
+    propose: 'The controller escalates every consequential action to you.'
+  },
+  needsYouSection: 'Needs you',
+  needsYouEmpty: 'Nothing waiting on you.',
+  answerPlaceholder: 'Your decision…',
+  answerSend: 'Answer',
+  answerDelivered: 'Answer recorded and delivered to the controller.',
+  answerRecorded: 'Answer recorded — the controller reads it next tick.',
+  decisionsBadge: n => `${n} decision${n === 1 ? '' : 's'}`,
+  roadmap: 'Roadmap',
+  roadmapEmpty: 'No planned tasks yet.',
+  roadmapProgress: (done, total) => `${done}/${total} done`,
+  taskAttempts: n => `${n} attempt${n === 1 ? '' : 's'}`,
+  openPr: 'Open PR',
+  workerMission: 'Worker mission',
+  acceptanceCriteria: 'Acceptance criteria',
+  recentActivity: 'Recent activity',
+  recentActivityEmpty: 'No recorded decisions yet.',
+  answeredLabel: 'answered',
+  decidedLabel: 'autonomous',
+  debugSection: 'Debug',
   stateTimeline: 'State timeline',
   observations: n => `${n} observation${n === 1 ? '' : 's'}`,
   conversation: 'Conversation',

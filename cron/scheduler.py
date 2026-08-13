@@ -5019,6 +5019,18 @@ def run_one_job(
             delivery_outcome = "delivered"
         else:
             delivery_outcome = "suppressed"
+        # Robustness: a delivery failure leaves last_status='ok' (that reflects
+        # the AGENT run, not delivery), so a controller whose output never
+        # reaches its conversation looks healthy — it silently produced nothing
+        # visible for hours. Emit a distinct, greppable WARNING so the monitor
+        # (and a human) can catch an unreachable route immediately.
+        if delivery_outcome == "failed":
+            logger.warning(
+                "DELIVERY_UNREACHABLE job '%s' (%s): agent ran OK but delivery "
+                "FAILED (deliver=%s) — output did NOT reach the conversation: %s",
+                job.get("id", "?"), job.get("name", "?"),
+                normalized_deliver, delivery_error,
+            )
         finish_execution(
             execution_id,
             success=success,

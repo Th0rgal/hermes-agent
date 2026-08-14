@@ -25,7 +25,10 @@ import httpx
 from fastapi import APIRouter, Body, HTTPException, WebSocket, WebSocketDisconnect, status as http_status
 from starlette.concurrency import run_in_threadpool
 
+from hermes_cli.web_deps import late
 from plugins.projects.dashboard.plugin_api import _mint_token, _sandboxed_config, _sandboxed_request
+
+_open_session_db_for_profile = late("_open_session_db_for_profile")
 
 _log = logging.getLogger("hermes_cli.web_server")
 
@@ -187,6 +190,53 @@ async def get_project_tasks(slug: str) -> Dict[str, Any]:
             status_code=502, detail="sandboxed.sh returned an unexpected tasks shape"
         )
     return body
+
+
+@router.get("/sessions/{session_id}/resolve")
+async def resolve_session(session_id: str) -> Dict[str, Any]:
+    """Follow continuation/resume pointers to the LIVE session id.
+
+    Project bindings store a session id frozen at bind time; Hermes
+    compressions move the conversation to new ids. This is the desktop's
+    canonicalization door — read-only, local SessionDB, no sandboxed.sh call.
+    404 = the id resolves to nothing (deleted lineage), which callers treat
+    as "keep the stored id".
+    """
+
+    def _read() -> Optional[str]:
+        db = _open_session_db_for_profile(None, read_only=True)
+        try:
+            sid = db.resolve_session_id(session_id)
+            if not sid:
+                return None
+            return db.resolve_resume_session_id(sid) or sid
+        finally:
+            db.close()
+
+    live = await run_in_threadpool(_read)
+    if not live:
+        raise HTTPException(status_code=404, detail="unknown session")
+    return {"session_id": session_id, "live_session_id": live}
+
+
+@router.put("/projects/{slug}/conversation")
+async def rebind_conversation(
+    slug: str, payload: Dict[str, Any] = Body(default_factory=dict)
+) -> Dict[str, Any]:
+    """Re-point the project's bound conversation (the self-heal write).
+
+    The desktop calls this when the stored binding resolved to a newer
+    continuation, so every consumer of the binding — selection, dedup,
+    Hermes-side mission-callback routing — follows the live conversation.
+    """
+    slug = _clean_slug(slug)
+    session_id = str(payload.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    await _sandboxed_request(
+        "PUT", f"/api/projects/{slug}/conversation", body={"session_id": session_id}
+    )
+    return {"ok": True, "slug": slug, "session_id": session_id}
 
 
 def _inject_owner_answer(session_key: str, text: str) -> bool:

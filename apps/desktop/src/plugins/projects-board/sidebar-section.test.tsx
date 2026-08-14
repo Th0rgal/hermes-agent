@@ -193,6 +193,60 @@ describe('the Projects sidebar section', () => {
     dispose()
   })
 
+  it('canonicalizes stale bindings to the live continuation and self-heals', async () => {
+    const calls: Array<{ method?: string; path: string }> = []
+
+    const rest = <T,>(path: string, opts?: { body?: unknown; method?: string }): Promise<T> => {
+      calls.push({ method: opts?.method, path })
+
+      if (path === '/projects') {
+        return Promise.resolve({ projects: [row('verity', 'active', 'sess-old')] } as T)
+      }
+
+      if (path === '/sessions/sess-old/resolve') {
+        return Promise.resolve({ live_session_id: 'sess-live' } as T)
+      }
+
+      if (path === '/projects/verity/conversation') {
+        return Promise.resolve({ ok: true } as T)
+      }
+
+      return Promise.reject(new Error(`unexpected rest call: ${path}`))
+    }
+
+    const dispose = bindApi(rest as Parameters<typeof bindApi>[0])
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+    render(
+      <QueryClientProvider client={client}>
+        <ProjectsSidebarSection />
+      </QueryClientProvider>
+    )
+
+    await screen.findByText('verity')
+
+    // Resolution publishes BOTH ids for the dedup/selection seam, and the
+    // stale binding is re-pointed exactly once.
+    await waitFor(() =>
+      expect($projectBoundSessionIds.get()).toEqual({
+        'sess-live': 'verity',
+        'sess-old': 'verity'
+      })
+    )
+    await waitFor(() =>
+      expect(
+        calls.filter(c => c.method === 'PUT' && c.path === '/projects/verity/conversation')
+      ).toHaveLength(1)
+    )
+
+    // Navigation targets the live continuation, not the stale stored id.
+    const navigate = vi.spyOn(host, 'navigate').mockImplementation(() => undefined)
+
+    fireEvent.click(screen.getByText('verity'))
+    expect(navigate).toHaveBeenCalledWith('/sess-live')
+    dispose()
+  })
+
   it('hides itself entirely when the surface is unavailable (503)', async () => {
     const { dispose, view } = renderSection(() =>
       Promise.reject(Object.assign(new Error('503'), { status: 503 }))

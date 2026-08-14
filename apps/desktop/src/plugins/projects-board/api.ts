@@ -263,6 +263,8 @@ export function bindApi(restFn: Rest, storage?: PluginStorage, socket?: Socket):
     unsubscribe?.()
     // Disabled plugin = no Projects section; release the sessions back to
     // the core Recents list instead of leaving them hidden everywhere.
+    lastRoster = []
+    resolvedLiveIds = {}
     $projectBoundSessionIds.set({})
     rest = null
   }
@@ -320,17 +322,70 @@ export function setAttentionNotifier(fn: ((label: string) => void) | null): void
   notifyAttentionFn = fn
 }
 
+// ── binding canonicalization ────────────────────────────────────────────────
+// Bindings store a session id frozen at bind time; Hermes compressions move
+// the conversation to new ids. The gateway resolves stored → live, and both
+// ids are published for the core dedup/selection seam. `lastRoster` +
+// `resolvedLiveIds` are composed by ONE publisher so a roster refresh can't
+// transiently drop the resolved ids.
+
+let lastRoster: ProjectRow[] = []
+let resolvedLiveIds: Record<string, string> = {}
+
+function publishBindings(): void {
+  const out: Record<string, string> = {}
+
+  for (const project of lastRoster) {
+    if (project.bucket === 'archived' || !isBoundConversation(project.conversation)) {
+      continue
+    }
+
+    const stored = project.conversation.session_id
+    out[stored] = project.slug
+    const live = resolvedLiveIds[stored]
+
+    if (live) {
+      out[live] = project.slug
+    }
+  }
+
+  $projectBoundSessionIds.set(out)
+}
+
+export const resolveLiveSessionId = (sessionId: string) =>
+  call<{ live_session_id: string }>(`/sessions/${encodeURIComponent(sessionId)}/resolve`).then(
+    response => response.live_session_id
+  )
+
+/** Record a stored→live resolution (from `useLiveBindings`) and republish. */
+export function registerLiveResolution(storedId: string, liveId: string): void {
+  if (resolvedLiveIds[storedId] === liveId) {
+    return
+  }
+
+  resolvedLiveIds = { ...resolvedLiveIds, [storedId]: liveId }
+  publishBindings()
+}
+
+/** The live id a binding currently resolves to (falls back to the stored id
+ *  until — or unless — a resolution lands). */
+export function liveSessionIdFor(storedId: string): string {
+  return resolvedLiveIds[storedId] ?? storedId
+}
+
+/** Re-point a project's bound conversation (the self-heal write). */
+export const rebindConversation = (slug: string, sessionId: string) =>
+  call(`/projects/${encodeURIComponent(slug)}/conversation`, {
+    body: { session_id: sessionId },
+    method: 'PUT'
+  })
+
 function observeRoster(projects: ProjectRow[]): void {
   // Tell the core sidebar which sessions live under the Projects section, so
   // its Recents list dedupes them. Archived projects release their session
   // back to the flat list.
-  $projectBoundSessionIds.set(
-    Object.fromEntries(
-      projects
-        .filter(p => p.bucket !== 'archived' && isBoundConversation(p.conversation))
-        .map(p => [p.conversation!.session_id, p.slug])
-    )
-  )
+  lastRoster = projects
+  publishBindings()
 
   const entered = attentionTransitions(previousBuckets, projects)
   previousBuckets = Object.fromEntries(projects.map(p => [p.slug, p.bucket]))

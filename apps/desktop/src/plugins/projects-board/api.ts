@@ -12,7 +12,13 @@
  * backend is unreachable.
  */
 
-import { atom, type PluginRestOptions, type PluginStorage, queryClient } from '@hermes/plugin-sdk'
+import {
+  $projectBoundSessionIds,
+  atom,
+  type PluginRestOptions,
+  type PluginStorage,
+  queryClient
+} from '@hermes/plugin-sdk'
 
 export type MissionStatus = string
 
@@ -255,6 +261,9 @@ export function bindApi(restFn: Rest, storage?: PluginStorage, socket?: Socket):
   return () => {
     unsubs.forEach(unsub => unsub())
     unsubscribe?.()
+    // Disabled plugin = no Projects section; release the sessions back to
+    // the core Recents list instead of leaving them hidden everywhere.
+    $projectBoundSessionIds.set({})
     rest = null
   }
 }
@@ -312,6 +321,17 @@ export function setAttentionNotifier(fn: ((label: string) => void) | null): void
 }
 
 function observeRoster(projects: ProjectRow[]): void {
+  // Tell the core sidebar which sessions live under the Projects section, so
+  // its Recents list dedupes them. Archived projects release their session
+  // back to the flat list.
+  $projectBoundSessionIds.set(
+    Object.fromEntries(
+      projects
+        .filter(p => p.bucket !== 'archived' && isBoundConversation(p.conversation))
+        .map(p => [p.conversation!.session_id, p.slug])
+    )
+  )
+
   const entered = attentionTransitions(previousBuckets, projects)
   previousBuckets = Object.fromEntries(projects.map(p => [p.slug, p.bucket]))
 

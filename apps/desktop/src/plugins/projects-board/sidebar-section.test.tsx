@@ -1,4 +1,4 @@
-import { host } from '@hermes/plugin-sdk'
+import { $activeChatSessionIds, $projectBoundSessionIds, host } from '@hermes/plugin-sdk'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -144,6 +144,52 @@ describe('the Projects sidebar section', () => {
     expect(dots.length).toBeGreaterThan(0)
 
     setSessionColorOverride('sess-verity', null)
+    dispose()
+  })
+
+  it('renders the bound row selected when its session is the open chat', async () => {
+    $activeChatSessionIds.set(['sess-verity'])
+
+    const { dispose } = renderSection([
+      row('verity', 'active', 'sess-verity'),
+      row('hermes', 'active', 'sess-hermes')
+    ])
+
+    const selectedRow = (await screen.findByText('verity')).closest('button')!
+    const idleRow = screen.getByText('hermes').closest('button')!
+
+    expect(selectedRow.className).toContain('bg-(--ui-row-active-background)')
+    expect(idleRow.className).not.toContain('bg-(--ui-row-active-background)')
+    $activeChatSessionIds.set([])
+    dispose()
+  })
+
+  it('publishes bindings for the core Recents dedup, and clears on dispose', async () => {
+    const { dispose } = renderSection([
+      row('verity', 'active', 'sess-verity'),
+      row('lido', 'archived', 'sess-lido')
+    ])
+
+    await screen.findByText('verity')
+
+    // Archived projects release their session back to the flat list.
+    expect($projectBoundSessionIds.get()).toEqual({ 'sess-verity': 'verity' })
+    dispose()
+    expect($projectBoundSessionIds.get()).toEqual({})
+  })
+
+  it('opens the project card in place from the row menu', async () => {
+    const { dispose } = renderSection([row('verity', 'active', 'sess-verity')])
+    await screen.findByText('verity')
+
+    fireEvent.contextMenu(screen.getByText('verity'))
+    fireEvent.click(await screen.findByText('Open board card'))
+
+    // The board card dialog opens over the current view — no navigation.
+    const navigate = vi.spyOn(host, 'navigate')
+
+    await screen.findByRole('dialog')
+    expect(navigate).not.toHaveBeenCalled()
     dispose()
   })
 

@@ -17,6 +17,7 @@ import { PromptOverlays } from '@/components/prompt-overlays'
 import { Button } from '@/components/ui/button'
 import { ErrorState } from '@/components/ui/error-state'
 import { TitleMenuTrigger } from '@/components/ui/title-menu-trigger'
+import { Slot } from '@/contrib/react/slot'
 import { type HermesGateway } from '@/hermes'
 import { useI18n } from '@/i18n'
 import type { ChatMessage } from '@/lib/chat-messages'
@@ -520,13 +521,17 @@ export const ChatView = memo(function ChatView({
   return (
     <div
       className={cn(
-        'relative isolate flex h-full min-w-0 flex-col overflow-hidden bg-(--ui-chat-surface-background)',
+        'relative isolate flex h-full min-w-0 overflow-hidden bg-(--ui-chat-surface-background)',
         className
       )}
       data-chat-surface=""
       data-composer-target={composerScope.target}
       data-session-anchor={sessionAnchor}
     >
+      {/* The conversation column. Contributions to `chat.rail` render as
+          right-hand siblings (primary surface only) — e.g. the projects
+          plugin's context rail when the open session is bound to a project. */}
+      <div className="relative flex h-full min-w-0 flex-1 flex-col overflow-hidden">
       <Backdrop />
       {/* Tiles get their chrome from the layout zone (chip strip); the modal
           prompt overlays stay active-session-scoped in the primary surface. */}
@@ -641,6 +646,8 @@ export const ChatView = memo(function ChatView({
           </Suspense>
         )}
       </ChatRuntimeBoundary>
+      </div>
+      {isPrimary && <Slot area="chat.rail" />}
     </div>
   )
 })

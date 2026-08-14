@@ -270,6 +270,10 @@ export {
 
 export const PANES_AREA = 'panes'
 export const SESSIONS_SECTIONS_AREA = 'sidebar.sessions.sections'
+/** Right-hand rail of the primary chat surface. Contributions render as
+ *  full-height siblings of the conversation column — render null to stay
+ *  hidden (e.g. only when the open session is relevant to your plugin). */
+export const CHAT_RAIL_AREA = 'chat.rail'
 /** The app's own gateway-readiness evaluation (setup.status +
  *  setup.runtime_check, reconciled) — pass `host.request`. Don't hand-roll
  *  readiness from raw RPC shapes. */

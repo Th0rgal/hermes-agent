@@ -212,7 +212,11 @@ export const $notifyAttention = atom<boolean>(true)
  *  Persisted so an app restart doesn't re-fire a standing alert. */
 export const $attentionNotifiedAt = atom<Record<string, number>>({})
 
+/** Chat project rail collapsed (chip instead of panel). Persisted. */
+export const $railCollapsed = atom<boolean>(false)
+
 const INTRO_KEY = 'introDismissed'
+const RAIL_KEY = 'railCollapsed'
 const COLLAPSED_KEY = 'collapsedColumns'
 const NOTIFY_KEY = 'notifyAttention'
 const NOTIFIED_AT_KEY = 'attentionNotifiedAt'
@@ -252,6 +256,7 @@ export function bindApi(restFn: Rest, storage?: PluginStorage, socket?: Socket):
     persist($collapsedColumns, COLLAPSED_KEY, {})
     persist($notifyAttention, NOTIFY_KEY, true)
     persist($attentionNotifiedAt, NOTIFIED_AT_KEY, {})
+    persist($railCollapsed, RAIL_KEY, false)
   }
 
   previousBuckets = null

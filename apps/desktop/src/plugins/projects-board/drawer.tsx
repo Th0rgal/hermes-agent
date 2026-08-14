@@ -49,7 +49,7 @@ import { useBoard } from './i18n'
 
 const FIELD_LABEL = 'text-[0.62rem] font-semibold uppercase tracking-[0.14em] text-(--ui-text-quaternary)'
 
-function Section({ children, label }: { children: ReactNode; label: string }) {
+export function Section({ children, label }: { children: ReactNode; label: string }) {
   return (
     <section className="flex flex-col gap-1.5">
       <div className={FIELD_LABEL}>{label}</div>
@@ -139,7 +139,7 @@ export function AutonomyChip({ level }: { level?: AutonomyLevel | null }) {
 
 // ── needs-you: pending decisions, answerable inline ──────────────────────────
 
-function PendingDecisionRow({ decision, slug }: { decision: ProjectDecision; slug: string }) {
+export function PendingDecisionRow({ decision, slug }: { decision: ProjectDecision; slug: string }) {
   const b = useBoard()
   const qc = useQueryClient()
   const [answer, setAnswer] = useState('')
@@ -211,7 +211,7 @@ const TASK_GLYPH: Record<string, { icon: string; tone: string }> = {
   settled: { icon: 'pass', tone: '#34d399' }
 }
 
-function TaskRow({ task }: { task: ProjectTask }) {
+export function TaskRow({ task }: { task: ProjectTask }) {
   const b = useBoard()
   const [open, setOpen] = useState(false)
   const glyph = TASK_GLYPH[task.status] ?? TASK_GLYPH.pending
@@ -282,7 +282,7 @@ function TaskRow({ task }: { task: ProjectTask }) {
 
 // ── recent activity: the controller's declared decisions ─────────────────────
 
-function ActivityRow({ decision }: { decision: ProjectDecision }) {
+export function ActivityRow({ decision }: { decision: ProjectDecision }) {
   const b = useBoard()
   const answered = decision.status === 'answered'
   const pr = decision.evidence?.pr_url
@@ -388,6 +388,22 @@ function parseBudget(raw: null | string | undefined): { detail: string; preset: 
   return { detail: value, preset: 'custom' }
 }
 
+/** The grant as one scannable line — shared by the drawer's collapsed panel
+ *  and the chat rail. */
+export function grantSummaryParts(
+  b: ReturnType<typeof useBoard>,
+  grant: null | ProjectGrant | undefined
+): string[] {
+  return [
+    grant?.autonomy_level
+      ? b.autonomy[grant.autonomy_level as keyof typeof b.autonomy] ?? grant.autonomy_level
+      : b.grantUnset,
+    b.mergeSummary(grant?.merge_authority || b.grantUnset),
+    ...(grant?.budget_per_tick ? [b.budgetSummary(grant.budget_per_tick)] : []),
+    ...(grant?.parallel_missions != null ? [b.parallelSummary(grant.parallel_missions)] : [])
+  ]
+}
+
 /** A field label with an explanatory tooltip — the ⓘ makes hover affordance
  *  visible, the title on the whole row makes it forgiving to hit. */
 function FieldLabel({ label, tip }: { label: string; tip: string }) {
@@ -450,12 +466,7 @@ function GrantPanel({ grant, slug }: { grant: null | ProjectGrant | undefined; s
     level !== (grant?.autonomy_level ?? '')
 
   // The read-only summary: what the grant amounts to, in one scannable line.
-  const summaryParts = [
-    grant?.autonomy_level ? b.autonomy[grant.autonomy_level as keyof typeof b.autonomy] ?? grant.autonomy_level : b.grantUnset,
-    b.mergeSummary(grant?.merge_authority || b.grantUnset),
-    ...(grant?.budget_per_tick ? [b.budgetSummary(grant.budget_per_tick)] : []),
-    ...(grant?.parallel_missions != null ? [b.parallelSummary(grant.parallel_missions)] : [])
-  ]
+  const summaryParts = grantSummaryParts(b, grant)
 
   return (
     <section className="flex flex-col gap-1.5">

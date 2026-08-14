@@ -101,6 +101,8 @@ type BoardMessages = {
   answerDelivered: string
   answerRecorded: string
   decisionsBadge: (n: number) => string
+  railHide: string
+  railShow: string
   roadmap: string
   roadmapEmpty: string
   roadmapUnavailable: string
@@ -263,6 +265,8 @@ const en: BoardMessages = {
   answerDelivered: 'Answer recorded and delivered to the controller.',
   answerRecorded: 'Answer recorded — the controller reads it next tick.',
   decisionsBadge: n => `${n} decision${n === 1 ? '' : 's'}`,
+  railHide: 'Hide project panel',
+  railShow: 'Show project panel',
   roadmap: 'Roadmap',
   roadmapEmpty: 'No planned tasks yet.',
   roadmapUnavailable: 'Roadmap temporarily unavailable — retrying.',

@@ -15,6 +15,7 @@
 
 import {
   $activeChatSessionIds,
+  $projectBoundSessionIds,
   $sessionUnreadCounts,
   cn,
   Codicon,
@@ -48,10 +49,14 @@ import { useState } from 'react'
 import {
   fetchProjects,
   isBoundConversation,
+  liveSessionIdFor,
   type ProjectAction,
   projectAction,
   type ProjectRow,
-  PROJECTS_KEY
+  PROJECTS_KEY,
+  rebindConversation,
+  registerLiveResolution,
+  resolveLiveSessionId
 } from './api'
 import { errText } from './board'
 import { RenameProjectDialog, SessionColorSwatchesRow, UnreadBadge } from './color-swatches'
@@ -63,6 +68,57 @@ type BoundRow = ProjectRow & { conversation: { session_id: string } }
 
 function hasBinding(project: ProjectRow): project is BoundRow {
   return project.bucket !== 'archived' && isBoundConversation(project.conversation)
+}
+
+// One rebind attempt per observed stored→live transition, plugin lifetime.
+// A failed write clears its key so the next resolution can retry.
+const attemptedRebinds = new Set<string>()
+
+/** Resolve every binding to its live continuation, publish the live ids for
+ *  the core dedup/selection seam, and self-heal stale bindings: when the
+ *  stored id resolved to a newer continuation, re-point the binding so EVERY
+ *  consumer (drawer, palette, Hermes-side callback routing) follows the live
+ *  conversation. */
+function useLiveBindings(rows: BoundRow[]) {
+  const qc = useQueryClient()
+
+  const storedKey = rows
+    .map(project => project.conversation.session_id)
+    .sort()
+    .join(',')
+
+  useQuery({
+    enabled: rows.length > 0,
+    queryFn: async () => {
+      await Promise.all(
+        rows.map(async project => {
+          const stored = project.conversation.session_id
+          const live = await resolveLiveSessionId(stored).catch(() => null)
+
+          if (!live || live === stored) {
+            return
+          }
+
+          registerLiveResolution(stored, live)
+          const key = `${project.slug}:${stored}->${live}`
+
+          if (attemptedRebinds.has(key)) {
+            return
+          }
+
+          attemptedRebinds.add(key)
+          rebindConversation(project.slug, live)
+            .then(() => void qc.invalidateQueries({ queryKey: PROJECTS_KEY }))
+            .catch(() => attemptedRebinds.delete(key))
+        })
+      )
+
+      return true
+    },
+    queryKey: ['projects-board', 'live-bindings', storedKey],
+    retry: false,
+    staleTime: 120_000
+  })
 }
 
 /** The row's action set, rendered through either Radix kit (⋯ dropdown and
@@ -157,6 +213,10 @@ function ProjectRowItem({ project }: { project: BoundRow }) {
   const unreadCounts = useValue($sessionUnreadCounts)
   const activeChatIds = useValue($activeChatSessionIds)
   const sessionId = project.conversation.session_id
+  // Subscribing to the bindings atom makes `liveSessionIdFor` reactive: the
+  // row re-renders when a stored→live resolution lands.
+  useValue($projectBoundSessionIds)
+  const liveId = liveSessionIdFor(sessionId)
   const unread = unreadCounts[sessionId] ?? 0
   const [cardOpen, setCardOpen] = useState(false)
   const actions = useRowActions(project, () => setCardOpen(true))
@@ -164,8 +224,9 @@ function ProjectRowItem({ project }: { project: BoundRow }) {
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false)
   // The bound conversation is the open chat → this row IS the selection. The
   // core Recents list no longer shows the session, so without this the click
-  // would appear to select nothing at all.
-  const selected = activeChatIds.includes(sessionId)
+  // would appear to select nothing at all. Both ids count: the binding may
+  // lag one compression behind what the chat has open.
+  const selected = activeChatIds.includes(sessionId) || activeChatIds.includes(liveId)
 
   const remove = useMutation({
     mutationFn: () => projectAction(project.slug, 'delete'),
@@ -184,7 +245,7 @@ function ProjectRowItem({ project }: { project: BoundRow }) {
               'transition-colors hover:bg-(--ui-control-hover-background) hover:text-foreground',
               selected && 'bg-(--ui-row-active-background) text-foreground'
             )}
-            onClick={() => host.navigate(`/${encodeURIComponent(sessionId)}`)}
+            onClick={() => host.navigate(`/${encodeURIComponent(liveId)}`)}
             type="button"
           >
             {/* Same dot the sidebar's own rows render — same resolved color. */}
@@ -266,6 +327,8 @@ export function ProjectsSidebarSection() {
   })
 
   const rows = data?.projects.filter(hasBinding) ?? []
+
+  useLiveBindings(rows)
 
   if (rows.length === 0) {
     return null

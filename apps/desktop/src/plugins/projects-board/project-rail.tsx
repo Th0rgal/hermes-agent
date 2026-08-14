@@ -23,8 +23,12 @@ import { useState } from 'react'
 import {
   $railCollapsed,
   fetchProject,
+  fetchProjects,
   fetchProjectTasks,
+  leadSignal,
+  PROJECTS_KEY,
   projectKey,
+  railOpenItems,
   tasksKey
 } from './api'
 import {
@@ -66,6 +70,13 @@ function RailBody({ slug }: { slug: string }) {
     retry: false
   })
 
+  const { data: board } = useQuery({
+    queryFn: fetchProjects,
+    queryKey: PROJECTS_KEY,
+    refetchInterval: 60_000,
+    retry: false
+  })
+
   const { data: roadmap } = useQuery({
     queryFn: () => fetchProjectTasks(slug),
     queryKey: tasksKey(slug),
@@ -78,6 +89,9 @@ function RailBody({ slug }: { slug: string }) {
   const activity = (detail?.recent_decisions ?? []).slice(0, 5)
   const tasks = roadmap?.tasks ?? []
   const summary = roadmap?.summary
+  const row = board?.projects.find(candidate => candidate.slug === slug)
+  const signal = row ? leadSignal(row) : null
+  const items = detail ? railOpenItems(detail) : []
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -107,10 +121,49 @@ function RailBody({ slug }: { slug: string }) {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-3 py-3" data-selectable-text="true">
+        {(signal?.nextAction || signal?.controllerBehind || project?.mode) && (
+          <div className="flex flex-col gap-1 rounded-md border border-(--ui-stroke-tertiary) px-2.5 py-1.5">
+            <div className="flex flex-wrap items-center gap-2 text-[0.6875rem] text-(--ui-text-quaternary)">
+              {project?.mode && <span className="uppercase tracking-wide">{project.mode}</span>}
+              {signal?.controllerBehind && (
+                <span className="text-amber-500">{b.controllerBehind}</span>
+              )}
+              {signal?.lastSignalAt && (
+                <span className="ml-auto">{b.lastSignal}</span>
+              )}
+            </div>
+            {signal?.nextAction && (
+              <div className="text-[0.71rem] text-(--ui-text-secondary)">
+                {b.nextActionArrow(signal.nextAction)}
+              </div>
+            )}
+          </div>
+        )}
+
         {project?.blocker && (
           <div className="rounded-md border border-amber-400/25 bg-amber-400/10 px-2.5 py-1.5 text-[0.71rem] text-amber-500">
             {project.blocker}
           </div>
+        )}
+
+        {items.length > 0 && (
+          <Section label={b.openItems}>
+            <div className="flex flex-col gap-1">
+              {items.map(item => (
+                <div className="flex min-w-0 flex-col gap-0.5 text-[0.71rem]" key={item.key}>
+                  <div className="flex items-center gap-1.5">
+                    <span className="min-w-0 flex-1 truncate text-(--ui-text-secondary)">{item.key}</span>
+                    {item.live && <span className="shrink-0 text-emerald-400">{b.live(1)}</span>}
+                  </div>
+                  {item.attempts[0]?.title && (
+                    <span className="truncate text-[0.625rem] text-(--ui-text-quaternary)">
+                      {item.attempts[0].title}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </Section>
         )}
 
         {pending.length > 0 && (

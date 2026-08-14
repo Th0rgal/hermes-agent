@@ -46,6 +46,7 @@ import {
   bucketAction,
   fetchProjects,
   fetchProjectTasks,
+  leadSignal,
   isBoundConversation,
   liveMissions,
   moveProject,
@@ -201,6 +202,7 @@ function Card({
   const silentCheck = !Number.isNaN(heartbeatMs) && (Number.isNaN(updateMs) || heartbeatMs > updateMs)
   const activityAgo = silentCheck ? ago(project.controller_heartbeat_at) : updateAgo
   const draggable = project.bucket !== 'attention'
+  const lead = leadSignal(project)
 
   // Roadmap progress at a glance. Shares the drawer's query key, so opening a
   // card costs nothing extra; long staleTime keeps the board from re-fetching
@@ -291,13 +293,16 @@ function Card({
               {project.attention_reasons[0]}
             </div>
           )}
-          {attention && project.next_action && (
+          {lead.controllerBehind && (
+            <div className="text-[0.5625rem] uppercase tracking-wide text-amber-500">{b.controllerBehind}</div>
+          )}
+          {lead.nextAction && (
             <div className="line-clamp-1 text-[0.625rem] leading-snug text-(--ui-text-tertiary)">
-              {b.nextActionArrow(project.next_action)}
+              {b.nextActionArrow(lead.nextAction)}
             </div>
           )}
-          {update?.headline && (
-            <div className="line-clamp-2 text-[0.625rem] leading-snug text-(--ui-text-tertiary)">{update.headline}</div>
+          {lead.headline && lead.headline !== lead.nextAction && (
+            <div className="line-clamp-2 text-[0.625rem] leading-snug text-(--ui-text-tertiary)">{lead.headline}</div>
           )}
           <HealthDigest b={b} project={project} />
           {/* Attention accents: owner decisions + parked missions. The full

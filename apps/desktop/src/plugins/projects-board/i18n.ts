@@ -135,6 +135,9 @@ type BoardMessages = {
   setColor: string
   noColor: string
   openCard: string
+  openItems: string
+  controllerBehind: string
+  lastSignal: string
   pauseProject: string
   resumeProject: string
   liveMissions: string
@@ -299,6 +302,9 @@ const en: BoardMessages = {
   setColor: 'Set color',
   noColor: 'Default color',
   openCard: 'Open board card',
+  openItems: 'Open items',
+  controllerBehind: 'controller behind',
+  lastSignal: 'last signal',
   pauseProject: 'Pause project',
   resumeProject: 'Resume project',
   liveMissions: 'Missions',

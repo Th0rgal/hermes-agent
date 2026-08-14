@@ -11,6 +11,7 @@
 import './projects-board.css'
 
 import {
+  CHAT_RAIL_AREA,
   cn,
   Codicon,
   type HermesPlugin,
@@ -46,6 +47,7 @@ import {
 } from './api'
 import { ProjectsBoardPage } from './board'
 import { BOARD_LOCALES, useBoard } from './i18n'
+import { ProjectRail } from './project-rail'
 import { ProjectsSidebarSection } from './sidebar-section'
 
 /** Bound once at register() so the statusbar and page share one query cache. */
@@ -223,6 +225,13 @@ const plugin: HermesPlugin = {
         area: SIDEBAR_NAV_AREA,
         order: 55,
         data: { codicon: 'project', label: ctx.i18n.t('nav'), path: '/projects' } satisfies SidebarNavContribution
+      },
+      {
+        // The chat surface's right rail: project context (needs-you, roadmap,
+        // activity, grant) whenever the open session is bound to a project.
+        id: 'chat-rail',
+        area: CHAT_RAIL_AREA,
+        render: () => <ProjectRail />
       },
       {
         // Bound project conversations above the sidebar's Pinned section;

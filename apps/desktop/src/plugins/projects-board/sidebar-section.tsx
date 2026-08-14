@@ -14,6 +14,7 @@
  */
 
 import {
+  $activeChatSessionIds,
   $sessionUnreadCounts,
   cn,
   Codicon,
@@ -45,7 +46,6 @@ import {
 import { useState } from 'react'
 
 import {
-  $openProjectSlug,
   fetchProjects,
   isBoundConversation,
   type ProjectAction,
@@ -56,6 +56,7 @@ import {
 import { errText } from './board'
 import { RenameProjectDialog, SessionColorSwatchesRow, UnreadBadge } from './color-swatches'
 import { ControllerStatusIcon } from './controller-status'
+import { ProjectDrawer } from './drawer'
 import { useBoard } from './i18n'
 
 type BoundRow = ProjectRow & { conversation: { session_id: string } }
@@ -66,7 +67,7 @@ function hasBinding(project: ProjectRow): project is BoundRow {
 
 /** The row's action set, rendered through either Radix kit (⋯ dropdown and
  *  right-click context menu) so the two present identically. */
-function useRowActions(project: BoundRow) {
+function useRowActions(project: BoundRow, onOpenCard: () => void) {
   const b = useBoard()
   const qc = useQueryClient()
   const paused = project.bucket === 'paused'
@@ -81,10 +82,10 @@ function useRowActions(project: BoundRow) {
     b,
     lifecycleLabel: paused ? b.resumeProject : b.pauseProject,
     onLifecycle: () => lifecycle.mutate(paused ? 'resume' : 'pause'),
-    onOpenCard: () => {
-      $openProjectSlug.set(project.slug)
-      host.navigate('/projects')
-    }
+    // The card opens IN PLACE (a dialog over whatever view is active) —
+    // navigating away to the board just to peek at the roadmap threw the
+    // user out of the conversation they were in.
+    onOpenCard
   }
 }
 
@@ -154,11 +155,17 @@ function ProjectRowItem({ project }: { project: BoundRow }) {
   const b = useBoard()
   const qc = useQueryClient()
   const unreadCounts = useValue($sessionUnreadCounts)
+  const activeChatIds = useValue($activeChatSessionIds)
   const sessionId = project.conversation.session_id
   const unread = unreadCounts[sessionId] ?? 0
-  const actions = useRowActions(project)
+  const [cardOpen, setCardOpen] = useState(false)
+  const actions = useRowActions(project, () => setCardOpen(true))
   const [renameOpen, setRenameOpen] = useState(false)
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false)
+  // The bound conversation is the open chat → this row IS the selection. The
+  // core Recents list no longer shows the session, so without this the click
+  // would appear to select nothing at all.
+  const selected = activeChatIds.includes(sessionId)
 
   const remove = useMutation({
     mutationFn: () => projectAction(project.slug, 'delete'),
@@ -174,7 +181,8 @@ function ProjectRowItem({ project }: { project: BoundRow }) {
           <button
             className={cn(
               'flex h-7 w-full items-center gap-2 rounded-md px-2 pr-7 text-left text-[0.8125rem] text-(--ui-text-secondary)',
-              'transition-colors hover:bg-(--ui-control-hover-background) hover:text-foreground'
+              'transition-colors hover:bg-(--ui-control-hover-background) hover:text-foreground',
+              selected && 'bg-(--ui-row-active-background) text-foreground'
             )}
             onClick={() => host.navigate(`/${encodeURIComponent(sessionId)}`)}
             type="button"
@@ -227,6 +235,7 @@ function ProjectRowItem({ project }: { project: BoundRow }) {
         />
       </ContextMenuContent>
     </ContextMenu>
+    {cardOpen && <ProjectDrawer onClose={() => setCardOpen(false)} row={project} slug={project.slug} />}
     <RenameProjectDialog onClose={() => setRenameOpen(false)} open={renameOpen} project={project} />
     <ConfirmDialog
       confirmLabel={b.deleteConfirm}

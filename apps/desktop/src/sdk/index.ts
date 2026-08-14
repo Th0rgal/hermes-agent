@@ -122,6 +122,9 @@ export { SessionStatusDot } from '@/app/chat/session-status-dot'
 // -- ui: the design language --------------------------------------------------
 
 export { PALETTE_AREA, type PaletteContribution } from '@/app/command-palette/contrib'
+/** The core-sidebar ↔ projects seam: bindings published by the plugin, the
+ *  active chat session published by the sidebar. */
+export { $activeChatSessionIds, $projectBoundSessionIds } from '@/app/project-session-links'
 export { type RouteContribution, ROUTES_AREA, SIDEBAR_NAV_AREA, type SidebarNavContribution } from '@/app/routes'
 /** THE model catalog menu — the same searchable, provider-grouped, family-
  *  collapsing picker the chat composer uses, including the per-row
@@ -143,8 +146,8 @@ export type { TitlebarTool } from '@/app/shell/titlebar-controls'
  *  Pair it with `anchor` (spawn corner, default `'top-right'`) plus
  *  `width`/`height`. */
 export type { FloatingAnchor } from '@/components/pane-shell/tree/renderer/floating-rect'
-export { StatusDot, type StatusTone } from '@/components/status-dot'
 
+export { StatusDot, type StatusTone } from '@/components/status-dot'
 export { Badge } from '@/components/ui/badge'
 export { Button } from '@/components/ui/button'
 export { Checkbox } from '@/components/ui/checkbox'
@@ -220,10 +223,10 @@ export type {
  *  `ctx.register` stays the door for permanent contributions. Namespace the
  *  id with your plugin slug (`kanban:board-switcher`). */
 export { Contribute, type ContributeProps } from '@/contrib/react/contribute'
-export type { Contribution } from '@/contrib/types'
 
 // -- contracts ----------------------------------------------------------------
 
+export type { Contribution } from '@/contrib/types'
 /** Grab-to-pan for overflow containers (boards, timelines, wide tables) —
  *  the shared scrub primitive; don't hand-roll drag-to-scroll. */
 export { type GrabScroll, useGrabScroll } from '@/hooks/use-grab-scroll'
@@ -264,17 +267,17 @@ export {
   type ReasoningEffort,
   reasoningEffortLabel
 } from '@/lib/reasoning-effort'
+
+export const PANES_AREA = 'panes'
+export const SESSIONS_SECTIONS_AREA = 'sidebar.sessions.sections'
 /** The app's own gateway-readiness evaluation (setup.status +
  *  setup.runtime_check, reconciled) — pass `host.request`. Don't hand-roll
  *  readiness from raw RPC shapes. */
 export { evaluateRuntimeReadiness, type RuntimeReadinessResult } from '@/lib/runtime-readiness'
-
-export const PANES_AREA = 'panes'
-export const SESSIONS_SECTIONS_AREA = 'sidebar.sessions.sections'
-export { coarseElapsed, fmtDateTime, fmtDayTime, relativeTime } from '@/lib/time'
 export const STATUSBAR_AREAS = { left: 'statusBar.left', right: 'statusBar.right' } as const
 export const TITLEBAR_AREAS = { center: 'titleBar.center', left: 'titleBar.left', right: 'titleBar.right' } as const
 
+export { coarseElapsed, fmtDateTime, fmtDayTime, relativeTime } from '@/lib/time'
 export { cn } from '@/lib/utils'
 /** Per-session color overrides — the SAME store the sidebar/tabs resolve, so a
  *  plugin-set color agrees everywhere. Write under `sessionDurableId(id)`. */

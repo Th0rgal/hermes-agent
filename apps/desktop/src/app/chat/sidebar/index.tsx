@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router'
 
 import { PlatformAvatar } from '@/app/messaging/platform-icon'
+import { $activeChatSessionIds, $projectBoundSessionIds } from '@/app/project-session-links'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { ContextMenu, ContextMenuContent, ContextMenuTrigger } from '@/components/ui/context-menu'
@@ -617,10 +618,44 @@ export function ChatSidebar({
     return [...out.values()]
   }, [trimmedQuery, sortedSessions, serverMatches, sessionByAnyId])
 
+  // A session bound to a project lives under the Projects section — listing
+  // it here too made clicking a project highlight a row elsewhere. Search and
+  // explicit pins still surface bound sessions: this is dedup, not exile.
+  const boundSessionIds = useStore($projectBoundSessionIds)
+
   const unpinnedAgentSessions = useMemo(
-    () => sortedSessions.filter(s => !isPinnedSession(s)),
-    [sortedSessions, isPinnedSession]
+    () =>
+      sortedSessions.filter(
+        s =>
+          !isPinnedSession(s) &&
+          !boundSessionIds[s.id] &&
+          !(s._lineage_root_id && boundSessionIds[s._lineage_root_id])
+      ),
+    [sortedSessions, isPinnedSession, boundSessionIds]
   )
+
+  // Publish the open chat session's ids (live + lineage root) so the Projects
+  // section can render its own selected state for the bound row.
+  useEffect(() => {
+    if (!activeSidebarSessionId) {
+      $activeChatSessionIds.set([])
+
+      return
+    }
+
+    const session = sessionByAnyId.get(activeSidebarSessionId)
+    const ids = new Set<string>([activeSidebarSessionId])
+
+    if (session) {
+      ids.add(session.id)
+
+      if (session._lineage_root_id) {
+        ids.add(session._lineage_root_id)
+      }
+    }
+
+    $activeChatSessionIds.set([...ids])
+  }, [activeSidebarSessionId, sessionByAnyId])
 
   useEffect(() => {
     const next = resolveManualSessionOrderIds(

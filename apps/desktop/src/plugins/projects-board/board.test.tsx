@@ -247,6 +247,31 @@ describe('controllerStop staleness', () => {
     })
   })
 
+  it('blocked is waiting, not "stopped itself"', () => {
+    const project = base({
+      mode: 'blocked',
+      latest_update: {
+        at: '2026-08-15T06:47:15Z',
+        headline: 'leanSilicon LSC1-05 — ATTENTE CI EXTERNE',
+        session_id: 's'
+      } as never
+    })
+
+    expect(controllerStop(project, NOW)).toEqual({ cause: null, kind: 'waiting' })
+  })
+
+  it('blocked:cause carries the cause on waiting', () => {
+    const project = base({ mode: 'blocked:external-ci' })
+
+    expect(controllerStop(project, NOW)).toEqual({ cause: 'external-ci', kind: 'waiting' })
+  })
+
+  it('paused is still self-stopped', () => {
+    const project = base({ mode: 'paused' })
+
+    expect(controllerStop(project, NOW)).toEqual({ cause: null, kind: 'self-stopped' })
+  })
+
   it('a server stale verdict wins regardless of client timestamps', () => {
     const project = base({
       controller_health: 'stale',

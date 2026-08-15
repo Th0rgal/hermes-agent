@@ -31,10 +31,14 @@ export interface MissionChip {
 }
 
 export interface TrackHealth {
+  active?: number
   desired_state?: null | string
+  failed?: number
+  last_activity_at?: null | string
   status?: null | string
   track: string
   updated_at?: null | string
+  verdict?: string
 }
 
 export interface ProjectHealth {
@@ -134,9 +138,27 @@ export interface ProjectDecision {
   status?: null | string
 }
 
+export interface ProjectItemAttempt {
+  id: string
+  role?: null | string
+  status: string
+  title?: null | string
+  updated_at: string
+}
+
+export interface ProjectItem {
+  attempts: ProjectItemAttempt[]
+  desired_state?: null | string
+  key: string
+  kind?: string
+  open: boolean
+  status?: null | string
+}
+
 export interface ProjectDetail {
   conversation?: { session_id: string; source: string } | null
   grant?: null | ProjectGrant
+  items?: ProjectItem[]
   open_decisions?: ProjectDecision[]
   project: ProjectRecord
   /** Autonomous acts + answered escalations, newest first. */
@@ -527,6 +549,7 @@ export const STALE_CONTROLLER_MS = 2 * 60 * 60 * 1000
 export type ControllerStop =
   | { kind: 'degraded'; reason: 'dropped' | 'misrouted' | 'missing' }
   | { cause: null | string; kind: 'self-stopped' }
+  | { cause: null | string; kind: 'waiting' }
   | { kind: 'never-engaged' }
   | { kind: 'operator-paused' }
   | { kind: 'stale'; lastAt: number }
@@ -565,10 +588,20 @@ export function controllerStop(project: ProjectRow, now = Date.now()): Controlle
   if (raw) {
     const [base, ...rest] = raw.trim().toLowerCase().split(':')
 
-    if (base === 'paused' || base === 'blocked') {
+    if (base === 'paused') {
       const cause = rest.join(':').trim() || project.latest_update?.blocker?.trim() || null
 
       return { cause, kind: 'self-stopped' }
+    }
+
+    if (base === 'blocked') {
+      // Waiting on something external (CI, a node, a scan) is not "stopped".
+      // The controller is alive and parked on a blocker — calling that
+      // "stopped itself" made Lean Silicon look finished while LSC1-05
+      // waited on exact-head CI.
+      const cause = rest.join(':').trim() || project.latest_update?.blocker?.trim() || null
+
+      return { cause, kind: 'waiting' }
     }
   }
 
@@ -615,6 +648,143 @@ const chipRecency = (chip: MissionChip): number => {
   const ms = chip.updated_at ? Date.parse(chip.updated_at) : Number.NaN
 
   return Number.isNaN(ms) ? 0 : ms
+}
+
+/** Headlines that only restate an auto-resume or a stale writer-lease claim.
+ *  When a writer is live these are not the project's current state. */
+const STALE_CONTROLLER_HEADLINE =
+  /lease writer|bloqu[ée]e par le lease|campagne relanc/i
+
+const LIVE_ITEM_STATUS = new Set([
+  'active',
+  'created',
+  'pending',
+  'queued',
+  'waiting_background'
+])
+
+const CONTROLLER_BEHIND_MS = 15 * 60 * 1000
+
+export function isStaleControllerHeadline(
+  headline: string | null | undefined,
+  liveCount: number
+): boolean {
+  if (liveCount < 1 || !headline) {
+    return false
+  }
+
+  return STALE_CONTROLLER_HEADLINE.test(headline)
+}
+
+export type LeadSignal = {
+  blocker: string | null
+  controllerBehind: boolean
+  headline: string | null
+  lastSignalAt: string | null
+  lastWorkAt: string | null
+  liveCount: number
+  nextAction: string | null
+  pendingDecisions: number
+}
+
+/** What the card and the session-right rail should lead with: next action,
+ *  live work, pending owner questions — never a lease/relaunch lie while a
+ *  writer is running. */
+export function leadSignal(project: ProjectRow): LeadSignal {
+  const liveCount = project.health?.active ?? 0
+  const nextAction = project.next_action?.trim() || null
+  const rawHeadline = project.latest_update?.headline?.trim() || null
+  const lastSignalAt = project.latest_update?.at ?? project.controller_heartbeat_at ?? null
+  const lastWorkAt = latestLiveWorkAt(project)
+  const pendingDecisions = project.pending_decisions ?? 0
+  const headline = isStaleControllerHeadline(rawHeadline, liveCount)
+    ? nextAction
+    : (nextAction ?? rawHeadline)
+
+  return {
+    blocker: project.latest_update?.blocker?.trim() || null,
+    controllerBehind: isControllerBehind(lastSignalAt, lastWorkAt, liveCount),
+    headline,
+    lastSignalAt,
+    lastWorkAt,
+    liveCount,
+    nextAction,
+    pendingDecisions
+  }
+}
+
+function latestLiveWorkAt(project: ProjectRow): string | null {
+  const fromMissions = (project.missions ?? [])
+    .filter(mission => LIVE_ITEM_STATUS.has(mission.status))
+    .map(mission => mission.updated_at)
+  const fromTracks = (project.health?.tracks ?? [])
+    .filter(track => (track.active ?? 0) > 0)
+    .map(track => track.last_activity_at)
+
+  return latestTimestamp([...fromMissions, ...fromTracks])
+}
+
+function isControllerBehind(
+  lastSignalAt: string | null,
+  lastWorkAt: string | null,
+  liveCount: number
+): boolean {
+  if (liveCount < 1 || !lastSignalAt || !lastWorkAt) {
+    return false
+  }
+
+  const signalMs = Date.parse(lastSignalAt)
+  const workMs = Date.parse(lastWorkAt)
+
+  return Number.isFinite(signalMs) && Number.isFinite(workMs) && workMs - signalMs > CONTROLLER_BEHIND_MS
+}
+
+function latestTimestamp(values: Array<null | string | undefined>): string | null {
+  let best: string | null = null
+  let bestMs = Number.NEGATIVE_INFINITY
+
+  for (const value of values) {
+    if (!value) {
+      continue
+    }
+
+    const ms = Date.parse(value)
+
+    if (!Number.isFinite(ms) || ms <= bestMs) {
+      continue
+    }
+
+    bestMs = ms
+    best = value
+  }
+
+  return best
+}
+
+export type RailItem = {
+  attempts: ProjectItemAttempt[]
+  key: string
+  live: boolean
+  status: null | string
+}
+
+/** Open items, live first, capped so the rail cannot dump a 120-track graveyard. */
+export function railOpenItems(detail: ProjectDetail, cap = 8): RailItem[] {
+  const ranked = (detail.items ?? [])
+    .filter(item => item.open)
+    .map(item => {
+      const live = item.attempts.some(attempt => LIVE_ITEM_STATUS.has(attempt.status))
+
+      return {
+        attempts: item.attempts.slice(0, 2),
+        key: item.key,
+        live,
+        status: item.status ?? null
+      }
+    })
+    .sort((left, right) => Number(right.live) - Number(left.live))
+
+  return ranked.slice(0, cap)
 }
 
 /** The card's compact chip row: at most `cap` chips — live ones first

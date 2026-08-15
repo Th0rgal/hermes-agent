@@ -13,6 +13,7 @@ import {
   mergeFinalAssistantText,
   reasoningPart,
   renderMediaTags,
+  stripStateSignature,
   upsertToolPart
 } from '@/lib/chat-messages'
 import {
@@ -99,9 +100,35 @@ export function useMessageStream({
             return state
           }
 
-          const streamId = state.streamId ?? nextStreamMessageId('assistant-stream')
-          const groupId = state.pendingBranchGroup ?? undefined
           const prev = state.messages
+          const seeded = seed()
+          // After message.interim the stream id is cleared so a later *different*
+          // sentence can open its own bubble. Tools (and a re-emit of the same
+          // sentence) still belong to that sealed turn — opening a twin bubble
+          // reprints the narration (Coldcard: Umbrel line above the tools, then
+          // the same line again inside the tool bubble).
+          const lastAssistant = [...prev].reverse().find(message => message.role === 'assistant' && !message.hidden)
+          const lastText = lastAssistant ? chatMessageText(lastAssistant).trim() : ''
+          const seedText = seeded
+            .filter(part => part.type === 'text')
+            .map(part => part.text)
+            .join('')
+            .trim()
+          const seedIsToolOnly = seeded.length > 0 && seeded.every(part => part.type === 'tool-call')
+          const sameNarration = (left: string, right: string) =>
+            Boolean(left && right && (left === right || right.startsWith(left) || left.startsWith(right)))
+
+          let streamId = state.streamId
+
+          if (!streamId && lastAssistant?.interim && seedIsToolOnly) {
+            streamId = lastAssistant.id
+          } else if (!streamId && lastAssistant?.interim && sameNarration(lastText, seedText)) {
+            return state
+          } else {
+            streamId = streamId ?? nextStreamMessageId('assistant-stream')
+          }
+
+          const groupId = state.pendingBranchGroup ?? undefined
           let nextMessages: ChatMessage[]
 
           if (!prev.some(m => m.id === streamId)) {
@@ -110,7 +137,7 @@ export function useMessageStream({
               {
                 id: streamId,
                 role: 'assistant',
-                parts: seed(),
+                parts: seeded,
                 pending: true,
                 branchGroupId: groupId
               }
@@ -486,7 +513,7 @@ export function useMessageStream({
           return state
         }
 
-        const authoritativeText = renderMediaTags(text).trim()
+        const authoritativeText = stripStateSignature(renderMediaTags(text)).trim()
 
         if (!authoritativeText) {
           return state
@@ -602,6 +629,38 @@ export function useMessageStream({
 
         if (streamId && prev.some(m => m.id === streamId)) {
           nextMessages = prev.map(m => (m.id === streamId ? completeMessage(m) : m))
+
+          // Tools that started after the interim opened a second bubble; if
+          // that bubble only restates the sealed narration, fold it back.
+          const streamIndex = nextMessages.findIndex(message => message.id === streamId)
+          const previous = streamIndex > 0
+            ? [...nextMessages.slice(0, streamIndex)].reverse().find(message => message.role === 'assistant' && !message.hidden)
+            : undefined
+          const previousText = previous ? chatMessageText(previous).trim() : ''
+          const streamText = streamIndex >= 0 ? chatMessageText(nextMessages[streamIndex]).trim() : ''
+          const sameNarration = (left: string, right: string) =>
+            Boolean(left && right && (left === right || right.startsWith(left) || left.startsWith(right)))
+
+          if (
+            previous?.interim &&
+            streamIndex > 0 &&
+            previous.id !== streamId &&
+            (sameNarration(previousText, finalText.trim()) || sameNarration(previousText, streamText))
+          ) {
+            const stream = nextMessages[streamIndex]
+            const merged = completeMessage({
+              ...previous,
+              parts: [
+                ...previous.parts.filter(part => part.type !== 'text'),
+                ...stream.parts.filter(part => part.type !== 'text'),
+                ...previous.parts.filter(part => part.type === 'text')
+              ]
+            })
+
+            nextMessages = nextMessages
+              .filter((_, index) => index !== streamIndex)
+              .map(message => (message.id === previous.id ? merged : message))
+          }
         } else {
           const fallbackIndex = [...prev]
             .reverse()

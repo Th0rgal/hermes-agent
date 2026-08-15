@@ -85,9 +85,11 @@ export function ControllerStatusIcon({ project }: { project: ProjectRow }) {
         ? b.controllerDegraded(stop.reason)
         : stop.kind === 'self-stopped'
           ? b.controllerStopped(stop.cause ?? '')
-          : stop.kind === 'never-engaged'
-            ? b.controllerNeverEngaged
-            : b.controllerSilent(relativeTime(stop.lastAt))
+          : stop.kind === 'waiting'
+            ? b.controllerWaiting(stop.cause ?? '')
+            : stop.kind === 'never-engaged'
+              ? b.controllerNeverEngaged
+              : b.controllerSilent(relativeTime(stop.lastAt))
 
   // Degraded is a real problem (engine gone / output lost) → danger tone; the
   // rest are quiet provenance markers.

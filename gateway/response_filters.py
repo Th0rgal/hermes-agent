@@ -147,6 +147,8 @@ import re as _re
 # (Telegram/Discord/…), which is terminal — no ingestor downstream.
 _CTRL_TRAILER_RE = _re.compile(r"\[CTRL:[^\]]*\]", _re.IGNORECASE)
 _STATE_SIG_TRAILER_RE = _re.compile(r"\[STATE_SIGNATURE:[^\]]*\]", _re.IGNORECASE)
+# Empty-tag improvisation: `[CTRL:]` then prose outside the brackets.
+_EMPTY_CTRL_LINE_RE = _re.compile(r"^[ \t]*\[CTRL:\][^\n]*$", _re.IGNORECASE | _re.MULTILINE)
 # Narrated tool calls: a model without its real tools echoes "[tool call: X]"
 # followed by a JSON object.  Strip the marker and an immediately-following
 # JSON blob line.
@@ -166,7 +168,10 @@ def sanitize_platform_delivery(text: Any) -> str:
     """
     if not isinstance(text, str):
         return ""
-    cleaned = _CTRL_TRAILER_RE.sub("", text)
+    # Empty-tag `[CTRL:] prose` first: the generic `[CTRL:…]` matcher would
+    # consume only the empty token and leave the rest of the line visible.
+    cleaned = _EMPTY_CTRL_LINE_RE.sub("", text)
+    cleaned = _CTRL_TRAILER_RE.sub("", cleaned)
     cleaned = _STATE_SIG_TRAILER_RE.sub("", cleaned)
     out_lines: list[str] = []
     drop_next_json = False

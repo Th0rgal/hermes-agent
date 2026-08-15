@@ -91,3 +91,17 @@ def test_sanitize_leaves_clean_report_untouched():
 def test_sanitize_empty_when_only_scaffolding():
     raw = "[CTRL: x | mode=blocked] [STATE_SIGNATURE: x|y|z]"
     assert sanitize_platform_delivery(raw) == ""
+
+
+def test_sanitize_strips_empty_tag_ctrl_line():
+    raw = (
+        "Action Thomas : aucune pour l’instant.\n\n"
+        "[CTRL:] #2332 repair active; both workers recovered after server restart; "
+        "waiting for successor head or concrete blocker.\n\n"
+        "[STATE_SIGNATURE: verity|pr2332|none|repair-active|source|successor-head-or-blocker]"
+    )
+    out = sanitize_platform_delivery(raw)
+    assert "CTRL" not in out
+    assert "STATE_SIGNATURE" not in out
+    assert "workers recovered" not in out
+    assert "Action Thomas : aucune pour l’instant." in out

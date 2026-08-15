@@ -31,6 +31,7 @@ import {
   fetchProjectState,
   fetchProjectTasks,
   isBoundConversation,
+  liveSessionIdFor,
   type MissionChip,
   type ProjectDecision,
   type ProjectGrant,
@@ -667,7 +668,10 @@ export function ProjectDrawer({
   }
 
   const project = detail?.project
-  const conversation = detail?.conversation ?? row?.conversation ?? null
+  // Prefer the roster row: overview already walked the Hermes continuation
+  // chain. `get_project` used to return the frozen bind-time id, and
+  // preferring the detail here sent Coldcard owners into a dead parent.
+  const conversation = row?.conversation ?? detail?.conversation ?? null
   const tracks = detail?.tracks ?? row?.health?.tracks ?? []
   const errorMessage = error ? errText(error) : null
   const pending = detail?.open_decisions ?? []
@@ -703,7 +707,7 @@ export function ProjectDrawer({
                   onClose()
                   // A chat session's route is `/<encoded session id>`
                   // (routes.ts sessionRoute) — same shape, no core import.
-                  host.navigate(`/${encodeURIComponent(conversation.session_id)}`)
+                  host.navigate(`/${encodeURIComponent(liveSessionIdFor(conversation.session_id))}`)
                 }}
                 title={b.openConversation}
                 type="button"

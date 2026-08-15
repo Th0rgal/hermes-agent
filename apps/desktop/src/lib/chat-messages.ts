@@ -55,11 +55,20 @@ const CRON_DELIVERY_SENTINEL_RE = /^\s*\[Cron delivery:\s*([^\]]*)\]\s*/
  * whole; lazy matching stops at the first `]` and strands the remainder. */
 const STATE_SIGNATURE_RE = /[ \t]*(?:\*\*[^*\n]{0,64}?\*\*[ \t]*:?[ \t]*)?`?\[(?:STATE_SIGNATURE|CTRL):[^\n]{1,4096}\]`?/gi
 
+/** Empty-tag improvisation: `[CTRL:]` then prose *outside* the brackets.
+ *  The structured form is `[CTRL: project | mode=…]`; models sometimes emit
+ *  `[CTRL:] #2332 repair active; …` which the bracket matcher cannot close. */
+const EMPTY_CTRL_LINE_RE = /^[ \t]*\[CTRL:\][^\n]*$/gim
+
 /** Remove the controller markers and the blank line(s) they leave behind. */
 export function stripStateSignature<T extends string | null | undefined>(text: T): T {
   if (!text || !(text.includes('[STATE_SIGNATURE:') || text.includes('[CTRL:'))) {return text}
 
-  return text.replace(STATE_SIGNATURE_RE, '').replace(/\n[ \t]*\n[ \t]*\n+/g, '\n\n').trim() as T
+  return text
+    .replace(STATE_SIGNATURE_RE, '')
+    .replace(EMPTY_CTRL_LINE_RE, '')
+    .replace(/\n[ \t]*\n[ \t]*\n+/g, '\n\n')
+    .trim() as T
 }
 
 export type GatewayEventPayload = {
@@ -271,6 +280,7 @@ const normalizeWs = (value: string) => value.replace(/\s+/g, ' ').trim()
  * - Appends the final text as a new text part.
  */
 export function mergeFinalAssistantText(parts: ChatMessagePart[], finalText: string): ChatMessagePart[] {
+  finalText = stripStateSignature(finalText) ?? finalText
   const dedupeReference = normalizeWs(finalText)
 
   const kept = parts.filter(part => {

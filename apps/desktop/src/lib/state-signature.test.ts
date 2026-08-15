@@ -80,4 +80,22 @@ describe('stripStateSignature', () => {
     expect(out).toContain('A.')
     expect(out).toContain('B.')
   })
+
+  it('removes an empty-tag [CTRL:] line with prose outside the brackets', () => {
+    // The exact Verity leak: the model put the status *after* `[CTRL:]`
+    // instead of inside `[CTRL: project | mode=…]`. The closer is immediate,
+    // so the bracket matcher cannot consume the rest of the line.
+    const text =
+      '**Verity #2332 — réparation en cours, pas mergeable.**\n\n' +
+      'Action Thomas : aucune pour l’instant.\n\n' +
+      '[CTRL:] #2332 repair active; both workers recovered after server restart; waiting for successor head or concrete blocker.\n\n' +
+      '[STATE_SIGNATURE: verity|pr2332|none|repair-active|source|successor-head-or-blocker]'
+
+    const out = stripStateSignature(text)
+
+    expect(out).toBe('**Verity #2332 — réparation en cours, pas mergeable.**\n\nAction Thomas : aucune pour l’instant.')
+    expect(out).not.toContain('[CTRL:]')
+    expect(out).not.toContain('workers recovered')
+    expect(out).not.toContain('STATE_SIGNATURE')
+  })
 })

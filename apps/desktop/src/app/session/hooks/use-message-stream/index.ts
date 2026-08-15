@@ -13,6 +13,7 @@ import {
   mergeFinalAssistantText,
   reasoningPart,
   renderMediaTags,
+  stripStateSignature,
   upsertToolPart
 } from '@/lib/chat-messages'
 import {
@@ -486,7 +487,7 @@ export function useMessageStream({
           return state
         }
 
-        const authoritativeText = renderMediaTags(text).trim()
+        const authoritativeText = stripStateSignature(renderMediaTags(text)).trim()
 
         if (!authoritativeText) {
           return state

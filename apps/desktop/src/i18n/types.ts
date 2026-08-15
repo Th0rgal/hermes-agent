@@ -1781,6 +1781,7 @@ export interface Translations {
     agents: string
     background: (count: number) => string
     goalActive: string
+    projectObjective: string
     goalDone: string
     goalPaused: string
     goalWaiting: string

@@ -104,6 +104,7 @@ type BoardMessages = {
   decisionsBadge: (n: number) => string
   railHide: string
   railShow: string
+  sessionGoal: string
   roadmap: string
   roadmapEmpty: string
   roadmapUnavailable: string
@@ -272,6 +273,7 @@ const en: BoardMessages = {
   decisionsBadge: n => `${n} decision${n === 1 ? '' : 's'}`,
   railHide: 'Hide project panel',
   railShow: 'Show project panel',
+  sessionGoal: 'Session objective',
   roadmap: 'Roadmap',
   roadmapEmpty: 'No open items.',
   roadmapUnavailable: 'Roadmap temporarily unavailable — retrying.',

@@ -20,6 +20,8 @@ import {
   queryClient
 } from '@hermes/plugin-sdk'
 
+import { $goalsBySession } from '@/store/goals'
+
 export type MissionStatus = string
 
 export interface MissionChip {
@@ -285,6 +287,30 @@ export function bindApi(restFn: Rest, storage?: PluginStorage, socket?: Socket):
 
   const unsubscribe = socket ? socket('/events', onEventFrame) : null
 
+  let lastGoalPost = ''
+  const publishBoundGoals = () => {
+    const goals = $goalsBySession.get()
+    const bindings = $projectBoundSessionIds.get()
+    for (const [sid, slug] of Object.entries(bindings)) {
+      const title = sessionGoalLead(goals[sid])
+      if (!title || !slug) {
+        continue
+      }
+      const key = `${slug}\0${title}`
+      if (key === lastGoalPost) {
+        continue
+      }
+      lastGoalPost = key
+      void publishProjectGoal(slug, title).catch(() => {
+        if (lastGoalPost === key) {
+          lastGoalPost = ''
+        }
+      })
+    }
+  }
+  unsubs.push($goalsBySession.listen(publishBoundGoals))
+  unsubs.push($projectBoundSessionIds.listen(publishBoundGoals))
+
   return () => {
     unsubs.forEach(unsub => unsub())
     unsubscribe?.()
@@ -506,6 +532,13 @@ export const answerDecision = (slug: string, at: string, answer: string, questio
 export const steerMission = (missionId: string, content: string) =>
   call(`/missions/${encodeURIComponent(missionId)}/message`, { body: { content }, method: 'POST' })
 
+/** Persist a bound-session /goal as the project's next_action. */
+export const publishProjectGoal = (slug: string, nextAction: string, mode?: string) =>
+  call(`/projects/${encodeURIComponent(slug)}/status`, {
+    body: { mode, next_action: nextAction },
+    method: 'POST'
+  })
+
 // ── selectors ────────────────────────────────────────────────────────────────
 
 /** Live missions in a project — the "agents" of the surface. */
@@ -690,6 +723,19 @@ export type LeadSignal = {
 /** What the card and the session-right rail should lead with: next action,
  *  live work, pending owner questions — never a lease/relaunch lie while a
  *  writer is running. */
+/** A bound-session `/goal` is the project's live objective. Items stay the
+ *  checklist; the Ralph loop must not look like a second, ignored roadmap. */
+export function sessionGoalLead(
+  goal: { status?: null | string; title?: null | string } | null | undefined
+): string | null {
+  const status = goal?.status?.trim()
+  if (status !== 'active' && status !== 'waiting') {
+    return null
+  }
+  const title = goal?.title?.trim()
+  return title || null
+}
+
 export function leadSignal(project: ProjectRow): LeadSignal {
   const liveCount = project.health?.active ?? 0
   const nextAction = project.next_action?.trim() || null

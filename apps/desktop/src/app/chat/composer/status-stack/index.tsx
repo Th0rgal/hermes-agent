@@ -24,6 +24,7 @@ import {
   stopBackgroundProcess
 } from '@/store/composer-status'
 import { refreshSessionGoal } from '@/store/goals'
+import { $projectBoundSessionIds } from '@/app/project-session-links'
 import { $previewStatusBySession, dismissPreviewArtifact } from '@/store/preview-status'
 import { $threadScrolledUp } from '@/store/thread-scroll'
 import { openSessionInNewWindow } from '@/store/windows'
@@ -49,7 +50,11 @@ const GROUP_ICON: Record<StatusGroup['type'], string> = {
   background: 'server-process'
 }
 
-const groupLabel = (group: StatusGroup, s: Translations['statusStack']) => {
+const groupLabel = (
+  group: StatusGroup,
+  s: Translations['statusStack'],
+  projectBound = false
+) => {
   if (group.type === 'goal') {
     const status = group.items[0]?.goalStatus
 
@@ -59,7 +64,9 @@ const groupLabel = (group: StatusGroup, s: Translations['statusStack']) => {
         ? s.goalWaiting
         : status === 'done'
           ? s.goalDone
-          : s.goalActive
+          : projectBound
+            ? s.projectObjective
+            : s.goalActive
   }
 
   if (group.type === 'todo') {
@@ -94,6 +101,8 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
   const previews = useSessionSlice($previewStatusBySession, sessionId)
   const scrolledUp = useStore($threadScrolledUp)
   const billing = useStore($billingBlock)
+  const projectBindings = useStore($projectBoundSessionIds)
+  const projectBound = Boolean(sessionId && projectBindings[sessionId])
 
   const groups = useMemo(() => groupStatusItems(items), [items])
 
@@ -172,7 +181,7 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
           }
           defaultCollapsed={group.type !== 'todo' && group.type !== 'goal'}
           icon={<Codicon className="text-muted-foreground/70" name={GROUP_ICON[group.type]} size="0.8rem" />}
-          label={groupLabel(group, t.statusStack)}
+          label={groupLabel(group, t.statusStack, projectBound)}
         >
           {group.items.map(item => (
             <StatusItemRow

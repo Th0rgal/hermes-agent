@@ -7,7 +7,8 @@ import {
   type ProjectDetail,
   type ProjectRow,
   railOpenItems,
-  roadmapFromItems
+  roadmapFromItems,
+  sessionGoalLead
 } from './api'
 
 const row = (partial: Partial<ProjectRow>): ProjectRow => ({
@@ -17,6 +18,23 @@ const row = (partial: Partial<ProjectRow>): ProjectRow => ({
   missions: [],
   slug: 'verity-core',
   ...partial
+})
+
+describe('sessionGoalLead', () => {
+  it('surfaces an active /goal as the project objective', () => {
+    expect(
+      sessionGoalLead({
+        status: 'active',
+        title: 'Assure toi de prouver chaque garantie jusqu au niveau Verity'
+      })
+    ).toBe('Assure toi de prouver chaque garantie jusqu au niveau Verity')
+  })
+
+  it('ignores a paused or empty goal so a stale Ralph loop cannot replace items', () => {
+    expect(sessionGoalLead({ status: 'paused', title: 'old' })).toBeNull()
+    expect(sessionGoalLead({ status: 'active', title: '  ' })).toBeNull()
+    expect(sessionGoalLead(null)).toBeNull()
+  })
 })
 
 describe('leadSignal', () => {

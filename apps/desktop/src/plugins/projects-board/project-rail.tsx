@@ -18,6 +18,7 @@ import {
   useQuery,
   useValue
 } from '@hermes/plugin-sdk'
+import { $goalsBySession } from '@/store/goals'
 import { useState } from 'react'
 
 import {
@@ -27,7 +28,8 @@ import {
   leadSignal,
   PROJECTS_KEY,
   projectKey,
-  roadmapFromItems
+  roadmapFromItems,
+  sessionGoalLead
 } from './api'
 import {
   ActivityRow,
@@ -60,6 +62,9 @@ function useActiveProjectSlug(): null | string {
 function RailBody({ slug }: { slug: string }) {
   const b = useBoard()
   const [cardOpen, setCardOpen] = useState(false)
+  const activeIds = useValue($activeChatSessionIds)
+  const goals = useValue($goalsBySession)
+  const sessionObjective = activeIds.map(id => sessionGoalLead(goals[id])).find(Boolean) ?? null
 
   const { data: detail } = useQuery({
     queryFn: () => fetchProject(slug),
@@ -129,6 +134,12 @@ function RailBody({ slug }: { slug: string }) {
               </div>
             )}
           </div>
+        )}
+
+        {sessionObjective && (
+          <Section label={b.sessionGoal}>
+            <div className="text-[0.71rem] text-(--ui-text-secondary)">{sessionObjective}</div>
+          </Section>
         )}
 
         {project?.blocker && (

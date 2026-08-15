@@ -1954,6 +1954,7 @@ export const ja = defineLocale({
     agents: 'エージェント',
     background: count => `バックグラウンド ${count} 件`,
     goalActive: '目標進行中',
+    projectObjective: 'プロジェクト目標',
     goalDone: '目標達成',
     goalPaused: '目標一時停止中',
     goalWaiting: '目標待機中',

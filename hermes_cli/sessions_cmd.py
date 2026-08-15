@@ -64,6 +64,28 @@ def cmd_sessions(args, sessions_parser=None):
     # malformed schema is exactly the case where SessionDB() can't open.
     # Recovery additionally promises never to open the supplied source
     # directly, so it operates through its own disposable source copy.
+    if action == "heal-state":
+        from hermes_state import DEFAULT_DB_PATH, heal_live_state_db
+
+        db_path = DEFAULT_DB_PATH
+        if not db_path.exists():
+            print(f"No session database at {db_path} (nothing to heal).")
+            return
+        print(f"Healing live state.db (detach FTS, checkpoint WAL): {db_path}")
+        report = heal_live_state_db(db_path)
+        before = int(report.get("wal_before_bytes") or 0)
+        after = int(report.get("wal_after_bytes") or 0)
+        print(
+            f"  FTS detached: {report.get('fts_detached')}\n"
+            f"  WAL: {before / (1024 * 1024):.1f} MB -> {after / (1024 * 1024):.1f} MB"
+        )
+        if report.get("ok"):
+            print("✓ Live writers can proceed; search uses LIKE until "
+                  "`hermes sessions optimize-storage` rebuilds FTS offline.")
+            return
+        print(f"✗ heal-state failed: {report.get('error')}")
+        return
+
     if action == "repair":
         from hermes_state import (
             DEFAULT_DB_PATH,

@@ -88,6 +88,16 @@ logger = logging.getLogger(__name__)
 
 MAX_SAFE_RESUME_MESSAGES = 20_000
 MAX_SAFE_EXPORT_MESSAGES = 20_000
+# TRUNCATE on close of a multi-GB WAL takes an exclusive lock for minutes
+# and is what surfaces as session_persistence_failed:locked mid-turn.
+_LARGE_WAL_TRUNCATE_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _wal_file_bytes(db_path: Path) -> int:
+    try:
+        return (Path(db_path).parent / (Path(db_path).name + "-wal")).stat().st_size
+    except OSError:
+        return 0
 
 
 def _configured_transcript_limit(key: str, fallback: int) -> int:
@@ -1614,6 +1624,22 @@ def _db_opens_cleanly(db_path: Path) -> Optional[str]:
         # working), so tokenizer absence must never classify as corruption.
         load_fts5_cjk_extension(conn)
         conn.execute("PRAGMA journal_mode").fetchone()
+        fts_marked_stale = False
+        try:
+            fts_marked_stale = (
+                conn.execute(
+                    "SELECT 1 FROM state_meta WHERE key = ? LIMIT 1",
+                    (FTS_STALE_KEY,),
+                ).fetchone()
+                is not None
+            )
+        except sqlite3.Error:
+            fts_marked_stale = False
+        if fts_marked_stale:
+            # FTS is deliberately detached. Canonical writes are healthy;
+            # MATCH probes against the stale index would false-positive.
+            conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
+            return None
         rows = conn.execute("PRAGMA integrity_check").fetchall()
         problems = [str(r[0]) for r in rows if r and str(r[0]).lower() != "ok"]
         if problems:
@@ -1715,6 +1741,90 @@ def _db_opens_cleanly(db_path: Path) -> Optional[str]:
         return None
     except sqlite3.DatabaseError as exc:
         return str(exc)
+    finally:
+        conn.close()
+
+
+def heal_live_state_db(db_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Make a contended state.db safe for live writers.
+
+    Does **not** rebuild FTS (that holds ``BEGIN IMMEDIATE`` across every
+    message row). Detaches FTS sync if it is stale or still wired, then
+    checkpoints the WAL with PASSIVE then RESTART so a multi-GB WAL stops
+    starving transcript writes. Safe alongside a running gateway: neither
+    checkpoint mode takes an exclusive lock. TRUNCATE is skipped when the
+    WAL is large — run this again with the gateway stopped if the file
+    must shrink to zero.
+
+    Returns ``{ok, fts_detached, wal_before_bytes, wal_after_bytes,
+    checkpoint, error}``.
+    """
+    from hermes_constants import get_hermes_home
+
+    report: Dict[str, Any] = {
+        "ok": False,
+        "fts_detached": False,
+        "wal_before_bytes": 0,
+        "wal_after_bytes": 0,
+        "checkpoint": None,
+        "error": None,
+    }
+    path = Path(db_path) if db_path is not None else (get_hermes_home() / "state.db")
+    if not path.exists():
+        report["error"] = f"{path} does not exist"
+        return report
+    report["wal_before_bytes"] = _wal_file_bytes(path)
+
+    conn = sqlite3.connect(str(path), timeout=30.0, isolation_level=None)
+    try:
+        apply_database_pragmas(conn, db_label="state.db")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "INSERT INTO state_meta (key, value) VALUES (?, '1') "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (FTS_STALE_KEY,),
+            )
+            for trigger in (*_FTS_TRIGGERS, *_FTS_CJK_TRIGGERS):
+                try:
+                    conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+                except sqlite3.OperationalError:
+                    pass
+            conn.commit()
+            report["fts_detached"] = True
+        except BaseException:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise
+
+        # PASSIVE never waits on other writers. RESTART then tries to
+        # reset the WAL if no reader is sitting on old frames.
+        passive = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        try:
+            restart = conn.execute("PRAGMA wal_checkpoint(RESTART)").fetchone()
+        except sqlite3.OperationalError as exc:
+            restart = None
+            logger.warning("WAL RESTART checkpoint skipped: %s", exc)
+        report["checkpoint"] = {
+            "passive": list(passive) if passive else None,
+            "restart": list(restart) if restart else None,
+        }
+        report["wal_after_bytes"] = _wal_file_bytes(path)
+        report["ok"] = True
+        logger.warning(
+            "heal_live_state_db: FTS detached, WAL %d MB -> %d MB (%s)",
+            report["wal_before_bytes"] // (1024 * 1024),
+            report["wal_after_bytes"] // (1024 * 1024),
+            path,
+        )
+        return report
+    except Exception as exc:
+        report["error"] = str(exc)
+        report["wal_after_bytes"] = _wal_file_bytes(path)
+        logger.error("heal_live_state_db failed: %s", exc)
+        return report
     finally:
         conn.close()
 
@@ -3602,10 +3712,21 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             if self._conn:
                 if not self.read_only:
                     try:
-                        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                        wal_bytes = _wal_file_bytes(self.db_path)
+                        if wal_bytes > _LARGE_WAL_TRUNCATE_MAX_BYTES:
+                            self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                            logger.warning(
+                                "Skipped WAL TRUNCATE at close (%s is %d MB) — "
+                                "TRUNCATE would take an exclusive lock for "
+                                "minutes. Run `hermes sessions heal-state`.",
+                                self.db_path.name + "-wal",
+                                wal_bytes // (1024 * 1024),
+                            )
+                        else:
+                            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                     except Exception as exc:
                         logger.debug(
-                            "WAL checkpoint (TRUNCATE) at close failed: %s",
+                            "WAL checkpoint at close failed: %s",
                             exc,
                         )
                 self._conn.close()

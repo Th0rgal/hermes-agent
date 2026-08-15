@@ -10,7 +10,7 @@ later as "Persisted transcript lagged live cached history" amnesia.
 The fix: ``_execute_write`` first attempts a one-shot in-place FTS rebuild.
 If corruption persists, it records a durable stale marker, detaches the FTS
 sync triggers, and retries the canonical write. Search degrades to ``LIKE``
-until a later open atomically rebuilds the index and restores the triggers.
+until an explicit offline rebuild (`hermes sessions optimize-storage`).
 """
 
 import sqlite3
@@ -24,6 +24,7 @@ from hermes_state import (
     SCHEMA_SQL,
     SessionDB,
     _FTS_TRIGGERS,
+    heal_live_state_db,
 )
 
 
@@ -181,7 +182,7 @@ class TestRuntimeFtsRebuild:
         assert any(">>>" in (r.get("snippet") or "") for r in results)
 
 
-    def test_second_corruption_fails_open_and_rebuilds_on_reopen(
+    def test_second_corruption_fails_open_and_stays_detached_on_reopen(
         self, db, tmp_path
     ):
         if not db._fts_enabled:
@@ -211,16 +212,20 @@ class TestRuntimeFtsRebuild:
         assert results
         assert any("second corruption" in row["snippet"] for row in results)
 
-        # A later open atomically rebuilds all canonical rows before triggers
-        # return, then clears the durable breadcrumb.
+        # A later open must NOT rebuild FTS automatically: on a multi-GB
+        # production DB that holds BEGIN IMMEDIATE across every message and
+        # starves live transcript writes. Rebuild is an explicit offline
+        # command (`hermes sessions optimize-storage`).
         db.close()
         reopened = SessionDB(db_path=db_path)
         try:
-            assert reopened._fts_stale is False
-            assert _meta_value(db_path, FTS_STALE_KEY) is None
-            assert _base_fts_triggers(db_path) == set(_FTS_TRIGGERS)
+            assert reopened._fts_stale is True
+            assert _meta_value(db_path, FTS_STALE_KEY) == "1"
+            assert _base_fts_triggers(db_path) == set()
             results = reopened.search_messages("second corruption")
             assert results
+            reopened.append_message("s1", "user", "write after reopen")
+            assert _message_contents(db_path)[-1] == "write after reopen"
         finally:
             reopened.close()
 
@@ -357,9 +362,32 @@ class TestRuntimeFtsRebuild:
 
         recovered = SessionDB(db_path=db_path)
         try:
-            assert recovered._fts_stale is False
-            assert _meta_value(db_path, FTS_STALE_KEY) is None
+            assert recovered._fts_stale is True
+            assert _meta_value(db_path, FTS_STALE_KEY) == "1"
             assert recovered.search_messages("canonical survives")
+            recovered.append_message("s1", "user", "legacy write after reopen")
+            assert _message_contents(db_path)[-1] == "legacy write after reopen"
         finally:
             recovered.close()
+
+    def test_heal_live_state_db_detaches_fts(self, tmp_path):
+        db_path = tmp_path / "state.db"
+        db = SessionDB(db_path=db_path)
+        try:
+            db.create_session("s1", source="test")
+            db.append_message("s1", "user", "heal me")
+        finally:
+            db.close()
+        report = heal_live_state_db(db_path)
+        assert report["ok"] is True
+        assert report["fts_detached"] is True
+        assert _meta_value(db_path, FTS_STALE_KEY) == "1"
+        assert _base_fts_triggers(db_path) == set()
+        reopened = SessionDB(db_path=db_path)
+        try:
+            assert reopened._fts_stale is True
+            reopened.append_message("s1", "user", "after heal")
+            assert _message_contents(db_path)[-1] == "after heal"
+        finally:
+            reopened.close()
 

@@ -1711,26 +1711,57 @@ def run_doctor(args):
                     f"({_write_reason})",
                 )
                 if should_fix:
-                    report = repair_state_db_schema(state_db_path)
-                    if report.get("repaired"):
-                        backup_name = (
-                            Path(report["backup_path"]).name
-                            if report.get("backup_path") else "n/a"
-                        )
-                        check_ok(
-                            "Repaired state.db FTS write health",
-                            f"(strategy: {report.get('strategy')}; backup: {backup_name})",
-                        )
-                        fixed_count += 1
+                    from hermes_state import heal_live_state_db
+
+                    large = False
+                    try:
+                        large = state_db_path.stat().st_size > 512 * 1024 * 1024
+                    except OSError:
+                        large = False
+                    if large:
+                        heal = heal_live_state_db(state_db_path)
+                        if heal.get("ok"):
+                            check_ok(
+                                "Detached stale FTS and checkpointed WAL "
+                                "(rebuild FTS offline with "
+                                "`hermes sessions optimize-storage`)",
+                                f"(WAL {heal.get('wal_before_bytes', 0) // (1024 * 1024)} MB "
+                                f"-> {heal.get('wal_after_bytes', 0) // (1024 * 1024)} MB)",
+                            )
+                            fixed_count += 1
+                            report = {"repaired": True}
+                        else:
+                            check_warn(
+                                "Live-safe state.db heal did not finish",
+                                f"({heal.get('error')})",
+                            )
+                            issues.append(
+                                "state.db FTS/WAL heal failed — run "
+                                "`hermes sessions heal-state`"
+                            )
+                            report = {"repaired": False}
                     else:
-                        check_warn(
-                            "state.db FTS write-health repair did not recover automatically",
-                            f"({report.get('error')}; backup: {report.get('backup_path')})",
-                        )
-                        issues.append(
-                            "state.db FTS write corruption and auto-repair failed — "
-                            "restore from the backup copy beside state.db"
-                        )
+                        report = repair_state_db_schema(state_db_path)
+                    if not large:
+                        if report.get("repaired"):
+                            backup_name = (
+                                Path(report["backup_path"]).name
+                                if report.get("backup_path") else "n/a"
+                            )
+                            check_ok(
+                                "Repaired state.db FTS write health",
+                                f"(strategy: {report.get('strategy')}; backup: {backup_name})",
+                            )
+                            fixed_count += 1
+                        else:
+                            check_warn(
+                                "state.db FTS write-health repair did not recover automatically",
+                                f"({report.get('error')}; backup: {report.get('backup_path')})",
+                            )
+                            issues.append(
+                                "state.db FTS write corruption and auto-repair failed — "
+                                "restore from the backup copy beside state.db"
+                            )
                 else:
                     issues.append(
                         "state.db FTS write corruption — run 'hermes doctor --fix' "
@@ -1828,13 +1859,21 @@ def run_doctor(args):
                     "(may indicate missed checkpoints)"
                 )
                 if should_fix:
-                    import sqlite3
-                    conn = sqlite3.connect(str(state_db_path))
-                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                    conn.close()
-                    new_size = wal_path.stat().st_size if wal_path.exists() else 0
-                    check_ok(f"WAL checkpoint performed ({wal_size // 1024}K → {new_size // 1024}K)")
-                    fixed_count += 1
+                    from hermes_state import heal_live_state_db
+
+                    heal = heal_live_state_db(state_db_path)
+                    new_size = int(heal.get("wal_after_bytes") or 0)
+                    if heal.get("ok"):
+                        check_ok(
+                            f"WAL checkpoint performed "
+                            f"({wal_size // (1024 * 1024)} MB → {new_size // (1024 * 1024)} MB)"
+                        )
+                        fixed_count += 1
+                    else:
+                        check_warn(
+                            "WAL checkpoint did not finish",
+                            f"({heal.get('error')})",
+                        )
                 else:
                     issues.append("Large WAL file — run 'hermes doctor --fix' to checkpoint")
             elif wal_size > 10 * 1024 * 1024:  # 10 MB

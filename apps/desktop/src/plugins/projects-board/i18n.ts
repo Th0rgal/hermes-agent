@@ -36,6 +36,7 @@ type BoardMessages = {
   deleteConfirmTitle: (name: string) => string
   pausedByYou: string
   controllerStopped: (cause: string) => string
+  controllerWaiting: (cause: string) => string
   controllerSilent: (since: string) => string
   controllerCheckedTip: (ago: string) => string
   controllerNeverEngaged: string
@@ -178,6 +179,7 @@ const en: BoardMessages = {
   deleteConfirmTitle: name => `Delete “${name}”?`,
   pausedByYou: 'Paused by you',
   controllerStopped: cause => (cause ? `Controller stopped itself: ${cause}` : 'Controller stopped itself'),
+  controllerWaiting: cause => (cause ? `Controller is waiting: ${cause}` : 'Controller is waiting'),
   controllerSilent: since => `Controller silent since ${since}`,
   controllerCheckedTip: ago => `Controller checked ${ago} — nothing new to report`,
   controllerNeverEngaged: 'Controller attached but never engaged — nothing has run yet',

@@ -549,6 +549,7 @@ export const STALE_CONTROLLER_MS = 2 * 60 * 60 * 1000
 export type ControllerStop =
   | { kind: 'degraded'; reason: 'dropped' | 'misrouted' | 'missing' }
   | { cause: null | string; kind: 'self-stopped' }
+  | { cause: null | string; kind: 'waiting' }
   | { kind: 'never-engaged' }
   | { kind: 'operator-paused' }
   | { kind: 'stale'; lastAt: number }
@@ -587,10 +588,20 @@ export function controllerStop(project: ProjectRow, now = Date.now()): Controlle
   if (raw) {
     const [base, ...rest] = raw.trim().toLowerCase().split(':')
 
-    if (base === 'paused' || base === 'blocked') {
+    if (base === 'paused') {
       const cause = rest.join(':').trim() || project.latest_update?.blocker?.trim() || null
 
       return { cause, kind: 'self-stopped' }
+    }
+
+    if (base === 'blocked') {
+      // Waiting on something external (CI, a node, a scan) is not "stopped".
+      // The controller is alive and parked on a blocker — calling that
+      // "stopped itself" made Lean Silicon look finished while LSC1-05
+      // waited on exact-head CI.
+      const cause = rest.join(':').trim() || project.latest_update?.blocker?.trim() || null
+
+      return { cause, kind: 'waiting' }
     }
   }
 

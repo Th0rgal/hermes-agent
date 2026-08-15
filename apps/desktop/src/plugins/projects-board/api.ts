@@ -804,7 +804,14 @@ export function roadmapFromItems(detail: ProjectDetail): {
   summary: { done: number; failed: number; running: number; total: number }
   tasks: ProjectTask[]
 } {
-  const tasks = (detail.items ?? []).map(itemAsRoadmapTask)
+  const tasks = (detail.items ?? [])
+    .filter(item => {
+      const live = item.attempts.some(attempt => LIVE_ITEM_STATUS.has(attempt.status))
+      if (live) return true
+      if (item.kind === 'task') return item.open
+      return item.status === 'open' || item.status === 'active' || item.status === 'proposed' || item.status === 'done'
+    })
+    .map(itemAsRoadmapTask)
   let done = 0
   let running = 0
   let failed = 0

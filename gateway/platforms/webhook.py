@@ -700,10 +700,17 @@ class WebhookAdapter(BasePlatformAdapter):
                 logger.exception("[webhook] SessionDB unavailable for mission route")
                 return None
         try:
-            target = resolve_mission_delivery_session(payload, session_db)
+            # Off the event loop: SessionDB writes take BEGIN IMMEDIATE and
+            # can wait on a busy state.db. Doing that inline starved the
+            # gateway liveness probe (code 75) during the TAP smoke test.
+            target = await asyncio.to_thread(
+                resolve_mission_delivery_session, payload, session_db
+            )
             if not target:
                 return None
-            live = append_mission_callback(target, payload, session_db)
+            live = await asyncio.to_thread(
+                append_mission_callback, target, payload, session_db
+            )
         except Exception:
             logger.exception("[webhook] failed to append routed mission callback")
             return None

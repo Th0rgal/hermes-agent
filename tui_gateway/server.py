@@ -10047,6 +10047,43 @@ def _run_prompt_submit(
                 "session.title", sid, {"session_id": _k, "title": t}
             )
             result = agent.run_conversation(run_message, **run_kwargs)
+            # Dashboard-equivalent: API-server / TUI turns never hit
+            # GatewayRunner.reset_session. Fork a parent-linked child so
+            # project bindings / live_tip follow, and so a /goal recovery
+            # retry (or the next user message) starts empty instead of
+            # replaying the bloated transcript.
+            if (
+                isinstance(result, dict)
+                and result.get("compression_exhausted")
+                and not getattr(agent, "_exhaustion_rotated", False)
+            ):
+                from agent.conversation_compression import (
+                    fork_session_after_compression_exhaustion,
+                )
+
+                new_sid = fork_session_after_compression_exhaustion(agent)
+                if new_sid:
+                    agent._exhaustion_rotated = True
+                    _sync_session_key_after_compress(
+                        sid, session, clear_pending_title=False, restart_slash_worker=True,
+                    )
+                    with session["history_lock"]:
+                        session["history"] = []
+                        session["history_version"] = int(session.get("history_version", 0)) + 1
+                    if isinstance(result, dict):
+                        result["session_rotated_after_exhaustion"] = True
+                    _emit(
+                        "status.update",
+                        sid,
+                        {
+                            "kind": "compaction",
+                            "text": (
+                                "Session exceeded the context window and could "
+                                "not be compressed. Rotated to a fresh "
+                                "continuation session."
+                            ),
+                        },
+                    )
             if display_kind and isinstance(text, str):
                 db = getattr(agent, "_session_db", None)
                 current_session_id = getattr(agent, "session_id", None) or session.get("session_key")

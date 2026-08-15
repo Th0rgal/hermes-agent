@@ -6224,6 +6224,33 @@ class APIServerAdapter(BasePlatformAdapter):
                         conversation_history=conversation_history,
                         task_id=effective_task_id,
                     )
+                    # Dashboard /api/sessions/:id/chat does not go through
+                    # GatewayRunner's compression_exhausted auto-reset. Without
+                    # a child session the bound project stays on the bloated
+                    # transcript and every later reply reprints
+                    # "Cannot compress further". Fork once, then retry the
+                    # same user turn on the empty child.
+                    if (
+                        isinstance(result, dict)
+                        and result.get("compression_exhausted")
+                        and not getattr(agent, "_exhaustion_rotated", False)
+                    ):
+                        from agent.conversation_compression import (
+                            fork_session_after_compression_exhaustion,
+                        )
+
+                        new_sid = fork_session_after_compression_exhaustion(agent)
+                        if new_sid:
+                            agent._exhaustion_rotated = True
+                            effective_task_id = new_sid
+                            result = agent.run_conversation(
+                                user_message=user_message,
+                                conversation_history=[],
+                                task_id=effective_task_id,
+                            )
+                            if isinstance(result, dict):
+                                result["session_rotated_after_exhaustion"] = True
+                                result["parent_session_id"] = session_id
                     usage = {
                         "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
                         "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
@@ -6715,6 +6742,28 @@ class APIServerAdapter(BasePlatformAdapter):
                                 conversation_history=conversation_history,
                                 task_id=effective_task_id,
                             )
+                            if (
+                                isinstance(r, dict)
+                                and r.get("compression_exhausted")
+                                and not getattr(agent, "_exhaustion_rotated", False)
+                            ):
+                                from agent.conversation_compression import (
+                                    fork_session_after_compression_exhaustion,
+                                )
+
+                                new_sid = fork_session_after_compression_exhaustion(
+                                    agent
+                                )
+                                if new_sid:
+                                    agent._exhaustion_rotated = True
+                                    effective_task_id = new_sid
+                                    r = agent.run_conversation(
+                                        user_message=user_message,
+                                        conversation_history=[],
+                                        task_id=effective_task_id,
+                                    )
+                                    if isinstance(r, dict):
+                                        r["session_rotated_after_exhaustion"] = True
                         finally:
                             # Worker finished (interrupted or complete) —
                             # clear turn ownership immediately so a later

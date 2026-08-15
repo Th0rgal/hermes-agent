@@ -256,6 +256,7 @@ def elide_bulky_tool_messages(
     threshold_chars: int = 6000,
     keep_head: int = 600,
     keep_tail: int = 600,
+    protect_last_tool: bool = True,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Last-resort Tier-A fallback: truncate the ``content`` of the bulkiest
     ``role == "tool"`` messages to a head+tail window (with an elision marker)
@@ -264,10 +265,13 @@ def elide_bulky_tool_messages(
     This is the escape hatch for the "Cannot compress further" dead-end: the
     normal summariser protects the head/tail and can leave a huge tool_result
     sitting in a protected turn it cannot touch. We truncate the biggest tool
-    outputs oldest-first, keep the MOST-RECENT tool message intact (the output
-    the agent just acted on), and skip anything already elided so repeated
-    passes converge. Returns ``(messages, tokens_saved_estimate)``; a no-op
-    ``(messages, 0)`` when nothing qualifies.
+    outputs oldest-first, keep the MOST-RECENT tool message intact by default
+    (the output the agent just acted on), and skip anything already elided so
+    repeated passes converge. Returns ``(messages, tokens_saved_estimate)``; a
+    no-op ``(messages, 0)`` when nothing qualifies.
+
+    ``protect_last_tool=False`` is the next-aggressive pass used when the
+    first pass saved nothing (the last tool itself is the overweight body).
     """
     from agent.model_metadata import estimate_messages_tokens_rough
 
@@ -282,7 +286,7 @@ def elide_bulky_tool_messages(
     candidates = [
         i
         for i in tool_idxs
-        if i != last_tool
+        if (not protect_last_tool or i != last_tool)
         and isinstance(messages[i].get("content"), str)
         and len(messages[i]["content"]) > threshold_chars
         and _TOOL_ELISION_MARKER not in messages[i]["content"]
@@ -304,6 +308,102 @@ def elide_bulky_tool_messages(
             break
     saved = total - estimate_messages_tokens_rough(result)
     return (result, saved) if saved > 0 else (messages, 0)
+
+
+def _elide_bulky_text_messages(
+    messages: List[Dict[str, Any]],
+    target_tokens: int,
+    *,
+    threshold_chars: int = 4000,
+    keep_head: int = 200,
+    keep_tail: int = 200,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Elide bulky user/assistant string bodies, keeping the last user intact."""
+    from agent.model_metadata import estimate_messages_tokens_rough
+
+    total = estimate_messages_tokens_rough(messages)
+    if total <= target_tokens:
+        return messages, 0
+
+    last_user = -1
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            last_user = i
+            break
+
+    candidates = [
+        i
+        for i, msg in enumerate(messages)
+        if isinstance(msg, dict)
+        and i != last_user
+        and msg.get("role") in {"user", "assistant"}
+        and isinstance(msg.get("content"), str)
+        and len(msg["content"]) > threshold_chars
+        and _TOOL_ELISION_MARKER not in msg["content"]
+    ]
+    if not candidates:
+        return messages, 0
+
+    result = [dict(m) if isinstance(m, dict) else m for m in messages]
+    for i in candidates:
+        content = result[i].get("content", "")
+        if len(content) <= keep_head + keep_tail:
+            continue
+        result[i]["content"] = (
+            content[:keep_head]
+            + f"\n\n… {_TOOL_ELISION_MARKER}: {len(content):,} chars] …\n\n"
+            + content[-keep_tail:]
+        )
+        if estimate_messages_tokens_rough(result) <= target_tokens:
+            break
+    saved = total - estimate_messages_tokens_rough(result)
+    return (result, saved) if saved > 0 else (messages, 0)
+
+
+def elide_until_fit(
+    messages: List[Dict[str, Any]],
+    target_tokens: int,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Escalate mechanical elision until the request fits or nothing remains.
+
+    The first pass matches the historical last-resort (skip last tool, keep
+    600/600). Later passes cut the last tool, shrink the keep window, then
+    elide bulky user/assistant text. Used both on overflow and when the host
+    summariser times out so a turn never continues with a 200k+ transcript.
+    """
+    from agent.model_metadata import estimate_messages_tokens_rough
+
+    total = estimate_messages_tokens_rough(messages)
+    if total <= target_tokens:
+        return messages, 0
+
+    current = messages
+    saved_total = 0
+    for protect_last, threshold, head, tail in (
+        (True, 6000, 600, 600),
+        (False, 2000, 200, 200),
+        (False, 400, 80, 80),
+    ):
+        out, saved = elide_bulky_tool_messages(
+            current,
+            target_tokens,
+            threshold_chars=threshold,
+            keep_head=head,
+            keep_tail=tail,
+            protect_last_tool=protect_last,
+        )
+        if saved > 0:
+            current = out
+            saved_total += saved
+            if estimate_messages_tokens_rough(current) <= target_tokens:
+                return current, saved_total
+
+    out, saved = _elide_bulky_text_messages(current, target_tokens)
+    if saved > 0:
+        current = out
+        saved_total += saved
+    return (current, saved_total) if saved_total > 0 else (messages, 0)
 
 
 def _prune_stale_reasoning_replay(messages: List[Dict[str, Any]]) -> int:

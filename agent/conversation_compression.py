@@ -100,6 +100,85 @@ COMPACTION_STATUS = (
 
 COMPACTION_DONE_STATUS = "✓ Context compaction complete — continuing turn..."
 
+EXHAUSTION_HANDOFF_USER = (
+    "Previous conversation exceeded the model context window and could not "
+    "be compressed further. This is a fresh continuation of that session. "
+    "The earlier transcript is still stored on the parent session."
+)
+EXHAUSTION_HANDOFF_ASSISTANT = (
+    "Understood. I'll continue from here on a fresh context."
+)
+
+
+def fork_session_after_compression_exhaustion(agent: Any) -> Optional[str]:
+    """Rotate to a parent-linked child after compression cannot shrink further.
+
+    Dashboard / TUI / API-server turns do not go through the gateway's
+    ``reset_session`` path, so an exhausted session otherwise stays bound and
+    every later message replays "Cannot compress further". Creating a child
+    with ``parent_session_id`` lets ``live_tip`` / project bindings follow,
+    and the next turn starts empty.
+
+    Returns the new session id, or ``None`` when rotation is not possible.
+    """
+    db = getattr(agent, "_session_db", None)
+    old_id = getattr(agent, "session_id", None)
+    if db is None or not old_id or not hasattr(db, "create_session"):
+        return None
+    new_id = (
+        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    )
+    try:
+        db.create_session(
+            session_id=new_id,
+            source=getattr(agent, "platform", None) or "api",
+            model=getattr(agent, "model", None),
+            model_config=getattr(agent, "_session_init_model_config", None),
+            parent_session_id=old_id,
+            cwd=getattr(agent, "working_directory", None),
+        )
+    except Exception:
+        logger.warning(
+            "Failed to create exhaustion-continuation session from %s",
+            old_id,
+            exc_info=True,
+        )
+        return None
+    try:
+        title_fn = getattr(db, "get_session_title", None)
+        set_title = getattr(db, "set_session_title", None)
+        if callable(title_fn) and callable(set_title):
+            title = title_fn(old_id)
+            if title:
+                set_title(new_id, title)
+    except Exception:
+        logger.debug("exhaustion child title copy failed", exc_info=True)
+    try:
+        end_fn = getattr(db, "end_session", None)
+        if callable(end_fn):
+            end_fn(old_id, "compression_exhausted")
+    except Exception:
+        logger.debug("exhaustion parent end_session failed", exc_info=True)
+    agent.session_id = new_id
+    try:
+        transition = getattr(agent, "_transition_context_engine_session", None)
+        if callable(transition):
+            transition(
+                old_session_id=old_id,
+                new_session_id=new_id,
+                previous_messages=None,
+                carry_over_context=False,
+                reset_engine=True,
+            )
+    except Exception:
+        logger.debug("exhaustion context-engine transition failed", exc_info=True)
+    logger.info(
+        "Rotated session %s → %s after compression exhaustion",
+        old_id,
+        new_id,
+    )
+    return new_id
+
 
 def _emit_compaction_done(agent: Any) -> None:
     """Emit the structured terminal edge for a started compaction."""

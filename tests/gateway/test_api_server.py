@@ -393,6 +393,46 @@ class TestAgentExecution:
         )
 
     @pytest.mark.asyncio
+    async def test_run_agent_retries_once_after_compression_exhaustion(self, adapter):
+        mock_agent = MagicMock()
+        mock_agent.session_id = "bloated-parent"
+        mock_agent._exhaustion_rotated = False
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+        mock_agent.run_conversation.side_effect = [
+            {
+                "final_response": "Context length exceeded (277,857 tokens). Cannot compress further.",
+                "error": "Context length exceeded (277,857 tokens). Cannot compress further.",
+                "failed": True,
+                "compression_exhausted": True,
+            },
+            {"final_response": "picked up on a fresh session", "failed": False},
+        ]
+
+        def _fork(agent):
+            agent.session_id = "fresh-child"
+            return "fresh-child"
+
+        with patch.object(adapter, "_create_agent", return_value=mock_agent), patch(
+            "agent.conversation_compression.fork_session_after_compression_exhaustion",
+            side_effect=_fork,
+        ):
+            result, _usage = await adapter._run_agent(
+                user_message="où en es-tu ?",
+                conversation_history=[{"role": "user", "content": "huge"}],
+                session_id="bloated-parent",
+            )
+
+        assert mock_agent.run_conversation.call_count == 2
+        retry = mock_agent.run_conversation.call_args_list[1]
+        assert retry.kwargs["conversation_history"] == []
+        assert retry.kwargs["task_id"] == "fresh-child"
+        assert result["final_response"] == "picked up on a fresh session"
+        assert result["session_rotated_after_exhaustion"] is True
+        assert result["session_id"] == "fresh-child"
+
+    @pytest.mark.asyncio
     async def test_run_agent_sets_and_clears_process_ownership_markers(self, adapter):
         """#76188 review: this surface runs its own agent lifecycle outside
         TurnRunner, so it needs its own baseline snapshot/clear — verify the

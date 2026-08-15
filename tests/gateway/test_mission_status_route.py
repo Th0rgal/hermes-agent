@@ -157,6 +157,41 @@ def test_origin_must_reference_the_mission_when_inspectable():
     assert resolve_mission_delivery_session(legit, db) == "owner"
 
 
+def test_async_session_db_wrapper_is_unwrapped():
+    """Gateway runner._session_db is AsyncSessionDB — must not see coroutines."""
+    import asyncio
+
+    inner = _FakeSessionDBWithMessages(
+        {"owner": {"source": "desktop"}},
+        messages={"owner": [{"content": "start_mission -> acfb03d2"}]},
+    )
+
+    class _AsyncWrap:
+        def __init__(self, db):
+            self._db = db
+
+        def __getattr__(self, name):
+            attr = getattr(self._db, name)
+
+            async def _offloaded(*args, **kwargs):
+                return attr(*args, **kwargs)
+
+            return _offloaded if callable(attr) else attr
+
+    payload = {
+        "mission_id": "acfb03d2",
+        "status": "completed",
+        "origin_session": "owner",
+    }
+    wrapped = _AsyncWrap(inner)
+    assert resolve_mission_delivery_session(payload, wrapped) == "owner"
+    assert append_mission_callback("owner", payload, wrapped) == "owner"
+    assert any("[Mission callback" in t["content"] for t in inner.messages["owner"])
+    pending = wrapped.get_session("owner")
+    assert asyncio.iscoroutine(pending)
+    pending.close()
+
+
 def test_duplicate_event_id_appends_once():
     db = _FakeSessionDBWithMessages({"s1": {"source": "desktop"}})
     payload = {

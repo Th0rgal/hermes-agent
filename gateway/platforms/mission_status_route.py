@@ -50,6 +50,19 @@ def is_routable_mission_status(payload: dict) -> bool:
     return extract_status(payload) in _TERMINAL
 
 
+def sync_session_db(session_db: Any) -> Any:
+    """Prefer the underlying sync SessionDB.
+
+    The gateway runner exposes ``AsyncSessionDB``, whose ``__getattr__``
+    wraps every method in ``asyncio.to_thread``. Calling those from this
+    sync router yields a coroutine (truthy!) instead of a session row —
+    that is how origin-route crashed in production (TAP smoke, 2026-08-15)
+    and fell through to a throwaway webhook session.
+    """
+    inner = getattr(session_db, "_db", None)
+    return inner if inner is not None else session_db
+
+
 def resolve_live_session_id(session_id: str, session_db: Any) -> Optional[str]:
     """Follow continuation / resume pointers; None if the row is gone."""
     sid = (session_id or "").strip()
@@ -140,6 +153,7 @@ def extract_wake_session(payload: dict) -> str:
 
 def resolve_mission_delivery_session(payload: dict, session_db: Any) -> Optional[str]:
     """Pick the dedicated conversation for this mission-status event."""
+    session_db = sync_session_db(session_db)
     if not is_routable_mission_status(payload):
         return None
     # Producer-resolved tip (project binding, else origin). Use the id as-is
@@ -217,6 +231,7 @@ def append_mission_callback(session_id: str, payload: dict, session_db: Any) -> 
     means this exact delivery landed — appending again would double the
     callback and schedule a second autonomous wake.
     """
+    session_db = sync_session_db(session_db)
     live = resolve_live_session_id(session_id, session_db) or session_id
     event_id = extract_event_id(payload)
     if event_id:

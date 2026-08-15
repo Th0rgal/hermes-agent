@@ -50,6 +50,36 @@ def _build_mission_prompt(goal: str, context: Optional[str], role: Optional[str]
     return "\n\n".join(parts)
 
 
+def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """Best-effort parse of a JSON object, including MCP wrappers.
+
+    start_mission results arrive as raw JSON, as ``{"result": "<json>"}``,
+    or wrapped in an ``<untrusted_tool_result>`` fence. Walk those shapes
+    until a dict remains.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    blob = text.strip()
+    if "<untrusted_tool_result" in blob:
+        start = blob.find("{")
+        end = blob.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        blob = blob[start : end + 1]
+    try:
+        data = json.loads(blob)
+    except Exception:
+        return None
+    if isinstance(data, dict):
+        inner = data.get("result")
+        if isinstance(inner, str):
+            nested = _extract_json_object(inner)
+            if nested:
+                return nested
+        return data
+    return None
+
+
 def _extract_mission_id(result_str: str) -> Optional[str]:
     """Pull the mission id out of the ``start_mission`` tool result.
 
@@ -57,23 +87,16 @@ def _extract_mission_id(result_str: str) -> Optional[str]:
     ``{"mission_id"/"id": ...}``, a nested ``{"mission": {"id": ...}}``, or a
     string-wrapped ``{"result": "<json>"}`` (the MCP text-content convention).
     """
-    if not result_str:
+    data = _extract_json_object(result_str or "")
+    if not data:
         return None
-    try:
-        data = json.loads(result_str)
-    except Exception:
-        return None
-    if isinstance(data, dict):
-        for key in ("mission_id", "id", "missionId"):
-            val = data.get(key)
-            if val:
-                return str(val)
-        mission = data.get("mission")
-        if isinstance(mission, dict) and mission.get("id"):
-            return str(mission["id"])
-        inner = data.get("result")
-        if isinstance(inner, str):
-            return _extract_mission_id(inner)
+    for key in ("mission_id", "id", "missionId"):
+        val = data.get(key)
+        if val:
+            return str(val)
+    mission = data.get("mission")
+    if isinstance(mission, dict) and mission.get("id"):
+        return str(mission["id"])
     return None
 
 
@@ -281,3 +304,112 @@ def dispatch_mission_delegation(
         "mission_id": mission_id,
         "backend": "mission",
     }
+
+
+_EPHEMERAL_ORIGIN_PREFIXES = ("cron_",)
+
+
+def enroll_conversational_start_mission(
+    *,
+    result: Any,
+    origin_session_id: str = "",
+    parent_session_id: Optional[str] = None,
+    goal: str = "",
+    title: str = "",
+    project: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    session_key: str = "",
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Register a raw conversational ``start_mission`` as a mission delegation.
+
+    ``delegate_task(backend='mission')`` already writes the ledger row.
+    Conversational launches go through MCP ``start_mission`` instead, so
+    without this enroll the terminal webhook cannot fold into the parent
+    turn. Idempotent and fail-open: a rejected enroll never fails the
+    original start_mission (the origin-route safety net still applies).
+
+    Skips missing mission ids, missing/ephemeral origins, and missions
+    already bound to a ledger row.
+    """
+    from tools.async_delegation import (
+        find_delegation_by_mission_id,
+        register_mission_delegation,
+        set_delegation_mission_id,
+    )
+
+    origin = (origin_session_id or parent_session_id or "").strip()
+    if not origin or origin.startswith(_EPHEMERAL_ORIGIN_PREFIXES):
+        return {"status": "skipped", "reason": "no_durable_origin"}
+
+    result_text = result if isinstance(result, str) else json.dumps(result or "")
+    mission_id = _extract_mission_id(result_text)
+    if not mission_id:
+        return {"status": "skipped", "reason": "no_mission_id"}
+
+    existing = find_delegation_by_mission_id(mission_id)
+    if existing is not None:
+        return {
+            "status": "already_enrolled",
+            "delegation_id": existing.get("delegation_id"),
+            "mission_id": mission_id,
+        }
+
+    if not session_key:
+        try:
+            from tools.approval import get_current_session_key
+
+            session_key = get_current_session_key(default="") or origin
+        except Exception:
+            session_key = origin
+
+    reg = register_mission_delegation(
+        goal=goal or title or f"Mission {mission_id}",
+        role="leaf",
+        model=model,
+        session_key=session_key,
+        parent_session_id=parent_session_id or origin,
+        origin_session_id=origin,
+        workspace_id=workspace_id,
+        project=project,
+    )
+    if reg.get("status") != "dispatched":
+        logger.warning(
+            "start_mission enroll rejected for %s: %s",
+            mission_id,
+            reg.get("error") or reg,
+        )
+        return {"status": "rejected", "mission_id": mission_id, **reg}
+
+    set_delegation_mission_id(reg["delegation_id"], mission_id)
+    logger.info(
+        "start_mission enroll %s → mission %s (origin=%s)",
+        reg["delegation_id"],
+        mission_id,
+        origin,
+    )
+    return {
+        "status": "enrolled",
+        "delegation_id": reg["delegation_id"],
+        "mission_id": mission_id,
+        "backend": "mission",
+    }
+
+
+def enroll_existing_mission(
+    *,
+    mission_id: str,
+    origin_session_id: str,
+    goal: str = "",
+    project: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Backfill a ledger row for a mission that was started without enroll."""
+    return enroll_conversational_start_mission(
+        result=json.dumps({"mission_id": mission_id}),
+        origin_session_id=origin_session_id,
+        parent_session_id=origin_session_id,
+        goal=goal or f"Mission {mission_id}",
+        project=project,
+        workspace_id=workspace_id,
+    )

@@ -768,6 +768,56 @@ export type RailItem = {
   status: null | string
 }
 
+/** Map a project item onto the checklist row the rail/drawer already render.
+ *  The backend `/tasks` endpoint now returns this same list — items ARE the
+ *  roadmap — so the desktop must not keep a second board-task fetch. */
+export function itemAsRoadmapTask(item: ProjectItem): ProjectTask {
+  const live = item.attempts.some(attempt => LIVE_ITEM_STATUS.has(attempt.status))
+  const failedOnly =
+    item.attempts.length > 0 &&
+    item.attempts.every(attempt => attempt.status === 'failed' || attempt.status === 'interrupted')
+  const status = !item.open
+    ? 'accepted'
+    : live
+      ? 'running'
+      : item.status === 'proposed'
+        ? 'proposed'
+        : failedOnly
+          ? 'failed'
+          : 'pending'
+  const title =
+    item.desired_state?.trim() ||
+    item.attempts.find(attempt => attempt.title?.trim())?.title?.trim() ||
+    item.key
+
+  return {
+    attempts: item.attempts.length,
+    status,
+    task_key: item.key,
+    title,
+    updated_at: item.attempts[0]?.updated_at ?? null,
+    worker_mission_id: item.attempts[0]?.id ?? null
+  }
+}
+
+export function roadmapFromItems(detail: ProjectDetail): {
+  summary: { done: number; failed: number; running: number; total: number }
+  tasks: ProjectTask[]
+} {
+  const tasks = (detail.items ?? []).map(itemAsRoadmapTask)
+  let done = 0
+  let running = 0
+  let failed = 0
+
+  for (const task of tasks) {
+    if (task.status === 'accepted') done += 1
+    else if (task.status === 'running' || task.status === 'settled') running += 1
+    else if (task.status === 'failed') failed += 1
+  }
+
+  return { summary: { done, failed, running, total: tasks.length }, tasks }
+}
+
 /** Open items, live first, capped so the rail cannot dump a 120-track graveyard. */
 export function railOpenItems(detail: ProjectDetail, cap = 8): RailItem[] {
   const ranked = (detail.items ?? [])

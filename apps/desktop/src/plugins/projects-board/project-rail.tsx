@@ -24,12 +24,10 @@ import {
   $railCollapsed,
   fetchProject,
   fetchProjects,
-  fetchProjectTasks,
   leadSignal,
   PROJECTS_KEY,
   projectKey,
-  railOpenItems,
-  tasksKey
+  roadmapFromItems
 } from './api'
 import {
   ActivityRow,
@@ -77,21 +75,14 @@ function RailBody({ slug }: { slug: string }) {
     retry: false
   })
 
-  const { data: roadmap } = useQuery({
-    queryFn: () => fetchProjectTasks(slug),
-    queryKey: tasksKey(slug),
-    refetchInterval: 60_000,
-    retry: false
-  })
-
   const project = detail?.project
   const pending = detail?.open_decisions ?? []
   const activity = (detail?.recent_decisions ?? []).slice(0, 5)
+  const roadmap = detail ? roadmapFromItems(detail) : null
   const tasks = roadmap?.tasks ?? []
   const summary = roadmap?.summary
   const row = board?.projects.find(candidate => candidate.slug === slug)
   const signal = row ? leadSignal(row) : null
-  const items = detail ? railOpenItems(detail) : []
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -146,26 +137,6 @@ function RailBody({ slug }: { slug: string }) {
           </div>
         )}
 
-        {items.length > 0 && (
-          <Section label={b.openItems}>
-            <div className="flex flex-col gap-1">
-              {items.map(item => (
-                <div className="flex min-w-0 flex-col gap-0.5 text-[0.71rem]" key={item.key}>
-                  <div className="flex items-center gap-1.5">
-                    <span className="min-w-0 flex-1 truncate text-(--ui-text-secondary)">{item.key}</span>
-                    {item.live && <span className="shrink-0 text-emerald-400">{b.live(1)}</span>}
-                  </div>
-                  {item.attempts[0]?.title && (
-                    <span className="truncate text-[0.625rem] text-(--ui-text-quaternary)">
-                      {item.attempts[0].title}
-                    </span>
-                  )}
-                </div>
-              ))}
-            </div>
-          </Section>
-        )}
-
         {pending.length > 0 && (
           <Section label={b.needsYouSection}>
             <div className="flex flex-col gap-1.5">
@@ -176,25 +147,23 @@ function RailBody({ slug }: { slug: string }) {
           </Section>
         )}
 
-        {roadmap && (
-          <Section
-            label={
-              summary && summary.total > 0
-                ? `${b.roadmap} · ${b.roadmapProgress(summary.done, summary.total)}`
-                : b.roadmap
-            }
-          >
-            {tasks.length === 0 ? (
-              <span className="text-[0.71rem] text-(--ui-text-quaternary)">{b.roadmapEmpty}</span>
-            ) : (
-              <div className="flex flex-col gap-0.5">
-                {tasks.map((task, index) => (
-                  <TaskRow key={task.id ?? `${task.boss_mission_id}-${task.task_key}-${index}`} task={task} />
-                ))}
-              </div>
-            )}
-          </Section>
-        )}
+        <Section
+          label={
+            summary && summary.total > 0
+              ? `${b.roadmap} · ${b.roadmapProgress(summary.done, summary.total)}`
+              : b.roadmap
+          }
+        >
+          {tasks.length === 0 ? (
+            <span className="text-[0.71rem] text-(--ui-text-quaternary)">{b.roadmapEmpty}</span>
+          ) : (
+            <div className="flex flex-col gap-0.5">
+              {tasks.map((task, index) => (
+                <TaskRow key={task.task_key || `${index}`} task={task} />
+              ))}
+            </div>
+          )}
+        </Section>
 
         {activity.length > 0 && (
           <Section label={b.recentActivity}>

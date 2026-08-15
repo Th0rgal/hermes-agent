@@ -273,7 +273,7 @@ const en: BoardMessages = {
   railHide: 'Hide project panel',
   railShow: 'Show project panel',
   roadmap: 'Roadmap',
-  roadmapEmpty: 'No planned tasks yet.',
+  roadmapEmpty: 'No open items.',
   roadmapUnavailable: 'Roadmap temporarily unavailable — retrying.',
   roadmapProgress: (done, total) => `${done}/${total} done`,
   taskAttempts: n => `${n} attempt${n === 1 ? '' : 's'}`,

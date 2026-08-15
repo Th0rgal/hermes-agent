@@ -29,7 +29,7 @@ import {
   type AutonomyLevel,
   fetchProject,
   fetchProjectState,
-  fetchProjectTasks,
+  roadmapFromItems,
   isBoundConversation,
   liveSessionIdFor,
   type MissionChip,
@@ -41,7 +41,6 @@ import {
   type ProjectTask,
   saveGrant,
   stateKey,
-  tasksKey,
   type TrackHealth
 } from './api'
 import { ago, errText } from './board'
@@ -651,17 +650,7 @@ export function ProjectDrawer({
     queryKey: stateKey(slug ?? '')
   })
 
-  const { data: roadmap, error: roadmapError } = useQuery({
-    enabled: Boolean(slug),
-    queryFn: () => fetchProjectTasks(slug!),
-    queryKey: tasksKey(slug ?? '')
-  })
-
-  // An older backend/relay without the endpoint (404, or 503 = no sandboxed.sh)
-  // legitimately has no roadmap — stay silent. Any other failure is a transient
-  // outage and must not masquerade as "empty roadmap".
-  const roadmapStatus = (roadmapError as { status?: number } | null)?.status
-  const roadmapUnavailable = Boolean(roadmapError) && roadmapStatus !== 404 && roadmapStatus !== 503
+  const roadmap = detail ? roadmapFromItems(detail) : null
 
   if (!slug) {
     return null
@@ -758,16 +747,7 @@ export function ProjectDrawer({
                 </Section>
               )}
 
-              {/* Roadmap — the project's checklist, from the task board. Always
-                  present when the endpoint exists: an explicit "no planned
-                  tasks" beats a silently missing section, which reads as
-                  broken. Only a 404/503 (no task board on this backend) hides
-                  it entirely. */}
-              {roadmapUnavailable && (
-                <Section label={b.roadmap}>
-                  <span className="text-[0.71rem] text-amber-500">{b.roadmapUnavailable}</span>
-                </Section>
-              )}
+              {/* Roadmap — the project's items. Same list as get_project. */}
               {roadmap && (
                 <Section
                   label={

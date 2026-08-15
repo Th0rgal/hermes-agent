@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest'
 
 import {
   isStaleControllerHeadline,
+  itemAsRoadmapTask,
   leadSignal,
   type ProjectDetail,
   type ProjectRow,
-  railOpenItems
+  railOpenItems,
+  roadmapFromItems
 } from './api'
 
 const row = (partial: Partial<ProjectRow>): ProjectRow => ({
@@ -95,5 +97,40 @@ describe('railOpenItems', () => {
     expect(items[0]?.key).toBe('c5-preflight-pr2332')
     expect(items[0]?.live).toBe(true)
     expect(items.some(item => item.key === 'stale-19')).toBe(false)
+  })
+
+  it('maps items onto the single roadmap list', () => {
+    const detail: ProjectDetail = {
+      items: [
+        {
+          attempts: [
+            { id: 'live', status: 'active', title: 're-pin Verity', updated_at: '2026-08-15T10:00:00Z' }
+          ],
+          desired_state: 'proven Verity tx',
+          key: 'lido-verity-closure-v2',
+          open: true
+        },
+        {
+          attempts: [],
+          desired_state: 'old PR 46',
+          key: 'certify-pr46',
+          open: false,
+          status: 'done'
+        }
+      ],
+      project: { slug: 'verity-lido', status: 'active' }
+    }
+
+    const live = itemAsRoadmapTask(detail.items![0])
+    expect(live.status).toBe('running')
+    expect(live.title).toBe('proven Verity tx')
+    expect(live.task_key).toBe('lido-verity-closure-v2')
+
+    const roadmap = roadmapFromItems(detail)
+    expect(roadmap.summary).toEqual({ done: 1, failed: 0, running: 1, total: 2 })
+    expect(roadmap.tasks.map(task => task.task_key)).toEqual([
+      'lido-verity-closure-v2',
+      'certify-pr46'
+    ])
   })
 })

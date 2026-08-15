@@ -252,14 +252,30 @@ async def _lifespan(app: "FastAPI"):
         except Exception:
             _log.exception("Desktop startup: orphan gateway reap failed")
 
-        cron_stop = threading.Event()
-        cron_thread = threading.Thread(
-            target=_start_desktop_cron_ticker,
-            args=(cron_stop,),
-            daemon=True,
-            name="desktop-cron-ticker",
-        )
-        cron_thread.start()
+        # A server gateway on the same HERMES_HOME already ticks cron and
+        # writes state.db. A second ticker is how two Hermes processes
+        # collide on a multi-GB WAL (Lido/Verity "session storage was busy").
+        start_ticker = True
+        try:
+            from hermes_cli.profiles import _check_gateway_running
+            from hermes_constants import get_hermes_home
+
+            if _check_gateway_running(get_hermes_home()):
+                _log.info(
+                    "Desktop cron ticker skipped: gateway already owns this HERMES_HOME"
+                )
+                start_ticker = False
+        except Exception:
+            _log.exception("gateway-running check for desktop cron ticker failed")
+        if start_ticker:
+            cron_stop = threading.Event()
+            cron_thread = threading.Thread(
+                target=_start_desktop_cron_ticker,
+                args=(cron_stop,),
+                daemon=True,
+                name="desktop-cron-ticker",
+            )
+            cron_thread.start()
 
     # Reap idle/dead keep-alive PTY sessions in the background (30-min TTL).
     pty_reaper_task = asyncio.create_task(run_reaper(PTY_REGISTRY))

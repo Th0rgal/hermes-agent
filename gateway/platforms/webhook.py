@@ -604,7 +604,30 @@ class WebhookAdapter(BasePlatformAdapter):
         "awaitinguser": "needs_input",
     }
 
-    def _maybe_fold_mission_delegation(self, payload: dict) -> "Optional[web.Response]":
+    def _profile_home_token(self, profile: Optional[str]):
+        """Bind HERMES_HOME to the webhook URL's profile, if it is secondary.
+
+        Returns ``(home, token)`` or ``(None, None)`` for the launch/default
+        profile. Caller must ``reset_hermes_home_override(token)``.
+        """
+        name = (profile or "").strip()
+        if not name or name == "default":
+            return None, None
+        try:
+            from hermes_cli.profiles import get_profile_dir
+            from hermes_constants import set_hermes_home_override
+
+            home = get_profile_dir(name)
+            return home, set_hermes_home_override(str(home))
+        except Exception:
+            logger.debug(
+                "[webhook] could not bind profile %s HERMES_HOME", name, exc_info=True
+            )
+            return None, None
+
+    def _maybe_fold_mission_delegation(
+        self, payload: dict, *, profile: Optional[str] = None
+    ) -> "Optional[web.Response]":
         """If this webhook is a terminal transition of a mission that Hermes
         dispatched via delegate_task(backend='mission'), fold its result into the
         delegating conversation and return a 200; otherwise return None so the
@@ -614,8 +637,6 @@ class WebhookAdapter(BasePlatformAdapter):
         forged payload with a random mission_id resolves to nothing and falls
         through (and never reaches here without passing the route's HMAC check).
         """
-        from aiohttp import web
-
         mission_id = str(payload.get("mission_id") or "").strip()
         if not mission_id:
             return None
@@ -623,12 +644,34 @@ class WebhookAdapter(BasePlatformAdapter):
             payload.get("status") or payload.get("type") or payload.get("event_type") or ""
         ).strip().lower()
         try:
-            from tools.async_delegation import fold_mission_completion, find_delegation_by_mission_id
+            from tools.async_delegation import find_delegation_by_mission_id
         except Exception:
             return None
-        # Only claim this payload if the mission is a Hermes delegation.
-        if find_delegation_by_mission_id(mission_id) is None:
+        _home, token = self._profile_home_token(profile)
+        try:
+            if find_delegation_by_mission_id(mission_id) is None:
+                return None
+            return self._fold_claimed_mission(
+                payload, mission_id=mission_id, raw_status=raw_status
+            )
+        except Exception:
+            logger.exception("[webhook] mission delegation fold failed")
             return None
+        finally:
+            if token is not None:
+                try:
+                    from hermes_constants import reset_hermes_home_override
+
+                    reset_hermes_home_override(token)
+                except Exception:
+                    pass
+
+    def _fold_claimed_mission(
+        self, payload: dict, *, mission_id: str, raw_status: str
+    ) -> "Optional[web.Response]":
+        from aiohttp import web
+        from tools.async_delegation import fold_mission_completion
+
         mapped = self._MISSION_TERMINAL_STATUS.get(raw_status)
         if mapped is None:
             # Delegated mission, but a non-terminal transition — ack without
@@ -665,6 +708,264 @@ class WebhookAdapter(BasePlatformAdapter):
             return None  # race: bound between the two lookups — fall through
         return web.json_response(
             {"status": "delivered", "mission_id": mission_id, "outcome": outcome}
+        )
+
+    def _session_db_for_profile(self, profile: Optional[str]):
+        """Open the SessionDB that owns this webhook's conversations.
+
+        Secondary ``/p/<profile>/`` routes live under that profile's
+        HERMES_HOME. Using the runner's startup-profile DB would miss both
+        the ledger fold and origin lookup.
+        """
+        runner = self.gateway_runner
+        name = (profile or "").strip()
+        if name and name != "default":
+            try:
+                from hermes_cli.profiles import get_profile_dir
+                from hermes_state import SessionDB
+
+                home = get_profile_dir(name)
+                return SessionDB(db_path=home / "state.db"), True
+            except Exception:
+                logger.exception(
+                    "[webhook] SessionDB unavailable for profile %s", name
+                )
+                return None, False
+        session_db = getattr(runner, "_session_db", None) if runner is not None else None
+        if session_db is not None:
+            return session_db, False
+        try:
+            from hermes_state import SessionDB
+
+            return SessionDB(), True
+        except Exception:
+            logger.exception("[webhook] SessionDB unavailable for mission route")
+            return None, False
+
+    @staticmethod
+    def _source_from_session_row(row: Any, session_id: str, profile: Optional[str]):
+        """Rebuild a SessionSource from the durable session row."""
+        if not row:
+            return None
+        from gateway.config import Platform
+        from gateway.session import SessionSource
+
+        origin_raw = (
+            row.get("origin_json")
+            if isinstance(row, dict)
+            else getattr(row, "origin_json", None)
+        )
+        if origin_raw:
+            try:
+                data = json.loads(origin_raw) if isinstance(origin_raw, str) else origin_raw
+                if isinstance(data, dict) and data.get("platform"):
+                    source = SessionSource.from_dict(data)
+                    if profile and not getattr(source, "profile", None):
+                        source.profile = profile
+                    return source
+            except Exception:
+                logger.debug("origin_json parse failed for %s", session_id, exc_info=True)
+
+        def _field(name: str, default: str = "") -> str:
+            value = row.get(name) if isinstance(row, dict) else getattr(row, name, default)
+            return str(value or default)
+
+        source_name = _field("source")
+        if not source_name:
+            return None
+        desktop_aliases = {"desktop", "cli", "tui", "local", "unknown"}
+        try:
+            platform = Platform(source_name)
+        except (ValueError, KeyError):
+            if source_name not in desktop_aliases:
+                return None
+            platform = Platform.API_SERVER
+        if source_name in desktop_aliases:
+            platform = Platform.API_SERVER
+        return SessionSource(
+            platform=platform,
+            chat_id=_field("chat_id") or session_id,
+            chat_type=_field("chat_type") or "dm",
+            thread_id=_field("thread_id") or None,
+            user_id=_field("user_id") or None,
+            user_name=_field("display_name") or None,
+            profile=profile or _field("profile_name") or None,
+        )
+
+    def _adapter_for_routed_session(
+        self, row: Any, session_id: str, profile: Optional[str]
+    ):
+        """Pick the platform adapter that owns this session.
+
+        Telegram/Slack/Discord must wake through their own adapter. Falling
+        back to the API-server adapter self-posts and discards the reply, so
+        the originating chat never sees the mission result.
+        """
+        from gateway.config import Platform
+
+        runner = self.gateway_runner
+        if runner is None:
+            return None, None
+        source = self._source_from_session_row(row, session_id, profile)
+        adapter = None
+        _API_LIKE = {Platform.API_SERVER, Platform.LOCAL, Platform.WEBHOOK}
+        if source is not None:
+            lookup = getattr(runner, "_adapter_for_source", None)
+            if callable(lookup):
+                try:
+                    adapter = lookup(source)
+                except Exception:
+                    adapter = None
+            if adapter is None:
+                adapters = getattr(runner, "adapters", None) or {}
+                adapter = adapters.get(source.platform)
+            if adapter is None and source.profile:
+                profile_adapters = getattr(runner, "_profile_adapters", None) or {}
+                adapter = (profile_adapters.get(source.profile) or {}).get(
+                    source.platform
+                )
+            if adapter is None and source.platform not in _API_LIKE:
+                logger.warning(
+                    "[webhook] no %s adapter for routed session %s; skip wake",
+                    source.platform,
+                    session_id,
+                )
+                return None, source
+        if adapter is None:
+            adapter = (getattr(runner, "adapters", {}) or {}).get(Platform.API_SERVER)
+            source = None
+        return adapter, source
+
+    async def _maybe_route_mission_status(
+        self, payload: dict, *, profile: Optional[str] = None
+    ) -> "Optional[web.Response]":
+        """Append a mission-complete callback into the dedicated session.
+
+        Isolated ``webhook:mission-complete:<delivery>`` sessions are how
+        Coldcard ``acfb03d2`` finished without writing into Coldcard #3.
+        After HMAC, route to origin_session (continuations followed) or
+        ``project:<slug>``. Unroutable payloads return None so the existing
+        isolated path still runs.
+        """
+        from aiohttp import web
+
+        try:
+            from gateway.platforms.mission_status_route import (
+                append_mission_callback,
+                extract_origin_session,
+                is_routable_mission_status,
+                resolve_mission_delivery_session,
+                stash_unroutable_callback,
+            )
+        except Exception:
+            logger.exception("[webhook] mission status router unavailable")
+            return None
+
+        _home, token = self._profile_home_token(profile)
+        session_db, owned = self._session_db_for_profile(profile)
+        if session_db is None:
+            if token is not None:
+                try:
+                    from hermes_constants import reset_hermes_home_override
+
+                    reset_hermes_home_override(token)
+                except Exception:
+                    pass
+            return None
+        live = None
+        appended = False
+        row = None
+        try:
+            # Off the event loop: SessionDB writes take BEGIN IMMEDIATE and
+            # can wait on a busy state.db. Doing that inline starved the
+            # gateway liveness probe (code 75) during the TAP smoke test.
+            target = await asyncio.to_thread(
+                resolve_mission_delivery_session, payload, session_db
+            )
+            if not target:
+                mission_id = str(payload.get("mission_id") or "").strip()
+                if mission_id and is_routable_mission_status(payload):
+                    await asyncio.to_thread(
+                        stash_unroutable_callback, mission_id, payload
+                    )
+                    if extract_origin_session(payload):
+                        return web.json_response(
+                            {
+                                "status": "pending_enrollment",
+                                "mission_id": mission_id,
+                            },
+                            status=202,
+                        )
+                return None
+            result = await asyncio.to_thread(
+                append_mission_callback, target, payload, session_db
+            )
+            if isinstance(result, tuple):
+                live, appended = result
+            else:
+                live, appended = result, True
+            getter = getattr(session_db, "get_session", None)
+            if callable(getter) and live:
+                try:
+                    row = getter(live)
+                except Exception:
+                    row = None
+        except Exception:
+            logger.exception("[webhook] failed to append routed mission callback")
+            return None
+        finally:
+            if owned:
+                try:
+                    session_db.close()
+                except Exception:
+                    pass
+            if token is not None:
+                try:
+                    from hermes_constants import reset_hermes_home_override
+
+                    reset_hermes_home_override(token)
+                except Exception:
+                    pass
+
+        logger.info(
+            "[webhook] routed mission %s status=%s into session %s appended=%s",
+            payload.get("mission_id"),
+            payload.get("status"),
+            live,
+            appended,
+        )
+        if appended:
+            try:
+                adapter, source = self._adapter_for_routed_session(
+                    row, live, profile
+                )
+                if adapter is not None:
+                    from gateway.wake import adapter_supports_push, deliver_wake
+
+                    prompt = (
+                        "A routed mission-complete callback was just appended to "
+                        "this conversation. Read the latest [Mission callback] "
+                        "message. Inspect the mission, take its output into account, "
+                        "and reply here. If you can continue autonomously, do that. "
+                        "Do not open another session."
+                    )
+                    wake_kwargs = {"text": prompt, "session_id": live}
+                    if source is not None and adapter_supports_push(adapter):
+                        wake_kwargs["source"] = source
+                    task = asyncio.create_task(deliver_wake(adapter, **wake_kwargs))
+                    self._background_tasks.add(task)
+                    task.add_done_callback(self._background_tasks.discard)
+            except Exception:
+                logger.warning(
+                    "[webhook] routed mission wake not scheduled", exc_info=True
+                )
+        return web.json_response(
+            {
+                "status": "routed",
+                "mission_id": payload.get("mission_id"),
+                "session_id": live,
+            },
+            status=202,
         )
 
     async def _handle_webhook(self, request: "web.Request") -> "web.Response":
@@ -827,7 +1128,8 @@ class WebhookAdapter(BasePlatformAdapter):
         # session. Parent/origin routing come from the LEDGER, never the payload
         # (the auth anchor). Unknown / non-delegated missions fall through to the
         # normal webhook path untouched.
-        _folded = self._maybe_fold_mission_delegation(payload)
+        request_profile = profile if isinstance(profile, str) else None
+        _folded = self._maybe_fold_mission_delegation(payload, profile=request_profile)
         if _folded is not None:
             return _folded
 
@@ -889,17 +1191,26 @@ class WebhookAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("[webhook] Skill loading failed: %s", e)
 
-        # Build a unique delivery ID
-        delivery_id = request.headers.get(
-            "X-GitHub-Delivery",
-            request.headers.get(
-                "svix-id",
-                request.headers.get("X-Request-ID", str(int(time.time() * 1000))),
-            ),
+        # Build a unique delivery ID before origin-route so a provider retry
+        # cannot schedule a second wake. Prefer transport headers, then the
+        # payload event/delivery id the producer already stamps.
+        try:
+            from gateway.platforms.mission_status_route import extract_event_id
+
+            payload_event_id = extract_event_id(payload)
+        except Exception:
+            payload_event_id = ""
+        delivery_id = (
+            request.headers.get("X-GitHub-Delivery")
+            or request.headers.get("svix-id")
+            or request.headers.get("X-Request-ID")
+            or payload_event_id
+            or str(int(time.time() * 1000))
         )
 
         # ── Idempotency ─────────────────────────────────────────
-        # Skip duplicate deliveries (webhook retries).
+        # Skip duplicate deliveries (webhook retries). Applied before
+        # origin-route so a routed callback cannot wake twice.
         now = time.time()
         if not self._record_delivery_id(delivery_id, now):
             logger.info(
@@ -909,6 +1220,14 @@ class WebhookAdapter(BasePlatformAdapter):
                 {"status": "duplicate", "delivery_id": delivery_id},
                 status=200,
             )
+
+        # Route sandboxed.sh mission-status events into the dedicated
+        # conversation before minting a throwaway webhook session.
+        _routed = await self._maybe_route_mission_status(
+            payload, profile=request_profile
+        )
+        if _routed is not None:
+            return _routed
 
         # ── Direct delivery mode (deliver_only) ─────────────────
         # Skip the agent entirely — the rendered prompt IS the message we

@@ -1097,7 +1097,9 @@ def _bundled_default_on(dir_path) -> bool:
         with open(manifest_file, encoding="utf-8") as f:
             manifest = yaml.safe_load(f) or {}
         kind = str(manifest.get("kind", "standalone")).strip().lower()
-        return kind in _BUNDLED_DEFAULT_ON_KINDS
+        if kind in _BUNDLED_DEFAULT_ON_KINDS:
+            return True
+        return bool(manifest.get("default_enabled"))
     except Exception:
         return False
 

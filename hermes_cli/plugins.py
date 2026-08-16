@@ -341,6 +341,10 @@ class PluginManifest:
     key: str = ""
     portable: bool = False
     skill_namespace: str = ""
+    # Bundled standalone plugins are opt-in unless this is true. Used for
+    # fork-critical always-on plugins (e.g. sandboxed-origin-session).
+    # Explicit ``plugins.disabled`` still wins.
+    default_enabled: bool = False
 
 
 @dataclass
@@ -1465,6 +1469,17 @@ class PluginManager:
                 self._register_deferred_platform(manifest)
                 continue
 
+            # Bundled standalone plugins that declare default_enabled load
+            # without an explicit plugins.enabled entry. Explicit disable
+            # still wins (handled above).
+            if (
+                manifest.source == "bundled"
+                and manifest.kind == "standalone"
+                and manifest.default_enabled
+            ):
+                self._load_plugin(manifest)
+                continue
+
             # Everything else (standalone, user-installed backends,
             # entry-point plugins) is opt-in via plugins.enabled.
             # Accept both the path-derived key and the legacy bare name
@@ -1799,6 +1814,7 @@ class PluginManager:
                 path=str(plugin_dir),
                 kind=kind,
                 key=key,
+                default_enabled=bool(data.get("default_enabled", False)),
             )
         except Exception as exc:
             logger.warning(

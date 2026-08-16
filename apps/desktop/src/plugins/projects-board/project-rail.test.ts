@@ -82,6 +82,32 @@ describe('leadSignal', () => {
     expect(signal.headline).toBe('BLOQUÉE PAR LEASE WRITER')
     expect(signal.controllerBehind).toBe(false)
   })
+
+  it('does not flag a long-running writer the controller already acknowledged', () => {
+    const signal = leadSignal(
+      row({
+        health: { active: 1, failed: 0, missions: 2, overdue: 0, tracks_needing_attention: 0 },
+        latest_update: {
+          at: '2026-08-16T22:25:00Z',
+          headline: 'Verity PR #2335 — RÉPARATION ACTIVE',
+          mode: 'active'
+        },
+        missions: [
+          {
+            github_pr: null,
+            id: 'bf2b79ee',
+            last_status_change_at: '2026-08-16T20:30:00Z',
+            status: 'active',
+            title: 'Repair Verity PR #2335',
+            updated_at: '2026-08-16T22:50:00Z'
+          }
+        ]
+      })
+    )
+
+    expect(signal.lastWorkAt).toBe('2026-08-16T20:30:00Z')
+    expect(signal.controllerBehind).toBe(false)
+  })
 })
 
 describe('railOpenItems', () => {

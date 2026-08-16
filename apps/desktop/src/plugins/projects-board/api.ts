@@ -26,6 +26,8 @@ export type MissionStatus = string
 export interface MissionChip {
   github_pr: null | string
   id: null | string
+  /** When the mission entered its current status. Heartbeats only bump updated_at. */
+  last_status_change_at?: null | string
   status: MissionStatus
   title: null | string
   updated_at: null | string
@@ -770,15 +772,13 @@ export function leadSignal(project: ProjectRow): LeadSignal {
 }
 
 function latestLiveWorkAt(project: ProjectRow): string | null {
-  const fromMissions = (project.missions ?? [])
-    .filter(mission => LIVE_ITEM_STATUS.has(mission.status))
-    .map(mission => mission.updated_at)
-
-  const fromTracks = (project.health?.tracks ?? [])
-    .filter(track => (track.active ?? 0) > 0)
-    .map(track => track.last_activity_at)
-
-  return latestTimestamp([...fromMissions, ...fromTracks])
+  // When the live attempt started — not the last tool heartbeat, and not
+  // a track's last_activity_at (that includes finished siblings).
+  return latestTimestamp(
+    (project.missions ?? [])
+      .filter(mission => LIVE_ITEM_STATUS.has(mission.status))
+      .map(mission => mission.last_status_change_at || mission.updated_at)
+  )
 }
 
 function isControllerBehind(

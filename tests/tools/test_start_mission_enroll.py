@@ -116,3 +116,28 @@ def test_enrolled_mission_folds_into_origin(ad):
     evt = ad._captured[-1]
     assert evt["origin_session_id"] == "origin-1"
     assert evt["results"][0]["summary"] == "the report"
+
+
+def test_enroll_folds_callback_that_beat_the_ledger(ad, tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from gateway.platforms.mission_status_route import stash_unroutable_callback
+    from tools.mission_delegation import enroll_conversational_start_mission
+
+    stash_unroutable_callback(
+        "m-race",
+        {
+            "mission_id": "m-race",
+            "status": "completed",
+            "result_summary": "finished first",
+        },
+    )
+    out = enroll_conversational_start_mission(
+        result=json.dumps({"mission_id": "m-race"}),
+        origin_session_id="origin-race",
+        parent_session_id="origin-race",
+        goal="g",
+    )
+    assert out["status"] == "enrolled"
+    assert ad._captured[-1]["results"][0]["summary"] == "finished first"
+    row = ad.find_delegation_by_mission_id("m-race")
+    assert row["delivery_state"] != "pending" or ad._captured

@@ -349,6 +349,7 @@ def enroll_conversational_start_mission(
 
     existing = find_delegation_by_mission_id(mission_id)
     if existing is not None:
+        _reconcile_early_callback(mission_id)
         return {
             "status": "already_enrolled",
             "delegation_id": existing.get("delegation_id"),
@@ -388,12 +389,71 @@ def enroll_conversational_start_mission(
         mission_id,
         origin,
     )
+    _reconcile_early_callback(mission_id)
     return {
         "status": "enrolled",
         "delegation_id": reg["delegation_id"],
         "mission_id": mission_id,
         "backend": "mission",
     }
+
+
+_EARLY_CALLBACK_STATUS = {
+    "completed": "completed",
+    "failed": "failed",
+    "not_feasible": "failed",
+    "notfeasible": "failed",
+    "blocked": "failed",
+    "interrupted": "failed",
+    "awaiting_user": "needs_input",
+    "awaitinguser": "needs_input",
+}
+
+
+def _reconcile_early_callback(mission_id: str) -> None:
+    """Fold a terminal webhook that arrived before this enroll created the row."""
+    try:
+        from gateway.platforms.mission_status_route import (
+            extract_status,
+            take_stashed_callback,
+        )
+        from tools.async_delegation import fold_mission_completion
+    except Exception:
+        return
+    pending = take_stashed_callback(mission_id)
+    if not pending:
+        return
+    raw = extract_status(pending)
+    mapped = _EARLY_CALLBACK_STATUS.get(raw)
+    if mapped is None:
+        return
+    bits = [
+        pending.get("summary"),
+        pending.get("result_summary"),
+        pending.get("short_description"),
+        pending.get("recommended_action"),
+        pending.get("terminal_evidence") if mapped != "completed" else None,
+    ]
+    summary = "\n".join(str(b).strip() for b in bits if b and str(b).strip())
+    if not summary:
+        summary = str(pending.get("title") or f"Mission {raw}")
+    error = (
+        pending.get("error") or pending.get("terminal_reason")
+        if mapped == "failed"
+        else None
+    )
+    try:
+        fold_mission_completion(
+            mission_id=mission_id,
+            status=mapped,
+            summary=summary,
+            error=str(error) if error else None,
+            live_transcript=pending.get("transcript") or pending.get("transcript_url"),
+        )
+    except Exception:
+        logger.warning(
+            "early-callback reconcile failed for mission %s", mission_id, exc_info=True
+        )
 
 
 def enroll_existing_mission(

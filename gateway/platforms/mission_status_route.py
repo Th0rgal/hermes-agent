@@ -8,10 +8,16 @@ None so the webhook adapter can keep its isolated-session behaviour.
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Optional
+import re
+from pathlib import Path
+from typing import Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+_PENDING_DIRNAME = "pending_mission_callbacks"
+_SAFE_MISSION_RE = re.compile(r"[^A-Za-z0-9._:-]+")
 
 _TERMINAL = {
     "completed",
@@ -105,6 +111,24 @@ def _recent_message_texts(session_db: Any, session_id: str, limit: int = 400):
     return texts
 
 
+def _parent_session_id(session_db: Any, session_id: str) -> str:
+    getter = getattr(session_db, "get_session", None)
+    if not callable(getter):
+        return ""
+    try:
+        row = getter(session_id)
+    except Exception:
+        return ""
+    if not row:
+        return ""
+    parent = (
+        row.get("parent_session_id")
+        if isinstance(row, dict)
+        else getattr(row, "parent_session_id", None)
+    )
+    return str(parent or "").strip()
+
+
 def session_references_mission(session_db: Any, session_id: str, mission_id: str) -> bool:
     """Ownership proof for origin routing: the session must already mention
     the mission (the dispatch tool result and prior callbacks embed its id).
@@ -112,14 +136,28 @@ def session_references_mission(session_db: Any, session_id: str, mission_id: str
     HMAC authenticates the *payload*, not the origin hint inside it — any
     mission creator could name an unrelated conversation. Fail-open only when
     the store exposes no message reader (legacy DBs), fail-closed otherwise.
+
+    Walks ``parent_session_id`` so a compression continuation still owns a
+    mission started in the pre-compression parent.
     """
     mission = (mission_id or "").strip()
     if not mission:
         return False
-    texts = _recent_message_texts(session_db, session_id)
-    if texts is None:
-        return True  # cannot inspect — legacy store, keep prior behaviour
-    return any(mission in text for text in texts)
+    current = (session_id or "").strip()
+    seen: set[str] = set()
+    inspected = False
+    while current and current not in seen:
+        seen.add(current)
+        texts = _recent_message_texts(session_db, current)
+        if texts is None:
+            if not inspected:
+                return True  # cannot inspect — legacy store, keep prior behaviour
+            break
+        inspected = True
+        if any(mission in text for text in texts):
+            return True
+        current = _parent_session_id(session_db, current)
+    return False
 
 
 def extract_event_id(payload: dict) -> str:
@@ -223,13 +261,40 @@ def format_mission_callback(payload: dict) -> str:
     return "\n".join(lines)
 
 
-def append_mission_callback(session_id: str, payload: dict, session_db: Any) -> str:
-    """Persist the callback on the live session. Returns the live id.
+def _last_message_role(session_db: Any, session_id: str) -> Optional[str]:
+    reader = getattr(session_db, "get_messages", None) or getattr(
+        session_db, "list_messages", None
+    )
+    if not callable(reader):
+        return None
+    try:
+        rows = reader(session_id) or []
+    except Exception:
+        return None
+    if not rows:
+        return None
+    last = rows[-1]
+    role = last.get("role") if isinstance(last, dict) else getattr(last, "role", None)
+    return str(role).strip().lower() if role else None
+
+
+def append_mission_callback(
+    session_id: str, payload: dict, session_db: Any
+) -> Tuple[str, bool]:
+    """Persist the callback on the live session.
+
+    Returns ``(live_id, appended)``. ``appended`` is False when this exact
+    delivery is already in the transcript — callers must not schedule a
+    second wake.
 
     Idempotent per delivery: the producer retries at-least-once on a lost
     HTTP response, so an ``event=<id>`` already present in the transcript
-    means this exact delivery landed — appending again would double the
-    callback and schedule a second autonomous wake.
+    means this exact delivery landed.
+
+    Role-safe: never writes assistant→assistant. If the tip is already an
+    assistant turn, a user separator is inserted first so
+    ``repair_message_sequence`` cannot merge the callback into the previous
+    model answer.
     """
     session_db = sync_session_db(session_db)
     live = resolve_live_session_id(session_id, session_db) or session_id
@@ -244,7 +309,54 @@ def append_mission_callback(session_id: str, payload: dict, session_db: Any) -> 
                     event_id,
                     live,
                 )
-                return live
+                return live, False
     content = format_mission_callback(payload)
+    if _last_message_role(session_db, live) == "assistant":
+        session_db.append_message(
+            session_id=live,
+            role="user",
+            content="A mission you started has finished. The result follows.",
+        )
     session_db.append_message(session_id=live, role="assistant", content=content)
-    return live
+    return live, True
+
+
+def _pending_callback_path(mission_id: str) -> Path:
+    from hermes_constants import get_hermes_home
+
+    safe = _SAFE_MISSION_RE.sub("_", (mission_id or "").strip())[:128] or "unknown"
+    return get_hermes_home() / _PENDING_DIRNAME / f"{safe}.json"
+
+
+def stash_unroutable_callback(mission_id: str, payload: dict) -> None:
+    """Keep a terminal webhook that arrived before enroll/ownership proof."""
+    mid = (mission_id or "").strip()
+    if not mid or not isinstance(payload, dict):
+        return
+    path = _pending_callback_path(mid)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        logger.debug("failed to stash pending mission callback %s", mid, exc_info=True)
+
+
+def take_stashed_callback(mission_id: str) -> Optional[dict]:
+    """Pop a previously stashed terminal callback, or None."""
+    mid = (mission_id or "").strip()
+    if not mid:
+        return None
+    path = _pending_callback_path(mid)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        data = None
+    try:
+        path.unlink()
+    except Exception:
+        pass
+    return data if isinstance(data, dict) else None

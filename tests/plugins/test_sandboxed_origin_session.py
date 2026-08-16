@@ -113,7 +113,7 @@ def test_ephemeral_session_is_refused(plugin):
     )
 
 
-def test_never_overwrites_explicit_value(plugin):
+def test_never_overwrites_matching_explicit_value(plugin):
     FakeSessionContext(
         {
             "HERMES_SESSION_PLATFORM": "api_server",
@@ -122,10 +122,23 @@ def test_never_overwrites_explicit_value(plugin):
     ).install()
     assert (
         plugin.stamp_origin_session(
-            tool_name=TOOL, args={"origin_session_id": "api-chosen"}
+            tool_name=TOOL, args={"origin_session_id": "api-current"}
         )
         is None
     )
+
+
+def test_replaces_untrusted_explicit_origin(plugin):
+    FakeSessionContext(
+        {
+            "HERMES_SESSION_PLATFORM": "api_server",
+            "HERMES_SESSION_CHAT_ID": "api-current",
+        }
+    ).install()
+    result = plugin.stamp_origin_session(
+        tool_name=TOOL, args={"origin_session_id": "other-session"}
+    )
+    assert result["args"]["origin_session_id"] == "api-current"
 
 
 def test_register_wires_middleware_and_hook(plugin):
@@ -201,3 +214,55 @@ def test_enroll_hook_enrolls_desktop_start_mission(plugin, monkeypatch):
     assert called["origin_session_id"] == "20260815_123853_35a245"
     assert called["title"] == "TAP"
     assert "498546da" in str(called["result"])
+
+
+def test_enroll_ignores_model_supplied_foreign_origin(plugin, monkeypatch):
+    called = {}
+
+    def _fake_enroll(**kwargs):
+        called.update(kwargs)
+        return {"status": "enrolled"}
+
+    import tools.mission_delegation as md
+
+    monkeypatch.setattr(md, "enroll_conversational_start_mission", _fake_enroll)
+
+    FakeSessionContext(
+        {
+            "HERMES_SESSION_PLATFORM": "api_server",
+            "HERMES_SESSION_CHAT_ID": "executing-session",
+        }
+    ).install()
+    plugin.enroll_after_start_mission(
+        tool_name=TOOL,
+        status="ok",
+        args={
+            "origin_session_id": "victim-session",
+            "title": "hijack",
+        },
+        result='{"mission_id":"m-hijack"}',
+        session_id="executing-session",
+    )
+    assert called["origin_session_id"] == "executing-session"
+
+
+def test_plugin_yaml_is_default_enabled():
+    import yaml
+
+    manifest = yaml.safe_load((PLUGIN_DIR / "plugin.yaml").read_text())
+    assert manifest["default_enabled"] is True
+    assert manifest["kind"] == "standalone"
+
+
+def test_bundled_default_enabled_loads_without_plugins_enabled(tmp_path, monkeypatch):
+    from hermes_cli.plugins import PluginManager
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    mgr = PluginManager()
+    mgr.discover_and_load()
+    loaded = mgr._plugins.get("sandboxed-origin-session")
+    assert loaded is not None
+    assert loaded.enabled is True
+    assert loaded.module is not None

@@ -40,7 +40,9 @@ class _FakeSessionDBWithMessages(_FakeSessionDB):
 
     def append_message(self, session_id, role, content):
         self.appended.append((session_id, role, content))
-        self.messages.setdefault(session_id, []).append({"content": content})
+        self.messages.setdefault(session_id, []).append(
+            {"role": role, "content": content}
+        )
 
 
 def test_extracts_nested_project_and_origin():
@@ -185,7 +187,9 @@ def test_async_session_db_wrapper_is_unwrapped():
     }
     wrapped = _AsyncWrap(inner)
     assert resolve_mission_delivery_session(payload, wrapped) == "owner"
-    assert append_mission_callback("owner", payload, wrapped) == "owner"
+    live, appended = append_mission_callback("owner", payload, wrapped)
+    assert live == "owner"
+    assert appended is True
     assert any("[Mission callback" in t["content"] for t in inner.messages["owner"])
     pending = wrapped.get_session("owner")
     assert asyncio.iscoroutine(pending)
@@ -200,9 +204,47 @@ def test_duplicate_event_id_appends_once():
         "title": "retry storm",
         "event_id": "evt-123",
     }
-    assert append_mission_callback("s1", payload, db) == "s1"
-    assert append_mission_callback("s1", payload, db) == "s1"
+    assert append_mission_callback("s1", payload, db) == ("s1", True)
+    assert append_mission_callback("s1", payload, db) == ("s1", False)
     assert len(db.appended) == 1
     # A different delivery still lands.
-    assert append_mission_callback("s1", dict(payload, event_id="evt-456"), db) == "s1"
-    assert len(db.appended) == 2
+    assert append_mission_callback("s1", dict(payload, event_id="evt-456"), db) == (
+        "s1",
+        True,
+    )
+    assert len(db.appended) == 3  # user separator + assistant for the second event
+
+
+def test_callback_inserts_user_separator_after_assistant():
+    db = _FakeSessionDBWithMessages(
+        {"s1": {"source": "desktop"}},
+        messages={"s1": [{"role": "assistant", "content": "already replied"}]},
+    )
+    payload = {"mission_id": "acfb03d2", "status": "completed", "title": "t"}
+    live, appended = append_mission_callback("s1", payload, db)
+    assert live == "s1" and appended
+    roles = [role for _sid, role, _c in db.appended]
+    assert roles == ["user", "assistant"]
+    assert "has finished" in db.appended[0][2]
+    assert "[Mission callback" in db.appended[1][2]
+
+
+def test_origin_ownership_walks_compression_parent():
+    mission = "acfb03d2-d088-46c3-a2a3-6576563f06cb"
+    db = _FakeSessionDBWithMessages(
+        {
+            "parent": {"source": "desktop"},
+            "child": {"source": "desktop", "parent_session_id": "parent"},
+        },
+        resumes={"parent": "child"},
+        messages={
+            "parent": [{"content": f"start_mission -> {mission} dispatched"}],
+            "child": [{"content": "compressed continuation, no mission id"}],
+        },
+    )
+    payload = {
+        "mission_id": mission,
+        "status": "failed",
+        "origin_session": "parent",
+    }
+    assert resolve_mission_delivery_session(payload, db) == "child"

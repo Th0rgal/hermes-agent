@@ -127,18 +127,25 @@ def _resolve_origin_session(fallback: str = "") -> Tuple[str, str]:
 
 
 def stamp_origin_session(**kwargs: Any) -> Optional[Dict[str, Any]]:
-    """Add `origin_session_id` to a start_mission call. Never overwrites."""
+    """Add `origin_session_id` from the executing session.
+
+    A model- or user-supplied id is honored only when it already matches
+    the executing conversation (or the cron control lane). Any other
+    explicit value is replaced — otherwise a start_mission can enroll
+    its result into an unrelated chat.
+    """
     if kwargs.get("tool_name") not in TARGET_TOOLS:
         return None
     args = kwargs.get("args")
     if not isinstance(args, dict):
         return None
-    # An explicit value wins: the caller may be re-homing a mission on purpose.
-    existing = args.get("origin_session_id")
-    if isinstance(existing, str) and existing.strip():
-        return None
 
     session_id, lane = _resolve_origin_session(str(kwargs.get("session_id") or ""))
+    existing = args.get("origin_session_id")
+    existing_id = existing.strip() if isinstance(existing, str) else ""
+    if existing_id and existing_id == session_id:
+        return None
+
     if not session_id:
         if lane == "ephemeral":
             logger.warning(
@@ -149,6 +156,13 @@ def stamp_origin_session(**kwargs: Any) -> Optional[Dict[str, Any]]:
     if not _SESSION_ID_RE.match(session_id):
         logger.warning("refusing malformed origin_session_id from lane %s", lane)
         return None
+
+    if existing_id and existing_id != session_id:
+        logger.warning(
+            "replacing untrusted origin_session_id=%s with executing session %s",
+            existing_id,
+            session_id,
+        )
 
     logger.debug("stamping origin_session_id=%s (lane=%s)", session_id, lane)
     return {
@@ -174,10 +188,14 @@ def enroll_after_start_mission(**kwargs: Any) -> None:
         return None
 
     args = kwargs.get("args") if isinstance(kwargs.get("args"), dict) else {}
-    origin = str(args.get("origin_session_id") or "").strip()
-    lane = ""
-    if not origin:
-        origin, lane = _resolve_origin_session(str(kwargs.get("session_id") or ""))
+    origin, lane = _resolve_origin_session(str(kwargs.get("session_id") or ""))
+    supplied = str(args.get("origin_session_id") or "").strip()
+    if supplied and supplied != origin:
+        logger.warning(
+            "ignoring model-supplied origin_session_id=%s; binding enroll to %s",
+            supplied,
+            origin,
+        )
     if not origin or lane == "ephemeral":
         return None
     # A cron tick that stamped the project conversation still owns the

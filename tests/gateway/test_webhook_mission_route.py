@@ -33,7 +33,9 @@ class _FakeSessionDB:
 
     def append_message(self, session_id, role, content, **_kw):
         self.appended.append((session_id, role, content))
-        self.messages.setdefault(session_id, []).append({"content": content})
+        self.messages.setdefault(session_id, []).append(
+            {"role": role, "content": content}
+        )
         return 1
 
 
@@ -127,7 +129,7 @@ async def test_mission_complete_routes_into_origin_and_skips_throwaway():
 
 
 @pytest.mark.asyncio
-async def test_unrelated_origin_falls_through_to_isolated_path():
+async def test_unrelated_origin_is_stashed_not_injected():
     db = _FakeSessionDB(
         {ORIGIN: {"source": "desktop"}},
         messages={ORIGIN: [{"content": "never mentioned this mission"}]},
@@ -145,10 +147,11 @@ async def test_unrelated_origin_falls_through_to_isolated_path():
     }
     resp = await adapter._handle_webhook(_mock_request(payload))
     body = json.loads(resp.body)
-    assert body["status"] == "accepted"
-    if adapter._background_tasks:
-        await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
-    assert adapter.handle_message.await_count == 1
+    # Origin present but no ownership proof — do not inject into that
+    # session, and do not mint a throwaway webhook session either. Enroll
+    # will fold if this was a beat-the-transcript race.
+    assert body["status"] == "pending_enrollment"
+    assert adapter.handle_message.await_count == 0
     assert db.appended == []
 
 
@@ -202,3 +205,87 @@ async def test_delegated_mission_folds_instead_of_routing(monkeypatch, tmp_path)
     # Fold owns delivery; origin-route must not also append.
     assert db.appended == []
     assert captured and captured[-1]["results"][0]["mission_id"] == MISSION
+
+
+@pytest.mark.asyncio
+async def test_duplicate_event_id_does_not_reschedule_wake(monkeypatch):
+    db = _FakeSessionDB(
+        {ORIGIN: {"source": "desktop"}},
+        messages={ORIGIN: [{"content": f"started {MISSION}"}]},
+    )
+    adapter = _make_adapter()
+    runner = _FakeRunner(db)
+    api = MagicMock()
+    api.supports_async_delivery = False
+    runner.adapters = {Platform.API_SERVER: api}
+    adapter.gateway_runner = runner
+    wakes = []
+
+    async def _fake_wake(target, **kwargs):
+        wakes.append((target, kwargs))
+
+    monkeypatch.setattr("gateway.wake.deliver_wake", _fake_wake)
+
+    payload = {
+        "mission_id": MISSION,
+        "status": "completed",
+        "type": "completed",
+        "origin_session": ORIGIN,
+        "title": "dup",
+        "event_id": "evt-dup-1",
+    }
+    first = await adapter._handle_webhook(_mock_request(payload))
+    second = await adapter._handle_webhook(_mock_request(payload))
+    assert json.loads(first.body)["status"] == "routed"
+    assert json.loads(second.body)["status"] == "duplicate"
+    if adapter._background_tasks:
+        await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+    assert len(wakes) == 1
+    assert wakes[0][0] is api
+    assert len(db.appended) == 1
+
+
+@pytest.mark.asyncio
+async def test_telegram_origin_wakes_telegram_adapter_not_api_server(monkeypatch):
+    db = _FakeSessionDB(
+        {
+            ORIGIN: {
+                "source": "telegram",
+                "chat_id": "12345",
+                "chat_type": "dm",
+                "user_id": "99",
+            }
+        },
+        messages={ORIGIN: [{"content": f"started {MISSION}"}]},
+    )
+    adapter = _make_adapter()
+    runner = _FakeRunner(db)
+    telegram = MagicMock()
+    telegram.supports_async_delivery = True
+    api = MagicMock()
+    api.supports_async_delivery = False
+    runner.adapters = {Platform.TELEGRAM: telegram, Platform.API_SERVER: api}
+    adapter.gateway_runner = runner
+    wakes = []
+
+    async def _fake_wake(target, **kwargs):
+        wakes.append((target, kwargs))
+
+    monkeypatch.setattr("gateway.wake.deliver_wake", _fake_wake)
+
+    payload = {
+        "mission_id": MISSION,
+        "status": "completed",
+        "type": "completed",
+        "origin_session": ORIGIN,
+        "title": "tg",
+        "event_id": "evt-tg-1",
+    }
+    resp = await adapter._handle_webhook(_mock_request(payload))
+    assert json.loads(resp.body)["status"] == "routed"
+    if adapter._background_tasks:
+        await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+    assert len(wakes) == 1
+    assert wakes[0][0] is telegram
+    assert wakes[0][1].get("source") is not None
+    assert wakes[0][1]["source"].platform == Platform.TELEGRAM

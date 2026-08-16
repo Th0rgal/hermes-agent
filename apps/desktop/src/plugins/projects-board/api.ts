@@ -13,14 +13,13 @@
  */
 
 import {
+  $goalsBySession,
   $projectBoundSessionIds,
   atom,
   type PluginRestOptions,
   type PluginStorage,
   queryClient
 } from '@hermes/plugin-sdk'
-
-import { $goalsBySession } from '@/store/goals'
 
 export type MissionStatus = string
 
@@ -288,18 +287,24 @@ export function bindApi(restFn: Rest, storage?: PluginStorage, socket?: Socket):
   const unsubscribe = socket ? socket('/events', onEventFrame) : null
 
   let lastGoalPost = ''
+
   const publishBoundGoals = () => {
     const goals = $goalsBySession.get()
     const bindings = $projectBoundSessionIds.get()
+
     for (const [sid, slug] of Object.entries(bindings)) {
       const title = sessionGoalLead(goals[sid])
+
       if (!title || !slug) {
         continue
       }
+
       const key = `${slug}\0${title}`
+
       if (key === lastGoalPost) {
         continue
       }
+
       lastGoalPost = key
       void publishProjectGoal(slug, title).catch(() => {
         if (lastGoalPost === key) {
@@ -308,6 +313,7 @@ export function bindApi(restFn: Rest, storage?: PluginStorage, socket?: Socket):
       })
     }
   }
+
   unsubs.push($goalsBySession.listen(publishBoundGoals))
   unsubs.push($projectBoundSessionIds.listen(publishBoundGoals))
 
@@ -729,10 +735,13 @@ export function sessionGoalLead(
   goal: { status?: null | string; title?: null | string } | null | undefined
 ): string | null {
   const status = goal?.status?.trim()
+
   if (status !== 'active' && status !== 'waiting') {
     return null
   }
+
   const title = goal?.title?.trim()
+
   return title || null
 }
 
@@ -743,6 +752,7 @@ export function leadSignal(project: ProjectRow): LeadSignal {
   const lastSignalAt = project.latest_update?.at ?? project.controller_heartbeat_at ?? null
   const lastWorkAt = latestLiveWorkAt(project)
   const pendingDecisions = project.pending_decisions ?? 0
+
   const headline = isStaleControllerHeadline(rawHeadline, liveCount)
     ? nextAction
     : (nextAction ?? rawHeadline)
@@ -763,6 +773,7 @@ function latestLiveWorkAt(project: ProjectRow): string | null {
   const fromMissions = (project.missions ?? [])
     .filter(mission => LIVE_ITEM_STATUS.has(mission.status))
     .map(mission => mission.updated_at)
+
   const fromTracks = (project.health?.tracks ?? [])
     .filter(track => (track.active ?? 0) > 0)
     .map(track => track.last_activity_at)
@@ -819,9 +830,11 @@ export type RailItem = {
  *  roadmap — so the desktop must not keep a second board-task fetch. */
 export function itemAsRoadmapTask(item: ProjectItem): ProjectTask {
   const live = item.attempts.some(attempt => LIVE_ITEM_STATUS.has(attempt.status))
+
   const failedOnly =
     item.attempts.length > 0 &&
     item.attempts.every(attempt => attempt.status === 'failed' || attempt.status === 'interrupted')
+
   const status = !item.open
     ? 'accepted'
     : live
@@ -831,6 +844,7 @@ export function itemAsRoadmapTask(item: ProjectItem): ProjectTask {
         : failedOnly
           ? 'failed'
           : 'pending'
+
   const title =
     item.desired_state?.trim() ||
     item.attempts.find(attempt => attempt.title?.trim())?.title?.trim() ||
@@ -858,21 +872,36 @@ export function roadmapFromItems(detail: ProjectDetail): {
   const tasks = (detail.items ?? [])
     .filter(item => {
       const live = item.attempts.some(attempt => LIVE_ITEM_STATUS.has(attempt.status))
-      if (live) return true
+
+      if (live) {
+        return true
+      }
+
       // Older backends omit kind/status; `open` is still authoritative.
-      if (item.open) return true
-      if (item.kind === 'task') return item.open
+      if (item.open) {
+        return true
+      }
+
+      if (item.kind === 'task') {
+        return item.open
+      }
+
       return item.status === 'open' || item.status === 'active' || item.status === 'proposed' || item.status === 'done'
     })
     .map(itemAsRoadmapTask)
+
   let done = 0
   let running = 0
   let failed = 0
 
   for (const task of tasks) {
-    if (task.status === 'accepted') done += 1
-    else if (task.status === 'running' || task.status === 'settled') running += 1
-    else if (task.status === 'failed') failed += 1
+    if (task.status === 'accepted') {
+      done += 1
+    } else if (task.status === 'running' || task.status === 'settled') {
+      running += 1
+    } else if (task.status === 'failed') {
+      failed += 1
+    }
   }
 
   return { summary: { done, failed, running, total: tasks.length }, tasks }

@@ -24,6 +24,7 @@ import { $narrowViewport } from '@/components/pane-shell/tree/store'
 import { onGatewayEvent } from '@/contrib/events'
 import { getLogs, getStatus } from '@/hermes'
 import { $gateway } from '@/store/gateway'
+import { $goalsBySession, type SessionGoal } from '@/store/goals'
 import { notify, notifyError } from '@/store/notifications'
 import { $activeGatewayProfile } from '@/store/profile'
 import { $activeSessionId, $currentCwd, $currentModel, $gatewayState } from '@/store/session'
@@ -63,6 +64,9 @@ export const host = {
     cwd: readonlyAtom<string>($currentCwd),
     /** Gateway socket state: 'idle' | 'connecting' | 'open' | …. */
     gateway: readonlyAtom<string>($gatewayState),
+    /** Per-session standing `/goal` (Ralph loop). Same store as the composer
+     *  status stack. Plugins observe; they do not write. */
+    goalsBySession: readonlyAtom<Record<string, SessionGoal>>($goalsBySession),
     /** Current main model slug. */
     model: readonlyAtom<string>($currentModel),
     /** Profile the live gateway is routed to. */
@@ -283,6 +287,10 @@ export const TITLEBAR_AREAS = { center: 'titleBar.center', left: 'titleBar.left'
 
 export { coarseElapsed, fmtDateTime, fmtDayTime, relativeTime } from '@/lib/time'
 export { cn } from '@/lib/utils'
+/** Per-session standing `/goal` — the SAME store the composer status stack
+ *  reads. Plugins observe; they do not write. */
+export { $goalsBySession } from '@/store/goals'
+export type { GoalStatus, SessionGoal } from '@/store/goals'
 /** Per-session color overrides — the SAME store the sidebar/tabs resolve, so a
  *  plugin-set color agrees everywhere. Write under `sessionDurableId(id)`. */
 export {

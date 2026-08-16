@@ -11,6 +11,7 @@
 
 import {
   $activeChatSessionIds,
+  $goalsBySession,
   $projectBoundSessionIds,
   cn,
   Codicon,
@@ -18,7 +19,6 @@ import {
   useQuery,
   useValue
 } from '@hermes/plugin-sdk'
-import { $goalsBySession } from '@/store/goals'
 import { useState } from 'react'
 
 import {
@@ -27,9 +27,9 @@ import {
   fetchProjects,
   fetchProjectTasks,
   leadSignal,
-  PROJECTS_KEY,
   projectDetailHasItems,
   projectKey,
+  PROJECTS_KEY,
   roadmapFromItems,
   sessionGoalLead,
   tasksKey
@@ -93,6 +93,7 @@ function RailBody({ slug }: { slug: string }) {
   const project = detail?.project
   const pending = detail?.open_decisions ?? []
   const activity = (detail?.recent_decisions ?? []).slice(0, 5)
+
   const roadmap = detail
     ? projectDetailHasItems(detail)
       ? roadmapFromItems(detail)
@@ -100,6 +101,7 @@ function RailBody({ slug }: { slug: string }) {
         ? { summary: tasksFallback.summary ?? { done: 0, failed: 0, running: 0, total: tasksFallback.tasks.length }, tasks: tasksFallback.tasks }
         : null
     : null
+
   const tasks = roadmap?.tasks ?? []
   const summary = roadmap?.summary
   const row = board?.projects.find(candidate => candidate.slug === slug)

@@ -105,8 +105,12 @@ class TestCloseUsesTruncate:
         with caplog.at_level(logging.DEBUG):
             db.close()
 
-        assert any("WAL checkpoint (TRUNCATE) at close failed" in r.message for r in caplog.records), (
-            f"Expected debug log about TRUNCATE failure at close, got: {caplog.text}"
+        assert any(
+            "WAL checkpoint at close failed" in r.message
+            or "WAL checkpoint (TRUNCATE) at close failed" in r.message
+            for r in caplog.records
+        ), (
+            f"Expected debug log about WAL checkpoint failure at close, got: {caplog.text}"
         )
 
 

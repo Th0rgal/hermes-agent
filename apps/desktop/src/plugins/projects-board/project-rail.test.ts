@@ -41,7 +41,7 @@ describe('leadSignal', () => {
   it('drops a lease-writer headline while a writer is live', () => {
     const signal = leadSignal(
       row({
-        health: { active: 2, failed: 5, missions: 22, tracks_needing_attention: 3 },
+        health: { active: 2, failed: 5, missions: 22, overdue: 0, tracks_needing_attention: 3 },
         latest_update: {
           at: '2026-08-14T14:30:54Z',
           headline: 'Verity #2332 — BLOQUÉE PAR LEASE WRITER',
@@ -70,7 +70,7 @@ describe('leadSignal', () => {
   it('keeps a lease headline when nothing is live', () => {
     const signal = leadSignal(
       row({
-        health: { active: 0, failed: 1, missions: 1, tracks_needing_attention: 1 },
+        health: { active: 0, failed: 1, missions: 1, overdue: 0, tracks_needing_attention: 1 },
         latest_update: {
           at: '2026-08-14T14:30:54Z',
           headline: 'BLOQUÉE PAR LEASE WRITER',

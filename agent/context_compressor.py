@@ -289,7 +289,6 @@ def elide_bulky_tool_messages(
         if (not protect_last_tool or i != last_tool)
         and isinstance(messages[i].get("content"), str)
         and len(messages[i]["content"]) > threshold_chars
-        and _TOOL_ELISION_MARKER not in messages[i]["content"]
     ]
     if not candidates:
         return messages, 0
@@ -297,7 +296,9 @@ def elide_bulky_tool_messages(
     result = [dict(m) if isinstance(m, dict) else m for m in messages]
     for i in candidates:  # ascending index == oldest-first
         content = result[i].get("content", "")
-        if len(content) <= keep_head + keep_tail:
+        # Already-elided bodies can still shrink on tighter keep windows.
+        marker_overhead = 80 if _TOOL_ELISION_MARKER in content else 0
+        if len(content) <= keep_head + keep_tail + marker_overhead:
             continue
         result[i]["content"] = (
             content[:keep_head]

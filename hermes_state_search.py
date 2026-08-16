@@ -646,7 +646,13 @@ class SessionSearchMixin:
         (healable on re-run).
         False for fresh and fully-optimized installs (and when FTS5 is
         unavailable)."""
-        if not self._fts_enabled or self.read_only:
+        if self.read_only:
+            return False
+        # A stale marker is itself work: optimize-storage / heal-state
+        # --rebuild-fts must remain offerable after fail-open detach.
+        if getattr(self, "_fts_stale", False):
+            return True
+        if not self._fts_enabled:
             return False
         with self._lock:
             if self._db_has_legacy_inline_fts(self._conn):
@@ -760,10 +766,13 @@ class SessionSearchMixin:
         The trigram tokenizer being unavailable is not fatal — the base index
         is still rebuilt (CJK falls back to LIKE), mirroring normal startup.
         """
-        if not self._fts_enabled:
-            return {"ok": False, "reason": "fts5_unavailable"}
         if self.read_only:
             return {"ok": False, "reason": "read_only"}
+        if getattr(self, "_fts_stale", False):
+            if not self.rebuild_stale_fts():
+                return {"ok": False, "reason": "stale_fts_rebuild_failed"}
+        elif not self._fts_enabled:
+            return {"ok": False, "reason": "fts5_unavailable"}
 
         # Heal empty-index / orphan-marker bookkeeping from an interrupted
         # demote *before* deciding whether to demote again. This re-seeds

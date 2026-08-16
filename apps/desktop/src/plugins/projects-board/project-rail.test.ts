@@ -151,4 +151,20 @@ describe('railOpenItems', () => {
       'certify-pr46'
     ])
   })
+
+  it('keeps an open item when kind and status are omitted', () => {
+    const detail: ProjectDetail = {
+      items: [
+        {
+          attempts: [],
+          key: 'legacy-open',
+          open: true
+        }
+      ],
+      project: { slug: 'verity-core', status: 'active' }
+    }
+
+    expect(roadmapFromItems(detail).tasks.map(task => task.task_key)).toEqual(['legacy-open'])
+    expect(railOpenItems(detail).map(item => item.key)).toEqual(['legacy-open'])
+  })
 })

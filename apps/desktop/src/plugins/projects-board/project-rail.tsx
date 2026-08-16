@@ -25,11 +25,14 @@ import {
   $railCollapsed,
   fetchProject,
   fetchProjects,
+  fetchProjectTasks,
   leadSignal,
   PROJECTS_KEY,
+  projectDetailHasItems,
   projectKey,
   roadmapFromItems,
-  sessionGoalLead
+  sessionGoalLead,
+  tasksKey
 } from './api'
 import {
   ActivityRow,
@@ -73,6 +76,13 @@ function RailBody({ slug }: { slug: string }) {
     retry: false
   })
 
+  const { data: tasksFallback } = useQuery({
+    enabled: Boolean(detail) && !projectDetailHasItems(detail!),
+    queryFn: () => fetchProjectTasks(slug),
+    queryKey: tasksKey(slug),
+    retry: false
+  })
+
   const { data: board } = useQuery({
     queryFn: fetchProjects,
     queryKey: PROJECTS_KEY,
@@ -83,7 +93,13 @@ function RailBody({ slug }: { slug: string }) {
   const project = detail?.project
   const pending = detail?.open_decisions ?? []
   const activity = (detail?.recent_decisions ?? []).slice(0, 5)
-  const roadmap = detail ? roadmapFromItems(detail) : null
+  const roadmap = detail
+    ? projectDetailHasItems(detail)
+      ? roadmapFromItems(detail)
+      : tasksFallback
+        ? { summary: tasksFallback.summary ?? { done: 0, failed: 0, running: 0, total: tasksFallback.tasks.length }, tasks: tasksFallback.tasks }
+        : null
+    : null
   const tasks = roadmap?.tasks ?? []
   const summary = roadmap?.summary
   const row = board?.projects.find(candidate => candidate.slug === slug)

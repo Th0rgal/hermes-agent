@@ -1861,7 +1861,8 @@ def run_doctor(args):
                 if should_fix:
                     from hermes_state import heal_live_state_db
 
-                    heal = heal_live_state_db(state_db_path)
+                    # WAL-only: do not detach a healthy FTS index.
+                    heal = heal_live_state_db(state_db_path, detach_fts=False)
                     new_size = int(heal.get("wal_after_bytes") or 0)
                     if heal.get("ok"):
                         check_ok(

@@ -65,11 +65,22 @@ def cmd_sessions(args, sessions_parser=None):
     # Recovery additionally promises never to open the supplied source
     # directly, so it operates through its own disposable source copy.
     if action == "heal-state":
-        from hermes_state import DEFAULT_DB_PATH, heal_live_state_db
+        from hermes_state import DEFAULT_DB_PATH, SessionDB, heal_live_state_db
 
         db_path = DEFAULT_DB_PATH
         if not db_path.exists():
             print(f"No session database at {db_path} (nothing to heal).")
+            return
+        if getattr(args, "rebuild_fts", False):
+            print(f"Rebuilding detached FTS indexes: {db_path}")
+            db = SessionDB(db_path=db_path)
+            try:
+                if db.rebuild_stale_fts():
+                    print("✓ FTS indexes rebuilt from canonical messages.")
+                else:
+                    print("✗ FTS rebuild failed; search remains on LIKE.")
+            finally:
+                db.close()
             return
         print(f"Healing live state.db (detach FTS, checkpoint WAL): {db_path}")
         report = heal_live_state_db(db_path)
@@ -81,7 +92,8 @@ def cmd_sessions(args, sessions_parser=None):
         )
         if report.get("ok"):
             print("✓ Live writers can proceed; search uses LIKE until "
-                  "`hermes sessions optimize-storage` rebuilds FTS offline.")
+                  "`hermes sessions optimize-storage` or "
+                  "`hermes sessions heal-state --rebuild-fts` rebuilds FTS offline.")
             return
         print(f"✗ heal-state failed: {report.get('error')}")
         return

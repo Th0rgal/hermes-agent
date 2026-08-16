@@ -846,6 +846,11 @@ export function itemAsRoadmapTask(item: ProjectItem): ProjectTask {
   }
 }
 
+/** True when get_project actually sent an items array (including empty). */
+export function projectDetailHasItems(detail: ProjectDetail): boolean {
+  return Array.isArray(detail.items)
+}
+
 export function roadmapFromItems(detail: ProjectDetail): {
   summary: { done: number; failed: number; running: number; total: number }
   tasks: ProjectTask[]
@@ -854,6 +859,8 @@ export function roadmapFromItems(detail: ProjectDetail): {
     .filter(item => {
       const live = item.attempts.some(attempt => LIVE_ITEM_STATUS.has(attempt.status))
       if (live) return true
+      // Older backends omit kind/status; `open` is still authoritative.
+      if (item.open) return true
       if (item.kind === 'task') return item.open
       return item.status === 'open' || item.status === 'active' || item.status === 'proposed' || item.status === 'done'
     })

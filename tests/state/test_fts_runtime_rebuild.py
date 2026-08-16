@@ -391,3 +391,46 @@ class TestRuntimeFtsRebuild:
         finally:
             reopened.close()
 
+    def test_heal_live_state_db_can_checkpoint_without_detaching_fts(self, tmp_path):
+        db_path = tmp_path / "state.db"
+        db = SessionDB(db_path=db_path)
+        try:
+            db.create_session("s1", source="test")
+            db.append_message("s1", "user", "keep fts")
+            assert db._fts_enabled is True
+        finally:
+            db.close()
+        report = heal_live_state_db(db_path, detach_fts=False)
+        assert report["ok"] is True
+        assert report["fts_detached"] is False
+        assert _meta_value(db_path, FTS_STALE_KEY) is None
+        assert _base_fts_triggers(db_path)
+        reopened = SessionDB(db_path=db_path)
+        try:
+            assert reopened._fts_stale is False
+            assert reopened._fts_enabled is True
+        finally:
+            reopened.close()
+
+    def test_rebuild_stale_fts_restores_search(self, tmp_path):
+        db_path = tmp_path / "state.db"
+        db = SessionDB(db_path=db_path)
+        try:
+            db.create_session("s1", source="test")
+            db.append_message("s1", "user", "searchable needle after rebuild")
+        finally:
+            db.close()
+        report = heal_live_state_db(db_path)
+        assert report["fts_detached"] is True
+        stale = SessionDB(db_path=db_path)
+        try:
+            assert stale._fts_stale is True
+            assert stale.fts_optimize_available() is True
+            assert stale.rebuild_stale_fts() is True
+            assert stale._fts_stale is False
+            assert stale._fts_enabled is True
+            results = stale.search_messages("needle")
+            assert results
+        finally:
+            stale.close()
+

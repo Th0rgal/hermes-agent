@@ -10055,7 +10055,8 @@ def _run_prompt_submit(
             if (
                 isinstance(result, dict)
                 and result.get("compression_exhausted")
-                and not getattr(agent, "_exhaustion_rotated", False)
+                and getattr(agent, "_exhaustion_rotated_from", None)
+                != getattr(agent, "session_id", None)
             ):
                 from agent.conversation_compression import (
                     fork_session_after_compression_exhaustion,
@@ -10063,7 +10064,23 @@ def _run_prompt_submit(
 
                 new_sid = fork_session_after_compression_exhaustion(agent)
                 if new_sid:
-                    agent._exhaustion_rotated = True
+                    old_key = str(session.get("session_key") or "")
+                    if old_key and old_key != new_sid:
+                        try:
+                            from hermes_cli.goals import migrate_goal_to_session
+
+                            migrate_goal_to_session(
+                                old_key, new_sid, reason="compression_exhausted"
+                            )
+                        except Exception:
+                            logger.debug(
+                                "goal migrate on exhaustion fork failed",
+                                exc_info=True,
+                            )
+                    # Guard this parent only. The child must be allowed to
+                    # rotate later if it also grows past the window.
+                    agent._exhaustion_rotated_from = old_key or agent.session_id
+                    agent._exhaustion_rotated = False
                     _sync_session_key_after_compress(
                         sid, session, clear_pending_title=False, restart_slash_worker=True,
                     )

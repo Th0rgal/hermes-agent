@@ -168,6 +168,25 @@ def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60
     provider.start(stop_event, interval=interval)
 
 
+def _stop_desktop_cron_when_gateway_owns_home(
+    stop_event: "threading.Event", interval: int = 15
+) -> None:
+    """Yield the desktop ticker if a gateway appears after startup."""
+    from hermes_cli.profiles import _check_gateway_running
+    from hermes_constants import get_hermes_home
+
+    while not stop_event.wait(interval):
+        try:
+            if _check_gateway_running(get_hermes_home()):
+                _log.info(
+                    "Desktop cron ticker stopping: gateway now owns this HERMES_HOME"
+                )
+                stop_event.set()
+                return
+        except Exception:
+            _log.debug("gateway ownership recheck failed", exc_info=True)
+
+
 def _warm_gateway_module() -> None:
     """Pre-import heavy modules so the event loop is not stalled on first use.
 
@@ -276,6 +295,15 @@ async def _lifespan(app: "FastAPI"):
                 name="desktop-cron-ticker",
             )
             cron_thread.start()
+            # The one-shot check above only sees a gateway that was already
+            # up. /api/gateway/start after Desktop lifespan must still stop
+            # this ticker so two processes do not share state.db.
+            threading.Thread(
+                target=_stop_desktop_cron_when_gateway_owns_home,
+                args=(cron_stop,),
+                daemon=True,
+                name="desktop-cron-gateway-watch",
+            ).start()
 
     # Reap idle/dead keep-alive PTY sessions in the background (30-min TTL).
     pty_reaper_task = asyncio.create_task(run_reaper(PTY_REGISTRY))

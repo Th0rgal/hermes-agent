@@ -727,6 +727,52 @@ def save_goal(session_id: str, state: GoalState) -> None:
         logger.debug("GoalManager: set_meta failed: %s", exc)
 
 
+def _publish_bound_session_goal(session_id: str, goal: str) -> None:
+    """Best-effort: surface an active /goal on the bound project's next_action."""
+    sid = (session_id or "").strip()
+    text = (goal or "").strip()
+    if not sid or not text:
+        return
+    try:
+        import threading
+
+        threading.Thread(
+            target=_publish_bound_session_goal_sync,
+            args=(sid, text),
+            daemon=True,
+            name="publish-bound-goal",
+        ).start()
+    except Exception:
+        logger.debug("bound-session goal publish not scheduled", exc_info=True)
+
+
+def _publish_bound_session_goal_sync(session_id: str, goal: str) -> None:
+    if not os.environ.get("HERMES_SANDBOXED_API_URL") or not os.environ.get("JWT_SECRET"):
+        return
+    try:
+        import asyncio
+        import importlib.util
+        from pathlib import Path
+
+        plugin = (
+            Path(__file__).resolve().parents[1]
+            / "plugins"
+            / "projects-board"
+            / "dashboard"
+            / "plugin_api.py"
+        )
+        spec = importlib.util.spec_from_file_location(
+            "projects_board_plugin_api_goal_publish", plugin
+        )
+        if spec is None or spec.loader is None:
+            return
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        asyncio.run(mod.publish_bound_session_goal(session_id, goal))
+    except Exception:
+        logger.debug("bound-session goal publish failed", exc_info=True)
+
+
 def clear_goal(session_id: str) -> None:
     """Mark a goal cleared in the DB (preserved for audit, status=cleared)."""
     state = load_goal(session_id)
@@ -1318,6 +1364,7 @@ class GoalManager:
         )
         self._state = state
         save_goal(self.session_id, state)
+        _publish_bound_session_goal(self.session_id, state.goal)
         return state
 
     def set_contract(self, contract: GoalContract) -> Optional[GoalState]:

@@ -439,6 +439,23 @@ class SessionSchemaMixin:
         )
         return True
 
+    def rebuild_stale_fts(self) -> bool:
+        """Offline rebuild after FTS was fail-open detached.
+
+        SessionDB open leaves a stale index detached so live writers are
+        not blocked. This is the explicit recovery path advertised by
+        ``hermes sessions optimize-storage`` and
+        ``hermes sessions heal-state --rebuild-fts``.
+        """
+        if self.read_only:
+            return False
+        if not getattr(self, "_fts_stale", False):
+            return bool(getattr(self, "_fts_enabled", False))
+        with self._lock:
+            cursor = self._conn.cursor()
+            legacy = self._db_has_legacy_inline_fts(cursor)
+            return bool(self._recover_stale_fts(cursor, legacy=legacy))
+
     @staticmethod
     def _parse_schema_columns(schema_sql: str) -> Dict[str, Dict[str, str]]:
         """Extract expected columns per table from SCHEMA_SQL.

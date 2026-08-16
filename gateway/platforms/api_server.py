@@ -6233,15 +6233,17 @@ class APIServerAdapter(BasePlatformAdapter):
                     if (
                         isinstance(result, dict)
                         and result.get("compression_exhausted")
-                        and not getattr(agent, "_exhaustion_rotated", False)
+                        and getattr(agent, "_exhaustion_rotated_from", None)
+                        != getattr(agent, "session_id", None)
                     ):
                         from agent.conversation_compression import (
                             fork_session_after_compression_exhaustion,
                         )
 
+                        parent_sid = getattr(agent, "session_id", None) or session_id
                         new_sid = fork_session_after_compression_exhaustion(agent)
                         if new_sid:
-                            agent._exhaustion_rotated = True
+                            agent._exhaustion_rotated_from = parent_sid
                             effective_task_id = new_sid
                             result = agent.run_conversation(
                                 user_message=user_message,
@@ -6745,18 +6747,25 @@ class APIServerAdapter(BasePlatformAdapter):
                             if (
                                 isinstance(r, dict)
                                 and r.get("compression_exhausted")
-                                and not getattr(agent, "_exhaustion_rotated", False)
+                                and getattr(agent, "_exhaustion_rotated_from", None)
+                                != getattr(agent, "session_id", None)
                             ):
                                 from agent.conversation_compression import (
                                     fork_session_after_compression_exhaustion,
                                 )
 
+                                parent_sid = (
+                                    getattr(agent, "session_id", None) or session_id
+                                )
                                 new_sid = fork_session_after_compression_exhaustion(
                                     agent
                                 )
                                 if new_sid:
-                                    agent._exhaustion_rotated = True
+                                    agent._exhaustion_rotated_from = parent_sid
                                     effective_task_id = new_sid
+                                    self._set_run_status(
+                                        run_id, "running", session_id=new_sid
+                                    )
                                     r = agent.run_conversation(
                                         user_message=user_message,
                                         conversation_history=[],
@@ -6764,6 +6773,7 @@ class APIServerAdapter(BasePlatformAdapter):
                                     )
                                     if isinstance(r, dict):
                                         r["session_rotated_after_exhaustion"] = True
+                                        r["session_id"] = new_sid
                         finally:
                             # Worker finished (interrupted or complete) —
                             # clear turn ownership immediately so a later

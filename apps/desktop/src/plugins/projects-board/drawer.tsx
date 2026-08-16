@@ -29,6 +29,8 @@ import {
   type AutonomyLevel,
   fetchProject,
   fetchProjectState,
+  fetchProjectTasks,
+  projectDetailHasItems,
   roadmapFromItems,
   isBoundConversation,
   liveSessionIdFor,
@@ -41,6 +43,7 @@ import {
   type ProjectTask,
   saveGrant,
   stateKey,
+  tasksKey,
   type TrackHealth
 } from './api'
 import { ago, errText } from './board'
@@ -644,13 +647,33 @@ export function ProjectDrawer({
     queryKey: projectKey(slug ?? '')
   })
 
+  const { data: tasksFallback } = useQuery({
+    enabled: Boolean(slug) && Boolean(detail) && !projectDetailHasItems(detail!),
+    queryFn: () => fetchProjectTasks(slug!),
+    queryKey: tasksKey(slug ?? '')
+  })
+
   const { data: timeline } = useQuery({
     enabled: Boolean(slug),
     queryFn: () => fetchProjectState(slug!),
     queryKey: stateKey(slug ?? '')
   })
 
-  const roadmap = detail ? roadmapFromItems(detail) : null
+  const roadmap = detail
+    ? projectDetailHasItems(detail)
+      ? roadmapFromItems(detail)
+      : tasksFallback
+        ? {
+            summary: tasksFallback.summary ?? {
+              done: 0,
+              failed: 0,
+              running: 0,
+              total: tasksFallback.tasks.length
+            },
+            tasks: tasksFallback.tasks
+          }
+        : null
+    : null
 
   if (!slug) {
     return null

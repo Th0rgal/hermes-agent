@@ -1636,8 +1636,13 @@ def _db_opens_cleanly(db_path: Path) -> Optional[str]:
         except sqlite3.Error:
             fts_marked_stale = False
         if fts_marked_stale:
-            # FTS is deliberately detached. Canonical writes are healthy;
-            # MATCH probes against the stale index would false-positive.
+            # FTS is deliberately detached. MATCH probes against the stale
+            # index would false-positive — skip those, but still check
+            # canonical page integrity.
+            rows = conn.execute("PRAGMA integrity_check").fetchall()
+            problems = [str(r[0]) for r in rows if r and str(r[0]).lower() != "ok"]
+            if problems:
+                return "; ".join(problems[:3])
             conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
             return None
         rows = conn.execute("PRAGMA integrity_check").fetchall()
@@ -1745,16 +1750,21 @@ def _db_opens_cleanly(db_path: Path) -> Optional[str]:
         conn.close()
 
 
-def heal_live_state_db(db_path: Optional[Path] = None) -> Dict[str, Any]:
+def heal_live_state_db(
+    db_path: Optional[Path] = None, *, detach_fts: bool = True
+) -> Dict[str, Any]:
     """Make a contended state.db safe for live writers.
 
     Does **not** rebuild FTS (that holds ``BEGIN IMMEDIATE`` across every
-    message row). Detaches FTS sync if it is stale or still wired, then
-    checkpoints the WAL with PASSIVE then RESTART so a multi-GB WAL stops
-    starving transcript writes. Safe alongside a running gateway: neither
-    checkpoint mode takes an exclusive lock. TRUNCATE is skipped when the
-    WAL is large — run this again with the gateway stopped if the file
-    must shrink to zero.
+    message row). When ``detach_fts`` is true, detaches FTS sync if it is
+    stale or still wired. Then checkpoints the WAL with PASSIVE then
+    RESTART so a multi-GB WAL stops starving transcript writes. Safe
+    alongside a running gateway: neither checkpoint mode takes an exclusive
+    lock. TRUNCATE is skipped when the WAL is large — run this again with
+    the gateway stopped if the file must shrink to zero.
+
+    Pass ``detach_fts=False`` for WAL-only maintenance so a healthy search
+    index is not permanently demoted to LIKE.
 
     Returns ``{ok, fts_detached, wal_before_bytes, wal_after_bytes,
     checkpoint, error}``.
@@ -1778,26 +1788,27 @@ def heal_live_state_db(db_path: Optional[Path] = None) -> Dict[str, Any]:
     conn = sqlite3.connect(str(path), timeout=30.0, isolation_level=None)
     try:
         apply_database_pragmas(conn, db_label="state.db")
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            conn.execute(
-                "INSERT INTO state_meta (key, value) VALUES (?, '1') "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (FTS_STALE_KEY,),
-            )
-            for trigger in (*_FTS_TRIGGERS, *_FTS_CJK_TRIGGERS):
-                try:
-                    conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-                except sqlite3.OperationalError:
-                    pass
-            conn.commit()
-            report["fts_detached"] = True
-        except BaseException:
+        if detach_fts:
+            conn.execute("BEGIN IMMEDIATE")
             try:
-                conn.rollback()
-            except sqlite3.Error:
-                pass
-            raise
+                conn.execute(
+                    "INSERT INTO state_meta (key, value) VALUES (?, '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (FTS_STALE_KEY,),
+                )
+                for trigger in (*_FTS_TRIGGERS, *_FTS_CJK_TRIGGERS):
+                    try:
+                        conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+                    except sqlite3.OperationalError:
+                        pass
+                conn.commit()
+                report["fts_detached"] = True
+            except BaseException:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                raise
 
         # PASSIVE never waits on other writers. RESTART then tries to
         # reset the WAL if no reader is sitting on old frames.
@@ -1814,7 +1825,8 @@ def heal_live_state_db(db_path: Optional[Path] = None) -> Dict[str, Any]:
         report["wal_after_bytes"] = _wal_file_bytes(path)
         report["ok"] = True
         logger.warning(
-            "heal_live_state_db: FTS detached, WAL %d MB -> %d MB (%s)",
+            "heal_live_state_db: detach_fts=%s, WAL %d MB -> %d MB (%s)",
+            report["fts_detached"],
             report["wal_before_bytes"] // (1024 * 1024),
             report["wal_after_bytes"] // (1024 * 1024),
             path,

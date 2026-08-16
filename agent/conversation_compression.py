@@ -161,6 +161,28 @@ def fork_session_after_compression_exhaustion(agent: Any) -> Optional[str]:
         logger.debug("exhaustion parent end_session failed", exc_info=True)
     agent.session_id = new_id
     try:
+        from gateway.session_context import get_session_env, set_current_session_id
+
+        set_current_session_id(new_id)
+        # API-server turns bind chat_id to the raw session id. Keep that
+        # pair in lockstep so terminal/delegation tools do not stamp the
+        # ended parent.
+        if get_session_env("HERMES_SESSION_PLATFORM", "") == "api_server":
+            from gateway import session_context as _sc
+
+            _sc._SESSION_CHAT_ID.set(new_id)
+    except Exception:
+        try:
+            os.environ["HERMES_SESSION_ID"] = new_id
+        except Exception:
+            pass
+    try:
+        from hermes_logging import set_session_context
+
+        set_session_context(new_id)
+    except Exception:
+        pass
+    try:
         transition = getattr(agent, "_transition_context_engine_session", None)
         if callable(transition):
             transition(

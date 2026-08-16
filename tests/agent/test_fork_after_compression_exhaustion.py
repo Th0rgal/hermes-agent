@@ -57,3 +57,30 @@ def test_fork_creates_parent_linked_child_and_ends_parent():
 def test_fork_returns_none_without_session_db():
     agent = types.SimpleNamespace(session_id="x")
     assert fork_session_after_compression_exhaustion(agent) is None
+
+
+def test_fork_rebinds_session_context(monkeypatch):
+    import gateway.session_context as sc
+
+    db = _FakeDB()
+    agent = types.SimpleNamespace(
+        _session_db=db,
+        session_id="parent-1",
+        platform="api_server",
+        model="m",
+        _session_init_model_config=None,
+        working_directory=None,
+    )
+    tokens = sc.set_session_vars(
+        platform="api_server",
+        chat_id="parent-1",
+        session_id="parent-1",
+        async_delivery=False,
+    )
+    try:
+        new_id = fork_session_after_compression_exhaustion(agent)
+        assert new_id
+        assert sc.get_session_env("HERMES_SESSION_ID") == new_id
+        assert sc.get_session_env("HERMES_SESSION_CHAT_ID") == new_id
+    finally:
+        sc.clear_session_vars(tokens)

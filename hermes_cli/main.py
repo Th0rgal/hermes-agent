@@ -12430,6 +12430,23 @@ def main():
         help="Skip the disk-space confirmation prompt",
     )
 
+    sessions_heal_state = sessions_subparsers.add_parser(
+        "heal-state",
+        help="Detach stale FTS and checkpoint a large WAL without blocking live writers",
+        description=(
+            "Make a contended state.db safe for live chat/cron writes. "
+            "Detaches corrupt/stale FTS sync (search falls back to LIKE) and "
+            "checkpoints the WAL with PASSIVE/RESTART. Does not rebuild FTS "
+            "or VACUUM — those hold an exclusive lock on multi-GB databases. "
+            "Safe to run while the gateway is up."
+        ),
+    )
+    sessions_heal_state.add_argument(
+        "--rebuild-fts",
+        action="store_true",
+        default=False,
+        help="Rebuild detached FTS indexes from canonical messages (offline; holds a writer lock)",
+    )
     sessions_repair = sessions_subparsers.add_parser(
         "repair",
         help="Repair a malformed state.db schema so hidden sessions reappear",

@@ -70,3 +70,74 @@ def test_no_tool_messages_is_noop(monkeypatch):
     messages = [{"role": "user", "content": "u" * 80000}]  # over budget but no tool
     out, saved = elide_bulky_tool_messages(messages, target_tokens=1000)
     assert saved == 0
+
+
+def test_protect_last_tool_false_elides_recent_tool(monkeypatch):
+    _char_estimator(monkeypatch)
+    messages = [
+        {"role": "user", "content": "q"},
+        {"role": "tool", "content": "Y" * 40000},
+    ]
+    out, saved = elide_bulky_tool_messages(
+        messages, target_tokens=1000, protect_last_tool=False
+    )
+    assert saved > 0
+    assert _TOOL_ELISION_MARKER in out[1]["content"]
+
+
+def test_elide_until_fit_cuts_last_tool_when_first_pass_saves_nothing(monkeypatch):
+    from agent.context_compressor import elide_until_fit
+
+    _char_estimator(monkeypatch)
+    messages = [
+        {"role": "user", "content": "q"},
+        {"role": "tool", "content": "Z" * 80000},
+    ]
+    # First pass protects the only tool and would save 0; later passes must
+    # cut it so a 277k overflow cannot dead-end.
+    out, saved = elide_until_fit(messages, target_tokens=2000)
+    assert saved > 0
+    assert _TOOL_ELISION_MARKER in out[1]["content"]
+    after = sum(len(str(m.get("content", ""))) for m in out) // 4
+    assert after <= 2000
+
+
+def test_elide_until_fit_shrinks_already_elided_tools_on_tighter_pass(monkeypatch):
+    from agent.context_compressor import elide_until_fit
+
+    _char_estimator(monkeypatch)
+    first_keep = "H" * 600 + f"\n\n… {_TOOL_ELISION_MARKER}: 80,000 chars] …\n\n" + "T" * 600
+    messages = [
+        {"role": "user", "content": "q"},
+        {"role": "tool", "content": first_keep},
+        {"role": "tool", "content": first_keep},
+        {"role": "tool", "content": first_keep},
+    ]
+    before = sum(len(str(m.get("content", ""))) for m in messages) // 4
+    assert before > 400
+    out, saved = elide_until_fit(messages, target_tokens=200)
+    assert saved > 0
+    after = sum(len(str(m.get("content", ""))) for m in out) // 4
+    assert after < before
+    assert all(len(m["content"]) < len(first_keep) for m in out if m["role"] == "tool")
+
+
+def test_elide_until_fit_elides_bulky_assistant_when_tools_are_already_cut(
+    monkeypatch,
+):
+    from agent.context_compressor import elide_until_fit
+
+    _char_estimator(monkeypatch)
+    already = (
+        "head\n\n… [tool output elided to fit context: 9,999 chars] …\n\ntail"
+    )
+    messages = [
+        {"role": "user", "content": "q"},
+        {"role": "tool", "content": already},
+        {"role": "assistant", "content": "A" * 40000},
+        {"role": "user", "content": "please continue"},
+    ]
+    out, saved = elide_until_fit(messages, target_tokens=2000)
+    assert saved > 0
+    assert _TOOL_ELISION_MARKER in out[2]["content"]
+    assert out[3]["content"] == "please continue"

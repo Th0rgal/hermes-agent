@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest'
 
 import {
   isStaleControllerHeadline,
+  itemAsRoadmapTask,
   leadSignal,
   type ProjectDetail,
   type ProjectRow,
-  railOpenItems
+  railOpenItems,
+  roadmapFromItems,
+  sessionGoalLead
 } from './api'
 
 const row = (partial: Partial<ProjectRow>): ProjectRow => ({
@@ -17,11 +20,28 @@ const row = (partial: Partial<ProjectRow>): ProjectRow => ({
   ...partial
 })
 
+describe('sessionGoalLead', () => {
+  it('surfaces an active /goal as the project objective', () => {
+    expect(
+      sessionGoalLead({
+        status: 'active',
+        title: 'Assure toi de prouver chaque garantie jusqu au niveau Verity'
+      })
+    ).toBe('Assure toi de prouver chaque garantie jusqu au niveau Verity')
+  })
+
+  it('ignores a paused or empty goal so a stale Ralph loop cannot replace items', () => {
+    expect(sessionGoalLead({ status: 'paused', title: 'old' })).toBeNull()
+    expect(sessionGoalLead({ status: 'active', title: '  ' })).toBeNull()
+    expect(sessionGoalLead(null)).toBeNull()
+  })
+})
+
 describe('leadSignal', () => {
   it('drops a lease-writer headline while a writer is live', () => {
     const signal = leadSignal(
       row({
-        health: { active: 2, failed: 5, missions: 22, tracks_needing_attention: 3 },
+        health: { active: 2, failed: 5, missions: 22, overdue: 0, tracks_needing_attention: 3 },
         latest_update: {
           at: '2026-08-14T14:30:54Z',
           headline: 'Verity #2332 — BLOQUÉE PAR LEASE WRITER',
@@ -50,7 +70,7 @@ describe('leadSignal', () => {
   it('keeps a lease headline when nothing is live', () => {
     const signal = leadSignal(
       row({
-        health: { active: 0, failed: 1, missions: 1, tracks_needing_attention: 1 },
+        health: { active: 0, failed: 1, missions: 1, overdue: 0, tracks_needing_attention: 1 },
         latest_update: {
           at: '2026-08-14T14:30:54Z',
           headline: 'BLOQUÉE PAR LEASE WRITER',
@@ -95,5 +115,56 @@ describe('railOpenItems', () => {
     expect(items[0]?.key).toBe('c5-preflight-pr2332')
     expect(items[0]?.live).toBe(true)
     expect(items.some(item => item.key === 'stale-19')).toBe(false)
+  })
+
+  it('maps items onto the single roadmap list', () => {
+    const detail: ProjectDetail = {
+      items: [
+        {
+          attempts: [
+            { id: 'live', status: 'active', title: 're-pin Verity', updated_at: '2026-08-15T10:00:00Z' }
+          ],
+          desired_state: 'proven Verity tx',
+          key: 'lido-verity-closure-v2',
+          open: true
+        },
+        {
+          attempts: [],
+          desired_state: 'old PR 46',
+          key: 'certify-pr46',
+          open: false,
+          status: 'done'
+        }
+      ],
+      project: { slug: 'verity-lido', status: 'active' }
+    }
+
+    const live = itemAsRoadmapTask(detail.items![0])
+    expect(live.status).toBe('running')
+    expect(live.title).toBe('proven Verity tx')
+    expect(live.task_key).toBe('lido-verity-closure-v2')
+
+    const roadmap = roadmapFromItems(detail)
+    expect(roadmap.summary).toEqual({ done: 1, failed: 0, running: 1, total: 2 })
+    expect(roadmap.tasks.map(task => task.task_key)).toEqual([
+      'lido-verity-closure-v2',
+      'certify-pr46'
+    ])
+  })
+
+  it('keeps an open item when kind and status are omitted', () => {
+    const detail: ProjectDetail = {
+      items: [
+        {
+          attempts: [],
+          key: 'legacy-open',
+          open: true
+        }
+      ],
+      project: { slug: 'verity-core', status: 'active' }
+    }
+
+    expect(roadmapFromItems(detail).tasks.map(task => task.task_key)).toEqual(['legacy-open'])
+    expect(railOpenItems(detail).map(item => item.key)).toEqual(['legacy-open'])
   })
 })

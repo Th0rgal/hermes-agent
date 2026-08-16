@@ -2329,6 +2329,7 @@ export const zh: Translations = {
     agents: '代理',
     background: count => `${count} 个后台任务`,
     goalActive: '目标进行中',
+    projectObjective: '项目目标',
     goalDone: '目标已完成',
     goalPaused: '目标已暂停',
     goalWaiting: '目标等待中',

@@ -7620,9 +7620,10 @@ class AIAgent:
                     emit(
                         "⚠ Context compression timed out "
                         f"after {idle:.1f}s with no output from the summary "
-                        "model. No messages were dropped — continuing without "
-                        "compression. Run /compress to retry, /new for a clean "
-                        "session, or check auxiliary.compression."
+                        "model. Falling back to mechanical tool-output "
+                        "elision so the turn can continue. Run /compress to "
+                        "retry a full summary, /new for a clean session, or "
+                        "check auxiliary.compression."
                     )
 
             def _on_commit_overrun(waited, ceiling):
@@ -7639,17 +7640,53 @@ class AIAgent:
                         "check SessionDB health (disk / lock contention)."
                     )
 
+            timed_out = {"value": False}
+            _orig_on_timeout = _on_timeout
+
+            def _on_timeout_and_flag(idle, waited, since_progress):
+                timed_out["value"] = True
+                _orig_on_timeout(idle, waited, since_progress)
+
             result = run_compress_context_with_progress_timeout(
                 worker=_snapshot_worker,
                 messages=messages,
                 system_prompt_fallback=_fallback_prompt,
                 idle_timeout_seconds=idle_timeout,
                 total_ceiling_seconds=total_ceiling,
-                on_timeout=_on_timeout,
+                on_timeout=_on_timeout_and_flag,
                 on_commit_overrun=_on_commit_overrun,
                 fence=active_fence,
                 telemetry_agent=self,
             )
+            # Timeout used to continue with the uncompressed transcript, which
+            # then overflowed and dead-ended on "Cannot compress further"
+            # (dashboard project chats have no gateway auto-reset). Mechanically
+            # elide bulky bodies so the turn can proceed or the overflow
+            # handler has something left to work with.
+            if timed_out["value"] and isinstance(result, tuple) and result:
+                try:
+                    from agent.context_compressor import elide_until_fit
+
+                    compressor = getattr(self, "context_compressor", None)
+                    ctx = (
+                        getattr(compressor, "context_length", None)
+                        or getattr(self, "context_length", None)
+                        or 128000
+                    )
+                    try:
+                        ctx_int = int(ctx)
+                    except (TypeError, ValueError):
+                        ctx_int = 128000
+                    elided, saved = elide_until_fit(
+                        result[0], max(int(ctx_int * 0.9), 1)
+                    )
+                    if saved > 0:
+                        result = (elided, result[1])
+                except Exception:
+                    logger.debug(
+                        "mechanical elision after compress_context timeout failed",
+                        exc_info=True,
+                    )
             # compress_context ran on a daemon pool worker thread; the session
             # id rotation updated hermes_logging._session_context (a
             # threading.local) on the WORKER thread, not this one. Propagate

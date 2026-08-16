@@ -1895,6 +1895,7 @@ export const zhHant = defineLocale({
     agents: '代理',
     background: count => `${count} 個背景任務`,
     goalActive: '目標進行中',
+    projectObjective: '專案目標',
     goalDone: '目標已完成',
     goalPaused: '目標已暫停',
     goalWaiting: '目標等待中',

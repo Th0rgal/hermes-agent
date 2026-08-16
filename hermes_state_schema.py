@@ -439,6 +439,23 @@ class SessionSchemaMixin:
         )
         return True
 
+    def rebuild_stale_fts(self) -> bool:
+        """Offline rebuild after FTS was fail-open detached.
+
+        SessionDB open leaves a stale index detached so live writers are
+        not blocked. This is the explicit recovery path advertised by
+        ``hermes sessions optimize-storage`` and
+        ``hermes sessions heal-state --rebuild-fts``.
+        """
+        if self.read_only:
+            return False
+        if not getattr(self, "_fts_stale", False):
+            return bool(getattr(self, "_fts_enabled", False))
+        with self._lock:
+            cursor = self._conn.cursor()
+            legacy = self._db_has_legacy_inline_fts(cursor)
+            return bool(self._recover_stale_fts(cursor, legacy=legacy))
+
     @staticmethod
     def _parse_schema_columns(schema_sql: str) -> Dict[str, Dict[str, str]]:
         """Extract expected columns per table from SCHEMA_SQL.
@@ -1189,15 +1206,20 @@ class SessionSchemaMixin:
             # DBs have no legacy inline FTS, so they get the v23 DDL.
             legacy_fts = self._db_has_legacy_inline_fts(cursor)
             if self._fts_stale:
-                if self._recover_stale_fts(cursor, legacy=legacy_fts):
-                    # CJK was detached alongside the corrupt base indexes and
-                    # has its own stale marker. Its existing ensure path keeps
-                    # it offline until its dedicated rebuild.
-                    self._ensure_fts_cjk_schema(cursor)
-                else:
-                    self._fts_enabled = False
-                    self._trigram_available = False
-                    self._fts_cjk_available = False
+                # Stay detached. A previous process marked FTS stale after
+                # corruption; auto-rebuilding here holds BEGIN IMMEDIATE
+                # across the whole messages table (minutes on a multi-GB
+                # state.db) and is what starves live transcript writes.
+                # Rebuild only via `hermes sessions optimize-storage` or
+                # `hermes sessions heal-state --rebuild-fts` offline.
+                self._fts_enabled = False
+                self._trigram_available = False
+                self._fts_cjk_available = False
+                logger.warning(
+                    "state.db FTS is marked stale — leaving indexes detached "
+                    "so live writers are not blocked. Rebuild offline with "
+                    "`hermes sessions optimize-storage`."
+                )
             elif legacy_fts:
                 triggers_need_repair = (
                     self._fts_trigger_count(cursor) < len(_FTS_TRIGGERS)

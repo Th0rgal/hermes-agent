@@ -73,6 +73,36 @@ def _clean_slug(slug: str) -> str:
     return slug
 
 
+async def publish_bound_session_goal(session_id: str, goal: str) -> bool:
+    """Write a Hermes /goal onto the bound project's next_action.
+
+    Returns False when the session is not a project conversation or the
+    backend write fails — callers must not treat that as a goal-set error.
+    """
+    sid = (session_id or "").strip()
+    text = (goal or "").strip()
+    if not sid or not text:
+        return False
+    try:
+        resolved = await _sandboxed_request("GET", f"/api/projects/by-session/{sid}")
+        slug = resolved.get("slug") if isinstance(resolved, dict) else None
+        if not slug:
+            return False
+        detail = await _sandboxed_request("GET", f"/api/projects/{slug}")
+        project = detail.get("project") if isinstance(detail, dict) else None
+        current = (project or {}).get("mode") if isinstance(project, dict) else None
+        mode = current if current in {"active", "blocked", "paused"} else "active"
+        await _sandboxed_request(
+            "POST",
+            f"/api/projects/{slug}/status",
+            body={"mode": mode, "next_action": text[:500]},
+        )
+        return True
+    except Exception:
+        _log.debug("publish_bound_session_goal failed", exc_info=True)
+        return False
+
+
 @router.get("/projects")
 async def list_projects() -> Dict[str, Any]:
     """The project roster: one entry per project with mode, health, and mission
@@ -173,6 +203,38 @@ async def update_grant(
     if not isinstance(body, dict):
         raise HTTPException(
             status_code=502, detail="sandboxed.sh returned an unexpected grant shape"
+        )
+    return body
+
+
+@router.post("/projects/{slug}/status")
+async def set_project_status(
+    slug: str, payload: Dict[str, Any] = Body(default_factory=dict)
+) -> Dict[str, Any]:
+    """Write the controller/session objective onto the project row.
+
+    A bound-session ``/goal`` is the project's live next_action. We keep the
+    current mode (blocked stays blocked) so a Ralph loop cannot launder a
+    stall into ``active``.
+    """
+    slug = _clean_slug(slug)
+    next_action = str(payload.get("next_action") or "").strip()
+    if not next_action:
+        raise HTTPException(status_code=400, detail="next_action is required")
+    mode = str(payload.get("mode") or "").strip().lower()
+    if mode not in {"active", "blocked", "paused"}:
+        detail = await _sandboxed_request("GET", f"/api/projects/{slug}")
+        project = detail.get("project") if isinstance(detail, dict) else None
+        current = (project or {}).get("mode") if isinstance(project, dict) else None
+        mode = current if current in {"active", "blocked", "paused"} else "active"
+    body = await _sandboxed_request(
+        "POST",
+        f"/api/projects/{slug}/status",
+        body={"mode": mode, "next_action": next_action[:500]},
+    )
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=502, detail="sandboxed.sh returned an unexpected status shape"
         )
     return body
 

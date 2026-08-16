@@ -289,6 +289,39 @@ def test_second_consecutive_exhaustion_pauses_goal_instead_of_looping(
     assert any("Goal paused" in text for text in notices)
 
 
+def test_exhaustion_forks_child_and_clears_history(
+    server, turn_env, monkeypatch
+):
+    agent = types.SimpleNamespace(
+        session_id="bloated-parent",
+        run_conversation=lambda message, **kwargs: _compression_failure(),
+        clear_interrupt=lambda: None,
+        _exhaustion_rotated=False,
+    )
+    session = _turn_session(agent, "bloated-parent")
+    session["history"] = [{"role": "assistant", "content": "old"}]
+
+    def _fork(ag):
+        ag.session_id = "fresh-child"
+        return "fresh-child"
+
+    monkeypatch.setattr(
+        "agent.conversation_compression.fork_session_after_compression_exhaustion",
+        _fork,
+    )
+
+    server._run_prompt_submit("rid", "sid", session, "où en es-tu ?")
+
+    assert agent.session_id == "fresh-child"
+    assert session["history"] == []
+    notices = [
+        p["text"]
+        for event, _sid, p in turn_env
+        if event == "status.update" and p.get("kind") == "compaction"
+    ]
+    assert any("Rotated to a fresh continuation session" in text for text in notices)
+
+
 def test_real_queued_prompt_preempts_goal_compression_retry(
     server, turn_env, monkeypatch
 ):

@@ -34,11 +34,13 @@ import {
   liveSessionIdFor,
   type MissionChip,
   type ProjectDecision,
+  projectDetailHasItems,
   type ProjectGrant,
   projectKey,
   type ProjectRow,
   PROJECTS_KEY,
   type ProjectTask,
+  roadmapFromItems,
   saveGrant,
   stateKey,
   tasksKey,
@@ -645,23 +647,33 @@ export function ProjectDrawer({
     queryKey: projectKey(slug ?? '')
   })
 
+  const { data: tasksFallback } = useQuery({
+    enabled: Boolean(slug) && Boolean(detail) && !projectDetailHasItems(detail!),
+    queryFn: () => fetchProjectTasks(slug!),
+    queryKey: tasksKey(slug ?? '')
+  })
+
   const { data: timeline } = useQuery({
     enabled: Boolean(slug),
     queryFn: () => fetchProjectState(slug!),
     queryKey: stateKey(slug ?? '')
   })
 
-  const { data: roadmap, error: roadmapError } = useQuery({
-    enabled: Boolean(slug),
-    queryFn: () => fetchProjectTasks(slug!),
-    queryKey: tasksKey(slug ?? '')
-  })
-
-  // An older backend/relay without the endpoint (404, or 503 = no sandboxed.sh)
-  // legitimately has no roadmap — stay silent. Any other failure is a transient
-  // outage and must not masquerade as "empty roadmap".
-  const roadmapStatus = (roadmapError as { status?: number } | null)?.status
-  const roadmapUnavailable = Boolean(roadmapError) && roadmapStatus !== 404 && roadmapStatus !== 503
+  const roadmap = detail
+    ? projectDetailHasItems(detail)
+      ? roadmapFromItems(detail)
+      : tasksFallback
+        ? {
+            summary: tasksFallback.summary ?? {
+              done: 0,
+              failed: 0,
+              running: 0,
+              total: tasksFallback.tasks.length
+            },
+            tasks: tasksFallback.tasks
+          }
+        : null
+    : null
 
   if (!slug) {
     return null
@@ -758,16 +770,7 @@ export function ProjectDrawer({
                 </Section>
               )}
 
-              {/* Roadmap — the project's checklist, from the task board. Always
-                  present when the endpoint exists: an explicit "no planned
-                  tasks" beats a silently missing section, which reads as
-                  broken. Only a 404/503 (no task board on this backend) hides
-                  it entirely. */}
-              {roadmapUnavailable && (
-                <Section label={b.roadmap}>
-                  <span className="text-[0.71rem] text-amber-500">{b.roadmapUnavailable}</span>
-                </Section>
-              )}
+              {/* Roadmap — the project's items. Same list as get_project. */}
               {roadmap && (
                 <Section
                   label={

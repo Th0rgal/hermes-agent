@@ -2,6 +2,7 @@ import { cleanup, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { $projectBoundSessionIds } from '@/app/project-session-links'
 import { I18nProvider } from '@/i18n'
 import { $goalsBySession, type SessionGoal } from '@/store/goals'
 
@@ -38,11 +39,13 @@ function renderStack(sessionId: null | string = SID) {
 describe('ComposerStatusStack goal indicator', () => {
   beforeEach(() => {
     $goalsBySession.set({})
+    $projectBoundSessionIds.set({})
   })
 
   afterEach(() => {
     cleanup()
     $goalsBySession.set({})
+    $projectBoundSessionIds.set({})
   })
 
   it('renders nothing when the session has no goal', () => {
@@ -58,6 +61,17 @@ describe('ComposerStatusStack goal indicator', () => {
 
     expect(screen.getByText('Goal active')).toBeTruthy()
     expect(screen.getByText('ship the feature')).toBeTruthy()
+  })
+
+  it('labels a bound-session goal as the project objective', () => {
+    $projectBoundSessionIds.set({ [SID]: 'lido' })
+    $goalsBySession.set({ [SID]: goal('active', 'prove every guarantee') })
+
+    renderStack()
+
+    expect(screen.getByText('Project objective')).toBeTruthy()
+    expect(screen.queryByText('Goal active')).toBeNull()
+    expect(screen.getByText('prove every guarantee')).toBeTruthy()
   })
 
   it('labels a paused goal as paused', () => {

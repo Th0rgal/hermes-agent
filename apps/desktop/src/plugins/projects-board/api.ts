@@ -13,6 +13,7 @@
  */
 
 import {
+  $goalsBySession,
   $projectBoundSessionIds,
   atom,
   type PluginRestOptions,
@@ -285,6 +286,37 @@ export function bindApi(restFn: Rest, storage?: PluginStorage, socket?: Socket):
 
   const unsubscribe = socket ? socket('/events', onEventFrame) : null
 
+  let lastGoalPost = ''
+
+  const publishBoundGoals = () => {
+    const goals = $goalsBySession.get()
+    const bindings = $projectBoundSessionIds.get()
+
+    for (const [sid, slug] of Object.entries(bindings)) {
+      const title = sessionGoalLead(goals[sid])
+
+      if (!title || !slug) {
+        continue
+      }
+
+      const key = `${slug}\0${title}`
+
+      if (key === lastGoalPost) {
+        continue
+      }
+
+      lastGoalPost = key
+      void publishProjectGoal(slug, title).catch(() => {
+        if (lastGoalPost === key) {
+          lastGoalPost = ''
+        }
+      })
+    }
+  }
+
+  unsubs.push($goalsBySession.listen(publishBoundGoals))
+  unsubs.push($projectBoundSessionIds.listen(publishBoundGoals))
+
   return () => {
     unsubs.forEach(unsub => unsub())
     unsubscribe?.()
@@ -506,6 +538,13 @@ export const answerDecision = (slug: string, at: string, answer: string, questio
 export const steerMission = (missionId: string, content: string) =>
   call(`/missions/${encodeURIComponent(missionId)}/message`, { body: { content }, method: 'POST' })
 
+/** Persist a bound-session /goal as the project's next_action. */
+export const publishProjectGoal = (slug: string, nextAction: string, mode?: string) =>
+  call(`/projects/${encodeURIComponent(slug)}/status`, {
+    body: { mode, next_action: nextAction },
+    method: 'POST'
+  })
+
 // ── selectors ────────────────────────────────────────────────────────────────
 
 /** Live missions in a project — the "agents" of the surface. */
@@ -690,6 +729,22 @@ export type LeadSignal = {
 /** What the card and the session-right rail should lead with: next action,
  *  live work, pending owner questions — never a lease/relaunch lie while a
  *  writer is running. */
+/** A bound-session `/goal` is the project's live objective. Items stay the
+ *  checklist; the Ralph loop must not look like a second, ignored roadmap. */
+export function sessionGoalLead(
+  goal: { status?: null | string; title?: null | string } | null | undefined
+): string | null {
+  const status = goal?.status?.trim()
+
+  if (status !== 'active' && status !== 'waiting') {
+    return null
+  }
+
+  const title = goal?.title?.trim()
+
+  return title || null
+}
+
 export function leadSignal(project: ProjectRow): LeadSignal {
   const liveCount = project.health?.active ?? 0
   const nextAction = project.next_action?.trim() || null
@@ -697,6 +752,7 @@ export function leadSignal(project: ProjectRow): LeadSignal {
   const lastSignalAt = project.latest_update?.at ?? project.controller_heartbeat_at ?? null
   const lastWorkAt = latestLiveWorkAt(project)
   const pendingDecisions = project.pending_decisions ?? 0
+
   const headline = isStaleControllerHeadline(rawHeadline, liveCount)
     ? nextAction
     : (nextAction ?? rawHeadline)
@@ -717,6 +773,7 @@ function latestLiveWorkAt(project: ProjectRow): string | null {
   const fromMissions = (project.missions ?? [])
     .filter(mission => LIVE_ITEM_STATUS.has(mission.status))
     .map(mission => mission.updated_at)
+
   const fromTracks = (project.health?.tracks ?? [])
     .filter(track => (track.active ?? 0) > 0)
     .map(track => track.last_activity_at)
@@ -766,6 +823,88 @@ export type RailItem = {
   key: string
   live: boolean
   status: null | string
+}
+
+/** Map a project item onto the checklist row the rail/drawer already render.
+ *  The backend `/tasks` endpoint now returns this same list — items ARE the
+ *  roadmap — so the desktop must not keep a second board-task fetch. */
+export function itemAsRoadmapTask(item: ProjectItem): ProjectTask {
+  const live = item.attempts.some(attempt => LIVE_ITEM_STATUS.has(attempt.status))
+
+  const failedOnly =
+    item.attempts.length > 0 &&
+    item.attempts.every(attempt => attempt.status === 'failed' || attempt.status === 'interrupted')
+
+  const status = !item.open
+    ? 'accepted'
+    : live
+      ? 'running'
+      : item.status === 'proposed'
+        ? 'proposed'
+        : failedOnly
+          ? 'failed'
+          : 'pending'
+
+  const title =
+    item.desired_state?.trim() ||
+    item.attempts.find(attempt => attempt.title?.trim())?.title?.trim() ||
+    item.key
+
+  return {
+    attempts: item.attempts.length,
+    status,
+    task_key: item.key,
+    title,
+    updated_at: item.attempts[0]?.updated_at ?? null,
+    worker_mission_id: item.attempts[0]?.id ?? null
+  }
+}
+
+/** True when get_project actually sent an items array (including empty). */
+export function projectDetailHasItems(detail: ProjectDetail): boolean {
+  return Array.isArray(detail.items)
+}
+
+export function roadmapFromItems(detail: ProjectDetail): {
+  summary: { done: number; failed: number; running: number; total: number }
+  tasks: ProjectTask[]
+} {
+  const tasks = (detail.items ?? [])
+    .filter(item => {
+      const live = item.attempts.some(attempt => LIVE_ITEM_STATUS.has(attempt.status))
+
+      if (live) {
+        return true
+      }
+
+      // Older backends omit kind/status; `open` is still authoritative.
+      if (item.open) {
+        return true
+      }
+
+      if (item.kind === 'task') {
+        return item.open
+      }
+
+      return item.status === 'open' || item.status === 'active' || item.status === 'proposed' || item.status === 'done'
+    })
+    .map(itemAsRoadmapTask)
+
+  let done = 0
+  let running = 0
+  let failed = 0
+
+  for (const task of tasks) {
+    if (task.status === 'accepted') {
+      done += 1
+    } else if (task.status === 'running' || task.status === 'settled') {
+      running += 1
+    } else if (task.status === 'failed') {
+      failed += 1
+    }
+  }
+
+  return { summary: { done, failed, running, total: tasks.length }, tasks }
 }
 
 /** Open items, live first, capped so the rail cannot dump a 120-track graveyard. */

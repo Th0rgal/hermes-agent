@@ -10047,6 +10047,60 @@ def _run_prompt_submit(
                 "session.title", sid, {"session_id": _k, "title": t}
             )
             result = agent.run_conversation(run_message, **run_kwargs)
+            # Dashboard-equivalent: API-server / TUI turns never hit
+            # GatewayRunner.reset_session. Fork a parent-linked child so
+            # project bindings / live_tip follow, and so a /goal recovery
+            # retry (or the next user message) starts empty instead of
+            # replaying the bloated transcript.
+            if (
+                isinstance(result, dict)
+                and result.get("compression_exhausted")
+                and getattr(agent, "_exhaustion_rotated_from", None)
+                != getattr(agent, "session_id", None)
+            ):
+                from agent.conversation_compression import (
+                    fork_session_after_compression_exhaustion,
+                )
+
+                new_sid = fork_session_after_compression_exhaustion(agent)
+                if new_sid:
+                    old_key = str(session.get("session_key") or "")
+                    if old_key and old_key != new_sid:
+                        try:
+                            from hermes_cli.goals import migrate_goal_to_session
+
+                            migrate_goal_to_session(
+                                old_key, new_sid, reason="compression_exhausted"
+                            )
+                        except Exception:
+                            logger.debug(
+                                "goal migrate on exhaustion fork failed",
+                                exc_info=True,
+                            )
+                    # Guard this parent only. The child must be allowed to
+                    # rotate later if it also grows past the window.
+                    agent._exhaustion_rotated_from = old_key or agent.session_id
+                    agent._exhaustion_rotated = False
+                    _sync_session_key_after_compress(
+                        sid, session, clear_pending_title=False, restart_slash_worker=True,
+                    )
+                    with session["history_lock"]:
+                        session["history"] = []
+                        session["history_version"] = int(session.get("history_version", 0)) + 1
+                    if isinstance(result, dict):
+                        result["session_rotated_after_exhaustion"] = True
+                    _emit(
+                        "status.update",
+                        sid,
+                        {
+                            "kind": "compaction",
+                            "text": (
+                                "Session exceeded the context window and could "
+                                "not be compressed. Rotated to a fresh "
+                                "continuation session."
+                            ),
+                        },
+                    )
             if display_kind and isinstance(text, str):
                 db = getattr(agent, "_session_db", None)
                 current_session_id = getattr(agent, "session_id", None) or session.get("session_key")

@@ -2138,6 +2138,7 @@ export const en: Translations = {
     agents: 'Agents',
     background: count => `${count} Background`,
     goalActive: 'Goal active',
+    projectObjective: 'Project objective',
     goalDone: 'Goal done',
     goalPaused: 'Goal paused',
     goalWaiting: 'Goal waiting',

@@ -5059,6 +5059,24 @@ def run_conversation(
                         _retry.restart_with_compressed_messages = True
                         break
                     else:
+                        from agent.context_compressor import elide_until_fit
+
+                        _elided_msgs, _elided_saved = elide_until_fit(
+                            messages, max(int(original_tokens * 0.7), 1)
+                        )
+                        if _elided_saved > 0:
+                            messages = _elided_msgs
+                            agent._buffer_status(
+                                COMPRESSION_RETRY_TOKENS_STATUS_TEMPLATE.format(
+                                    before=new_tokens,
+                                    after=estimate_messages_tokens_rough(messages),
+                                )
+                            )
+                            agent._persist_session(messages, conversation_history)
+                            time.sleep(2)
+                            _retry.restart_with_compressed_messages = True
+                            break
+
                         if agent._try_strip_image_parts_from_tool_messages(
                             api_messages,
                             remember_model=False,
@@ -5368,9 +5386,9 @@ def run_conversation(
                         # and retry once. Already-elided messages are skipped, so
                         # this converges and the max_compression_attempts cap
                         # still bounds the loop.
-                        from agent.context_compressor import elide_bulky_tool_messages
+                        from agent.context_compressor import elide_until_fit
 
-                        _elided_msgs, _elided_saved = elide_bulky_tool_messages(
+                        _elided_msgs, _elided_saved = elide_until_fit(
                             messages, max(int(old_ctx * 0.9), 1)
                         )
                         if _elided_saved > 0:

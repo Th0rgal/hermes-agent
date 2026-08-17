@@ -153,6 +153,22 @@ class TestResolveRouteTarget:
         with pytest.raises(LookupError, match="unknown project"):
             routes.resolve_route_target(conn, "ghost", session_db=session_db)
 
+    def test_routes_json_alias_resolves_to_the_bound_slug(
+        self, conn, session_db, tmp_path, monkeypatch
+    ):
+        """Cron deliver=project:verity-core must use the `verity` route."""
+        project_id = pdb.create_project(conn, name="Verity", folders=["/tmp/verity"])
+        _mk_session(session_db, "sess-verity")
+        routes.bind_route(conn, project_id, "sess-verity", session_db=session_db)
+        (tmp_path / "routes.json").write_text('{"verity": "verity-core"}\n')
+        monkeypatch.setenv("HERMES_PROJECTS_DIR", str(tmp_path))
+
+        target = routes.resolve_route_target(
+            conn, "verity-core", session_db=session_db
+        )
+        assert target.project_id == project_id
+        assert target.session_id == "sess-verity"
+
     def test_archived_project_raises(self, conn, session_db, project_id):
         _mk_session(session_db, "sess-1")
         routes.bind_route(conn, project_id, "sess-1", session_db=session_db)

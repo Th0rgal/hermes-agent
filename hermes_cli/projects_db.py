@@ -24,6 +24,7 @@ The schema is intentionally small and additive: column additions go through
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import secrets
@@ -397,17 +398,74 @@ def list_projects(
     return [_attach_folders(conn, _project_from_row(r)) for r in rows]
 
 
+def _project_alias_map() -> dict[str, str]:
+    """Load sandboxed ``routes.json`` so ``verity-core`` finds ``verity``.
+
+    Cron ``deliver=project:verity-core`` must resolve to the Hermes Project
+    row the operator actually bound (slug ``verity``). Without this fold,
+    every tick logs ``unknown project 'verity-core'`` and the conversation
+    receives nothing.
+    """
+    candidates: List[Path] = []
+    env = (os.environ.get("HERMES_PROJECTS_DIR") or "").strip()
+    if env:
+        candidates.append(Path(env) / "routes.json")
+    home = get_hermes_home()
+    candidates.append(home / ".hermes" / "projects" / "active" / "routes.json")
+    for path in candidates:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        aliases: dict[str, str] = {}
+        for key, value in data.items():
+            if isinstance(key, str) and isinstance(value, str):
+                src = key.strip().lower()
+                dst = value.strip().lower()
+                if src and dst:
+                    aliases[src] = dst
+        if aliases:
+            return aliases
+    return {}
+
+
+def _slug_lookup_keys(token: str) -> List[str]:
+    """Exact slug, its routes.json canonical, then nicknames that fold onto it."""
+    token = str(token or "").strip().lower()
+    if not token:
+        return []
+    keys = [token]
+    aliases = _project_alias_map()
+    canonical = aliases.get(token, token)
+    if canonical not in keys:
+        keys.append(canonical)
+    for alias, target in aliases.items():
+        if target == token or target == canonical:
+            if alias not in keys:
+                keys.append(alias)
+    return keys
+
+
 def get_project(
     conn: sqlite3.Connection, id_or_slug: str
 ) -> Optional[Project]:
-    """Look up a project by id first, then by slug."""
+    """Look up a project by id first, then by slug (and routes.json aliases)."""
     row = conn.execute(
         "SELECT * FROM projects WHERE id = ?", (id_or_slug,)
     ).fetchone()
     if row is None:
-        row = conn.execute(
-            "SELECT * FROM projects WHERE slug = ?", (str(id_or_slug).lower(),)
-        ).fetchone()
+        for slug in _slug_lookup_keys(id_or_slug):
+            row = conn.execute(
+                "SELECT * FROM projects WHERE slug = ?", (slug,)
+            ).fetchone()
+            if row is not None:
+                break
     if row is None:
         return None
     return _attach_folders(conn, _project_from_row(row))

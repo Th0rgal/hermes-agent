@@ -55,6 +55,19 @@ def test_create_get_list(conn):
     assert len(pdb.list_projects(conn)) == 1
 
 
+def test_get_project_resolves_routes_json_alias(conn, tmp_path, monkeypatch):
+    """deliver=project:verity-core must find the bound `verity` row."""
+    pid = pdb.create_project(conn, name="Verity", folders=["/tmp/verity"])
+    routes = tmp_path / "routes.json"
+    routes.write_text('{"verity": "verity-core", "verity-roadmap": "verity-core"}\n')
+    monkeypatch.setenv("HERMES_PROJECTS_DIR", str(tmp_path))
+
+    assert pdb.get_project(conn, "verity").id == pid
+    assert pdb.get_project(conn, "verity-core").id == pid
+    assert pdb.get_project(conn, "verity-roadmap").id == pid
+    assert pdb.get_project(conn, "ghost") is None
+
+
 
 
 

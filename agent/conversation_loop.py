@@ -6776,18 +6776,48 @@ def run_conversation(
                     )
 
                 if _tool_turn_persisted is False:
+                    # Compaction may have published a child while this turn
+                    # was flushing. Adopt it once instead of aborting.
+                    _cause = getattr(agent, "_last_persistence_error_cause", None)
+                    if _cause == "compressing":
+                        _db = getattr(agent, "_session_db", None)
+                        _resolve = getattr(_db, "resolve_resume_session_id", None)
+                        _live = (
+                            _resolve(agent.session_id)
+                            if callable(_resolve) and agent.session_id
+                            else None
+                        )
+                        if _live and _live != agent.session_id:
+                            logger.info(
+                                "Retrying tool-call persist on continuation %s "
+                                "(was %s)",
+                                _live,
+                                agent.session_id,
+                            )
+                            agent.session_id = _live
+                            try:
+                                _tool_turn_persisted = agent._flush_messages_to_session_db(
+                                    messages, conversation_history
+                                )
+                            except Exception as exc:
+                                _tool_turn_persisted = False
+                                from hermes_state import classify_persistence_error
+                                agent._last_persistence_error_cause = (
+                                    classify_persistence_error(exc)
+                                )
                     # The canonical append failed. Do not project the row or
                     # run side-effecting tools from state that exists only in
                     # this process. Breaking also avoids retrying the same
                     # unpersisted turn until the iteration budget is exhausted.
                     # The flush may have classified the cause internally; if
                     # nothing was recorded, the cause is genuinely unknown.
-                    if getattr(agent, "_last_persistence_error_cause", None) is None:
-                        agent._last_persistence_error_cause = "unknown"
-                    _turn_exit_reason = "session_persistence_failed"
-                    final_response = ""
-                    failed = True
-                    break
+                    if _tool_turn_persisted is False:
+                        if getattr(agent, "_last_persistence_error_cause", None) is None:
+                            agent._last_persistence_error_cause = "unknown"
+                        _turn_exit_reason = "session_persistence_failed"
+                        final_response = ""
+                        failed = True
+                        break
 
                 # A UI must never observe an assistant/tool-call row that is
                 # still only an ephemeral in-memory projection. Emit interim

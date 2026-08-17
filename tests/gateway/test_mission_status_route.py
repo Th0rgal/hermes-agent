@@ -1,6 +1,8 @@
 """Unit tests for mission-complete routing (no gateway needed)."""
 
 from gateway.platforms.mission_status_route import (
+    MISSION_CALLBACK_WAKE_PROMPT,
+    PROJECT_OPERATOR_WAKE_MESSAGE_CAP,
     append_mission_callback,
     extract_origin_session,
     extract_project_slug,
@@ -9,6 +11,7 @@ from gateway.platforms.mission_status_route import (
     is_routable_mission_status,
     resolve_live_session_id,
     resolve_mission_delivery_session,
+    should_wake_mission_callback,
 )
 
 
@@ -248,3 +251,28 @@ def test_origin_ownership_walks_compression_parent():
         "origin_session": "parent",
     }
     assert resolve_mission_delivery_session(payload, db) == "child"
+
+
+def test_should_wake_skips_huge_operator_sessions():
+    db = _FakeSessionDB({"s1": {"source": "desktop", "message_count": 515}})
+    assert should_wake_mission_callback(db, "s1") is False
+    db = _FakeSessionDB({"s1": {"source": "desktop", "message_count": 12}})
+    assert should_wake_mission_callback(db, "s1") is True
+    assert PROJECT_OPERATOR_WAKE_MESSAGE_CAP == 80
+
+
+def test_should_wake_skips_a_session_being_compacted():
+    class _Locked(_FakeSessionDB):
+        def get_compression_lock_holder(self, sid):
+            return "pid=1:compressor"
+
+    db = _Locked({"s1": {"source": "desktop", "message_count": 4}})
+    assert should_wake_mission_callback(db, "s1") is False
+
+
+def test_wake_prompt_does_not_order_an_inspect_loop():
+    lower = MISSION_CALLBACK_WAKE_PROMPT.lower()
+    assert "do not inspect" in lower
+    assert "do not run tools" in lower
+    assert "continue autonomously" not in lower
+    assert "if you can continue" not in lower

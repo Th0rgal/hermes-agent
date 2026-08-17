@@ -1406,7 +1406,7 @@ def is_disk_full_error(exc: BaseException | str | None) -> bool:
 # enumerate causes (e.g. the cron scheduler's explainer-variant suppression)
 # must iterate this tuple instead of hardcoding the list, so adding a bucket
 # can never silently desynchronize them.
-PERSISTENCE_ERROR_CAUSES = ("locked", "disk", "unknown")
+PERSISTENCE_ERROR_CAUSES = ("locked", "disk", "unknown", "compressing")
 
 
 def classify_persistence_error(exc_or_str) -> str:
@@ -1419,8 +1419,11 @@ def classify_persistence_error(exc_or_str) -> str:
     send it again", while a full disk or read-only database needs the
     disk-space/permissions advice. Returns one of PERSISTENCE_ERROR_CAUSES:
 
+    * ``"compressing"`` — a live context-compaction lease owns the session
+      (or its parent). Transient; the user should wait for the continuation,
+      not hunt disk space.
     * ``"locked"``  — lock/busy contention (another process holds the write
-      lock, or a live compression lease refused the write); transient,
+      lock, or a compressor lost its own lease); transient,
       retry-later guidance applies.
     * ``"disk"``    — disk full / read-only / permission-shaped failures
       (delegates the disk-full patterns to :func:`is_disk_full_error` so the
@@ -1429,18 +1432,18 @@ def classify_persistence_error(exc_or_str) -> str:
     """
     if exc_or_str is None:
         return "unknown"
-    # A refused write during a live compression lease is contention, not
-    # storage damage — but its message ("is being compressed by another
-    # writer" / "Compression lease lost") contains neither "locked" nor
-    # "busy", so it must be matched by type and by phrase (for strings that
-    # survived RPC wrapping).
+    # A live compaction lease is not a generic write-lock: the UI must say
+    # "compacting", not "another process is writing the database".
+    if isinstance(exc_or_str, SessionCompressionInProgressError):
+        return "compressing"
     if isinstance(exc_or_str, CompressionSessionBusyError):
         return "locked"
     text = str(exc_or_str).lower()
+    if "being compressed" in text:
+        return "compressing"
     if (
         "locked" in text
         or "busy" in text
-        or "being compressed" in text
         or "compression lease" in text
     ):
         return "locked"
@@ -7884,9 +7887,9 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         if tool_calls is not None:
             num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
 
-        def _do(conn):
+        def _do(conn, target_id: str = session_id):
             self._check_transcript_write_guards(
-                conn, session_id, compression_lock_holder
+                conn, target_id, compression_lock_holder
             )
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
@@ -7895,7 +7898,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                    codex_message_items, platform_message_id, observed, active, api_content, display_kind, display_metadata)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    session_id,
+                    target_id,
                     role,
                     stored_content,
                     tool_call_id,
@@ -7925,12 +7928,12 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 conn.execute(
                     """UPDATE sessions SET message_count = message_count + 1,
                        tool_call_count = tool_call_count + ? WHERE id = ?""",
-                    (num_tool_calls, session_id),
+                    (num_tool_calls, target_id),
                 )
             else:
                 conn.execute(
                     "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
-                    (session_id,),
+                    (target_id,),
                 )
             return msg_id
 
@@ -7939,9 +7942,46 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         # a sibling process legitimately holding the write lock for seconds
         # (VACUUM, TRUNCATE checkpoint at close, an older pre-bounded-merge
         # process's FTS optimize) can't destroy a healthy turn (#74478).
-        return self._execute_write(
-            _do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S
-        )
+        return self._write_transcript_adopting_continuation(session_id, _do)
+
+    def _write_transcript_adopting_continuation(self, session_id: str, write_fn):
+        """Run a transcript write, following a compression child if the parent closed.
+
+        Verity/Lido operator sessions compact mid-turn. A write aimed at the
+        parent must land on the published continuation instead of aborting
+        the user's message as ``session_persistence_failed``.
+        """
+
+        def _run(target: str):
+            def _bound(conn):
+                return write_fn(conn, target)
+
+            return self._execute_write(
+                _bound, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S
+            )
+
+        try:
+            return _run(session_id)
+        except CompressionSessionClosedError:
+            live = self.resolve_resume_session_id(session_id)
+            if live and live != session_id:
+                logger.info(
+                    "Adopting compression continuation %s for writes aimed at %s",
+                    live,
+                    session_id,
+                )
+                return _run(live)
+            raise
+        except SessionCompressionInProgressError:
+            live = self.resolve_resume_session_id(session_id)
+            if live and live != session_id:
+                logger.info(
+                    "Adopting compression continuation %s after lock wait on %s",
+                    live,
+                    session_id,
+                )
+                return _run(live)
+            raise
 
     def append_messages_batch(
         self,
@@ -7990,31 +8030,29 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 )
             return inserted_total
 
-        def _do(conn):
+        def _do(conn, target_id: str = session_id):
             self._check_transcript_write_guards(
-                conn, session_id, compression_lock_holder
+                conn, target_id, compression_lock_holder
             )
             inserted, tool_calls_total = self._insert_message_rows(
-                conn, session_id, messages
+                conn, target_id, messages
             )
             # One aggregated counter update for the whole batch.
             if tool_calls_total > 0:
                 conn.execute(
                     """UPDATE sessions SET message_count = message_count + ?,
                        tool_call_count = tool_call_count + ? WHERE id = ?""",
-                    (inserted, tool_calls_total, session_id),
+                    (inserted, tool_calls_total, target_id),
                 )
             else:
                 conn.execute(
                     "UPDATE sessions SET message_count = message_count + ? WHERE id = ?",
-                    (inserted, session_id),
+                    (inserted, target_id),
                 )
             return inserted
 
         # Same criticality as append_message: this IS the turn's transcript.
-        return self._execute_write(
-            _do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S
-        )
+        return self._write_transcript_adopting_continuation(session_id, _do)
 
     def set_latest_matching_message_display_kind(
         self, session_id: str, *, role: str, content: str, display_kind: str,
@@ -9126,6 +9164,78 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 tuple(session_ids),
             ).fetchone()
         return int(row[0] if row else 0)
+
+    def compact_lineage_for_resume(
+        self,
+        session_id: str,
+        keep: Optional[int] = None,
+    ) -> int:
+        """Archive the oldest active lineage rows so resume stays under budget.
+
+        Legacy compression forked a child and left every ancestor ``active=1``.
+        Resume then counted the whole chain and hit ``sessions.max_resume_messages``
+        (default 20000) even when the live tip was a few hundred rows. In-place
+        compression is the long-term path; this is the mechanical compact that
+        unblocks resume: ``active=0``, ``compacted=1`` on the dropped tail.
+        Search still finds those rows.
+
+        *keep* defaults to ``compression.hygiene_hard_message_limit`` (400).
+        Returns the remaining active lineage count.
+        """
+        if not session_id:
+            return 0
+        if keep is None:
+            try:
+                from hermes_cli.config import load_config_readonly
+
+                compression = load_config_readonly().get("compression") or {}
+                raw = compression.get("hygiene_hard_message_limit", 400)
+                keep = int(raw)
+            except Exception:
+                keep = 400
+        if keep < 20:
+            keep = 400
+
+        session_ids = self._session_lineage_root_to_tip(session_id)
+        placeholders = ",".join("?" for _ in session_ids)
+
+        def _do(conn):
+            rows = conn.execute(
+                f"SELECT id FROM messages WHERE session_id IN ({placeholders}) "
+                "AND active = 1 ORDER BY id",
+                tuple(session_ids),
+            ).fetchall()
+            msg_ids = [
+                row["id"] if hasattr(row, "keys") else row[0] for row in rows
+            ]
+            if len(msg_ids) <= keep:
+                return len(msg_ids)
+            drop = msg_ids[:-keep]
+            for offset in range(0, len(drop), 500):
+                chunk = drop[offset : offset + 500]
+                conn.execute(
+                    "UPDATE messages SET active = 0, compacted = 1 "
+                    f"WHERE id IN ({','.join('?' for _ in chunk)}) AND active = 1",
+                    chunk,
+                )
+            conn.execute(
+                "UPDATE sessions SET message_count = ("
+                "SELECT COUNT(*) FROM messages "
+                "WHERE messages.session_id = sessions.id AND active = 1"
+                f") WHERE id IN ({placeholders})",
+                tuple(session_ids),
+            )
+            logger.warning(
+                "Auto-compacted resume lineage %s: archived %d of %d active "
+                "messages (kept %d)",
+                session_id,
+                len(drop),
+                len(msg_ids),
+                keep,
+            )
+            return keep
+
+        return int(self._execute_write(_do))
 
     def assert_resume_safe(
         self,

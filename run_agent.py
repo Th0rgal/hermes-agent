@@ -3720,6 +3720,14 @@ class AIAgent:
             )
         if reason == "session_persistence_failed":
             cause = persistence_cause or "unknown"
+            if cause == "compressing":
+                return (
+                    prefix
+                    + "the turn was stopped because this chat is being "
+                    "compacted (summarizing a long transcript). Wait a "
+                    "moment — Hermes will continue on the new session — "
+                    "then send your message again."
+                )
             if cause == "locked":
                 return (
                     prefix

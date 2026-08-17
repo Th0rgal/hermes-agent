@@ -875,6 +875,7 @@ class WebhookAdapter(BasePlatformAdapter):
         live = None
         appended = False
         row = None
+        wake = False
         try:
             # Off the event loop: SessionDB writes take BEGIN IMMEDIATE and
             # can wait on a busy state.db. Doing that inline starved the
@@ -910,6 +911,11 @@ class WebhookAdapter(BasePlatformAdapter):
                     row = getter(live)
                 except Exception:
                     row = None
+            from gateway.platforms.mission_status_route import (
+                should_wake_mission_callback,
+            )
+
+            wake = bool(appended and live and should_wake_mission_callback(session_db, live))
         except Exception:
             logger.exception("[webhook] failed to append routed mission callback")
             return None
@@ -934,22 +940,28 @@ class WebhookAdapter(BasePlatformAdapter):
             live,
             appended,
         )
-        if appended:
+        if appended and not wake:
+            logger.info(
+                "[webhook] appended mission %s into %s without a wake",
+                payload.get("mission_id"),
+                live,
+            )
+        if appended and wake:
             try:
+                from gateway.platforms.mission_status_route import (
+                    MISSION_CALLBACK_WAKE_PROMPT,
+                )
+
                 adapter, source = self._adapter_for_routed_session(
                     row, live, profile
                 )
                 if adapter is not None:
                     from gateway.wake import adapter_supports_push, deliver_wake
 
-                    prompt = (
-                        "A routed mission-complete callback was just appended to "
-                        "this conversation. Read the latest [Mission callback] "
-                        "message. Inspect the mission, take its output into account, "
-                        "and reply here. If you can continue autonomously, do that. "
-                        "Do not open another session."
-                    )
-                    wake_kwargs = {"text": prompt, "session_id": live}
+                    wake_kwargs = {
+                        "text": MISSION_CALLBACK_WAKE_PROMPT,
+                        "session_id": live,
+                    }
                     if source is not None and adapter_supports_push(adapter):
                         wake_kwargs["source"] = source
                     task = asyncio.create_task(deliver_wake(adapter, **wake_kwargs))

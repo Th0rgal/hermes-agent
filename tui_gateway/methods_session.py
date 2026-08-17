@@ -399,7 +399,25 @@ def _(rid, params: dict) -> dict:
                 if resume_limit and stored_message_count > resume_limit:
                     raise SessionResumeTooLargeError(stored_message_count, resume_limit)
         except SessionResumeTooLargeError as exc:
-            return _err(rid, 4130, str(exc))
+            compact = getattr(db, "compact_lineage_for_resume", None)
+            if callable(compact):
+                try:
+                    compact(target)
+                    if callable(safety_check):
+                        safety_check(target)
+                    else:
+                        raise exc
+                except SessionResumeTooLargeError as exc2:
+                    return _err(rid, 4130, str(exc2))
+                except Exception as compact_exc:
+                    logger.warning(
+                        "auto-compact failed for %s; keeping resume guard: %s",
+                        target,
+                        compact_exc,
+                    )
+                    return _err(rid, 4130, str(exc))
+            else:
+                return _err(rid, 4130, str(exc))
         except Exception as exc:
             # Fail OPEN: a transient guard failure (locked DB, schema skew on
             # an adaptor store) must not turn the safety check into a new way

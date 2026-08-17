@@ -30,6 +30,19 @@ _TERMINAL = {
     "awaitinguser",
 }
 
+# An operator project chat that already holds this many messages is the
+# control surface, not a worker. Waking it with "inspect and continue"
+# dumps hundreds of tools into the session the user is typing in and then
+# auto-compresses — the Verity/Lido "session storage was busy" loop.
+PROJECT_OPERATOR_WAKE_MESSAGE_CAP = 80
+
+MISSION_CALLBACK_WAKE_PROMPT = (
+    "A routed mission-complete callback was just appended to this conversation. "
+    "In one or two sentences, tell the operator what finished and whether they "
+    "need to act. Do not inspect the mission, do not run tools, and do not "
+    "continue the work in this chat — the project controller owns follow-up."
+)
+
 
 def extract_origin_session(payload: dict) -> str:
     return str(
@@ -276,6 +289,47 @@ def _last_message_role(session_db: Any, session_id: str) -> Optional[str]:
     last = rows[-1]
     role = last.get("role") if isinstance(last, dict) else getattr(last, "role", None)
     return str(role).strip().lower() if role else None
+
+
+def should_wake_mission_callback(session_db: Any, live_id: str) -> bool:
+    """Whether to start an agent turn after appending a mission callback.
+
+    Append always happens. The wake is what starts a 200-tool inspect loop
+    in the operator session. Skip it when the session is already huge or
+    another writer is compacting — the project controller owns autonomy.
+    """
+    sid = (live_id or "").strip()
+    if not sid:
+        return False
+    db = sync_session_db(session_db)
+    holder_fn = getattr(db, "get_compression_lock_holder", None)
+    if callable(holder_fn):
+        try:
+            if holder_fn(sid):
+                logger.info(
+                    "skip mission wake for %s: compression lock held", sid
+                )
+                return False
+        except Exception:
+            logger.debug("compression-lock check failed for %s", sid, exc_info=True)
+    getter = getattr(db, "get_session", None)
+    if callable(getter):
+        try:
+            row = getter(sid) or {}
+        except Exception:
+            row = {}
+        count = None
+        if isinstance(row, dict):
+            count = row.get("message_count")
+        if isinstance(count, int) and count >= PROJECT_OPERATOR_WAKE_MESSAGE_CAP:
+            logger.info(
+                "skip mission wake for %s: message_count=%s >= %s",
+                sid,
+                count,
+                PROJECT_OPERATOR_WAKE_MESSAGE_CAP,
+            )
+            return False
+    return True
 
 
 def append_mission_callback(

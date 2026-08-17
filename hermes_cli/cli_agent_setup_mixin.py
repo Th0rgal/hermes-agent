@@ -631,6 +631,23 @@ class CLIAgentSetupMixin:
                     return None
                 safety_check(self.session_id)
         except SessionResumeTooLargeError as exc:
+            compact = getattr(self._session_db, "compact_lineage_for_resume", None)
+            if callable(compact):
+                try:
+                    compact(self.session_id)
+                    if tip_only:
+                        tip_check(self.session_id, max_messages=limit)
+                    else:
+                        safety_check(self.session_id)
+                    return None
+                except SessionResumeTooLargeError as exc2:
+                    return str(exc2)
+                except Exception as compact_exc:
+                    logger.warning(
+                        "auto-compact failed for %s; keeping resume guard: %s",
+                        self.session_id,
+                        compact_exc,
+                    )
             return str(exc)
         except Exception as exc:
             logger.warning(

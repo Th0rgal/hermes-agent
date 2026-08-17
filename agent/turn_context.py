@@ -942,6 +942,36 @@ def build_turn_context(
                     except Exception:
                         _compress_block_reason = None
         if _should_compress_now:
+            # A sibling process (gateway wake / other dashboard) may already
+            # own this session's compaction lease. Starting a second compress
+            # is what surfaces as "session storage was busy" on the operator
+            # chat. Adopt the published continuation instead.
+            _session_db = getattr(agent, "_session_db", None)
+            _sid = getattr(agent, "session_id", None)
+            _holder_fn = getattr(_session_db, "get_compression_lock_holder", None)
+            if _sid and callable(_holder_fn):
+                try:
+                    _holder = _holder_fn(_sid)
+                except Exception:
+                    _holder = None
+                if _holder:
+                    _resolve = getattr(_session_db, "resolve_resume_session_id", None)
+                    _live = _resolve(_sid) if callable(_resolve) else None
+                    if _live and _live != _sid:
+                        logger.info(
+                            "Skipping preflight compression: adopting "
+                            "continuation %s (lock held on %s)",
+                            _live,
+                            _sid,
+                        )
+                        agent.session_id = _live
+                    else:
+                        logger.info(
+                            "Skipping preflight compression: lock held on %s",
+                            _sid,
+                        )
+                    _should_compress_now = False
+        if _should_compress_now:
             _preflight_compressed = True
             # Compression is actually running (block cleared / was never
             # blocked) — reset the dedup so a future blocked-over-threshold

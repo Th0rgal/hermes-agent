@@ -80,6 +80,19 @@ def test_append_still_gives_up_when_the_lock_never_clears(
     assert elapsed < 10, "did not give up within a bounded time"
 
 
+def test_append_adopts_published_continuation_when_parent_closed(db: SessionDB) -> None:
+    """A write aimed at a compacted parent must land on the child tip."""
+    db.end_session("sess1", "compression")
+    db.create_session("sess1-child", source="test", parent_session_id="sess1")
+    db.append_message("sess1-child", role="assistant", content="compacted")
+    db.append_message("sess1", role="user", content="typed during compact")
+    rows = db.get_messages("sess1-child")
+    assert any(r["content"] == "typed during compact" for r in rows)
+    assert not any(
+        r["content"] == "typed during compact" for r in db.get_messages("sess1")
+    )
+
+
 def test_the_lock_owner_is_never_delayed_by_its_own_lock(db: SessionDB) -> None:
     assert db.try_acquire_compression_lock("sess1", "compressor") is True
 

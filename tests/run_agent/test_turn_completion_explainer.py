@@ -96,6 +96,16 @@ def test_explanation_for_max_iterations_reached_prefix_match():
 # --------------------------------------------------------------------------
 # 1b. Cause-aware session-persistence wording
 # --------------------------------------------------------------------------
+def test_explanation_persistence_compressing_cause_names_compaction():
+    out = AIAgent._format_turn_completion_explanation(
+        "session_persistence_failed", "compressing"
+    )
+    lower = out.lower()
+    assert "compact" in lower
+    assert "disk" not in lower
+    assert "another hermes process" not in lower
+
+
 def test_explanation_persistence_locked_cause_says_busy_not_disk():
     """Write-lock contention must NOT be misdiagnosed as a disk problem."""
     out = AIAgent._format_turn_completion_explanation(
@@ -209,14 +219,14 @@ def test_classify_persistence_error_compression_busy_is_locked():
         SessionCompressionInProgressError(
             "Session 'abc' is being compressed by another writer"
         )
-    ) == "locked"
+    ) == "compressing"
     assert classify_persistence_error(
         CompressionSessionBusyError("Compression lease lost before publication: abc")
     ) == "locked"
     # RPC-wrapped string forms (exception type lost in transit).
     assert classify_persistence_error(
         "Session 'abc' is being compressed by another writer"
-    ) == "locked"
+    ) == "compressing"
     assert classify_persistence_error(
         "Compression lease lost before publication: abc"
     ) == "locked"

@@ -9165,6 +9165,78 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             ).fetchone()
         return int(row[0] if row else 0)
 
+    def compact_lineage_for_resume(
+        self,
+        session_id: str,
+        keep: Optional[int] = None,
+    ) -> int:
+        """Archive the oldest active lineage rows so resume stays under budget.
+
+        Legacy compression forked a child and left every ancestor ``active=1``.
+        Resume then counted the whole chain and hit ``sessions.max_resume_messages``
+        (default 20000) even when the live tip was a few hundred rows. In-place
+        compression is the long-term path; this is the mechanical compact that
+        unblocks resume: ``active=0``, ``compacted=1`` on the dropped tail.
+        Search still finds those rows.
+
+        *keep* defaults to ``compression.hygiene_hard_message_limit`` (400).
+        Returns the remaining active lineage count.
+        """
+        if not session_id:
+            return 0
+        if keep is None:
+            try:
+                from hermes_cli.config import load_config_readonly
+
+                compression = load_config_readonly().get("compression") or {}
+                raw = compression.get("hygiene_hard_message_limit", 400)
+                keep = int(raw)
+            except Exception:
+                keep = 400
+        if keep < 20:
+            keep = 400
+
+        session_ids = self._session_lineage_root_to_tip(session_id)
+        placeholders = ",".join("?" for _ in session_ids)
+
+        def _do(conn):
+            rows = conn.execute(
+                f"SELECT id FROM messages WHERE session_id IN ({placeholders}) "
+                "AND active = 1 ORDER BY id",
+                tuple(session_ids),
+            ).fetchall()
+            msg_ids = [
+                row["id"] if hasattr(row, "keys") else row[0] for row in rows
+            ]
+            if len(msg_ids) <= keep:
+                return len(msg_ids)
+            drop = msg_ids[:-keep]
+            for offset in range(0, len(drop), 500):
+                chunk = drop[offset : offset + 500]
+                conn.execute(
+                    "UPDATE messages SET active = 0, compacted = 1 "
+                    f"WHERE id IN ({','.join('?' for _ in chunk)}) AND active = 1",
+                    chunk,
+                )
+            conn.execute(
+                "UPDATE sessions SET message_count = ("
+                "SELECT COUNT(*) FROM messages "
+                "WHERE messages.session_id = sessions.id AND active = 1"
+                f") WHERE id IN ({placeholders})",
+                tuple(session_ids),
+            )
+            logger.warning(
+                "Auto-compacted resume lineage %s: archived %d of %d active "
+                "messages (kept %d)",
+                session_id,
+                len(drop),
+                len(msg_ids),
+                keep,
+            )
+            return keep
+
+        return int(self._execute_write(_do))
+
     def assert_resume_safe(
         self,
         session_id: str,

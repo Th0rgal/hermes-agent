@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  isInspectNextAction,
   isStaleControllerHeadline,
   itemAsRoadmapTask,
+  itemBelongsOnRoadmap,
   leadSignal,
+  liveMissions,
   type ProjectDetail,
   type ProjectRow,
   railOpenItems,
@@ -18,6 +21,39 @@ const row = (partial: Partial<ProjectRow>): ProjectRow => ({
   missions: [],
   slug: 'verity-core',
   ...partial
+})
+
+describe('isInspectNextAction', () => {
+  it('matches inspect <uuid> and ignores real next actions', () => {
+    expect(
+      isInspectNextAction('inspect 51f37d4b-7e27-466a-8c2f-fec0be2bebed')
+    ).toBe(true)
+    expect(isInspectNextAction('watch #2367 CI then merge')).toBe(false)
+  })
+})
+
+describe('liveMissions', () => {
+  it('includes pending and waiting_background writers, not finished ones', () => {
+    const missions = liveMissions(
+      row({
+        missions: [
+          { github_pr: null, id: 'a', status: 'pending', title: 'queued', updated_at: null },
+          {
+            github_pr: null,
+            id: 'b',
+            status: 'waiting_background',
+            title: 'make test',
+            updated_at: null
+          },
+          { github_pr: null, id: 'c', status: 'active', title: 'writer', updated_at: null },
+          { github_pr: null, id: 'd', status: 'completed', title: 'done', updated_at: null },
+          { github_pr: null, id: 'e', status: 'failed', title: 'dead', updated_at: null }
+        ]
+      })
+    )
+
+    expect(missions.map(mission => mission.id)).toEqual(['a', 'b', 'c'])
+  })
 })
 
 describe('sessionGoalLead', () => {
@@ -178,19 +214,45 @@ describe('railOpenItems', () => {
     ])
   })
 
-  it('keeps an open item when kind and status are omitted', () => {
-    const detail: ProjectDetail = {
-      items: [
-        {
-          attempts: [],
-          key: 'legacy-open',
-          open: true
-        }
-      ],
-      project: { slug: 'verity-core', status: 'active' }
-    }
+  it('drops unacknowledged failed attempts from the public roadmap', () => {
+    const zombie: ProjectDetail['items'] = [
+      {
+        attempts: [{ id: 'dead', status: 'failed', title: 'Certify PR #46', updated_at: '2026-08-01T00:00:00Z' }],
+        key: 'lido-pr46-cert',
+        open: true
+      }
+    ]
+    const declaredDone: ProjectDetail['items'] = [
+      {
+        attempts: [],
+        desired_state: 'merged or closed',
+        key: 'pr-69',
+        kind: 'track',
+        open: false,
+        status: 'done'
+      }
+    ]
+    const declaredOpen: ProjectDetail['items'] = [
+      {
+        attempts: [],
+        desired_state: 'Campaign merge to main',
+        key: 'pr-63',
+        kind: 'track',
+        open: true,
+        status: 'open'
+      }
+    ]
 
-    expect(roadmapFromItems(detail).tasks.map(task => task.task_key)).toEqual(['legacy-open'])
-    expect(railOpenItems(detail).map(item => item.key)).toEqual(['legacy-open'])
+    expect(itemBelongsOnRoadmap(zombie![0])).toBe(false)
+    expect(itemBelongsOnRoadmap(declaredDone![0])).toBe(true)
+    expect(itemBelongsOnRoadmap(declaredOpen![0])).toBe(true)
+
+    const roadmap = roadmapFromItems({
+      items: [...zombie!, ...declaredDone!, ...declaredOpen!],
+      project: { slug: 'verity-lido', status: 'active' }
+    })
+
+    expect(roadmap.tasks.map(task => task.task_key)).toEqual(['pr-69', 'pr-63'])
+    expect(roadmap.summary).toEqual({ done: 1, failed: 0, running: 0, total: 2 })
   })
 })

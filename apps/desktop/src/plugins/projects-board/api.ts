@@ -551,7 +551,18 @@ export const publishProjectGoal = (slug: string, nextAction: string, mode?: stri
 
 /** Live missions in a project — the "agents" of the surface. */
 export function liveMissions(project: ProjectRow): MissionChip[] {
-  return project.missions.filter(m => m.status === 'active' || m.status === 'awaiting_user')
+  return project.missions.filter(
+    m =>
+      m.status === 'active' ||
+      m.status === 'pending' ||
+      m.status === 'waiting_background' ||
+      m.status === 'awaiting_user'
+  )
+}
+
+/** Controller next_action that is just "inspect <dead uuid>" — not a roadmap. */
+export function isInspectNextAction(next: null | string | undefined): boolean {
+  return /^\s*inspect\s+[0-9a-f-]{8,}/i.test(next ?? '')
 }
 
 /** Missions that need the operator — the attention accents. */
@@ -698,9 +709,11 @@ const STALE_CONTROLLER_HEADLINE =
 
 const LIVE_ITEM_STATUS = new Set([
   'active',
+  'awaiting_user',
   'created',
   'pending',
   'queued',
+  'running',
   'waiting_background'
 ])
 
@@ -865,30 +878,32 @@ export function projectDetailHasItems(detail: ProjectDetail): boolean {
   return Array.isArray(detail.items)
 }
 
+/** The public roadmap is the plan, not the unacknowledged graveyard.
+ *  Mirrors sandboxed.sh `item_belongs_on_roadmap`. Mission-only rows have no
+ *  declared `status`; keeping every `open` item dumps 100 failed certs. */
+export function itemBelongsOnRoadmap(item: ProjectItem): boolean {
+  if (item.attempts.some(attempt => LIVE_ITEM_STATUS.has(attempt.status))) {
+    return true
+  }
+
+  if (item.kind === 'task') {
+    return item.open
+  }
+
+  const status = item.status?.trim()
+
+  if (!status) {
+    return false
+  }
+
+  return status !== 'cancelled' && status !== 'closed'
+}
+
 export function roadmapFromItems(detail: ProjectDetail): {
   summary: { done: number; failed: number; running: number; total: number }
   tasks: ProjectTask[]
 } {
-  const tasks = (detail.items ?? [])
-    .filter(item => {
-      const live = item.attempts.some(attempt => LIVE_ITEM_STATUS.has(attempt.status))
-
-      if (live) {
-        return true
-      }
-
-      // Older backends omit kind/status; `open` is still authoritative.
-      if (item.open) {
-        return true
-      }
-
-      if (item.kind === 'task') {
-        return item.open
-      }
-
-      return item.status === 'open' || item.status === 'active' || item.status === 'proposed' || item.status === 'done'
-    })
-    .map(itemAsRoadmapTask)
+  const tasks = (detail.items ?? []).filter(itemBelongsOnRoadmap).map(itemAsRoadmapTask)
 
   let done = 0
   let running = 0

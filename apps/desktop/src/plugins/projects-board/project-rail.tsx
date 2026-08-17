@@ -26,7 +26,9 @@ import {
   fetchProject,
   fetchProjects,
   fetchProjectTasks,
+  isInspectNextAction,
   leadSignal,
+  liveMissions,
   projectDetailHasItems,
   projectKey,
   PROJECTS_KEY,
@@ -98,7 +100,10 @@ function RailBody({ slug }: { slug: string }) {
     ? projectDetailHasItems(detail)
       ? roadmapFromItems(detail)
       : tasksFallback
-        ? { summary: tasksFallback.summary ?? { done: 0, failed: 0, running: 0, total: tasksFallback.tasks.length }, tasks: tasksFallback.tasks }
+        ? {
+            summary: tasksFallback.summary ?? { done: 0, failed: 0, running: 0, total: tasksFallback.tasks.length },
+            tasks: tasksFallback.tasks
+          }
         : null
     : null
 
@@ -106,6 +111,9 @@ function RailBody({ slug }: { slug: string }) {
   const summary = roadmap?.summary
   const row = board?.projects.find(candidate => candidate.slug === slug)
   const signal = row ? leadSignal(row) : null
+  const live = row ? liveMissions(row) : []
+  const displayMode = row?.mode ?? project?.mode
+  const nextAction = signal?.nextAction && !isInspectNextAction(signal.nextAction) ? signal.nextAction : null
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -135,21 +143,32 @@ function RailBody({ slug }: { slug: string }) {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-3 py-3" data-selectable-text="true">
-        {(signal?.nextAction || signal?.controllerBehind || project?.mode) && (
+        {(live.length > 0 || nextAction || signal?.controllerBehind || displayMode) && (
           <div className="flex flex-col gap-1 rounded-md border border-(--ui-stroke-tertiary) px-2.5 py-1.5">
             <div className="flex flex-wrap items-center gap-2 text-[0.6875rem] text-(--ui-text-quaternary)">
-              {project?.mode && <span className="uppercase tracking-wide">{project.mode}</span>}
-              {signal?.controllerBehind && (
-                <span className="text-amber-500">{b.controllerBehind}</span>
-              )}
-              {signal?.lastSignalAt && (
-                <span className="ml-auto">{b.lastSignal}</span>
-              )}
+              {displayMode && <span className="uppercase tracking-wide">{displayMode}</span>}
+              {signal?.controllerBehind && <span className="text-amber-500">{b.controllerBehind}</span>}
+              {signal?.lastSignalAt && <span className="ml-auto">{b.lastSignal}</span>}
             </div>
-            {signal?.nextAction && (
-              <div className="text-[0.71rem] text-(--ui-text-secondary)">
-                {b.nextActionArrow(signal.nextAction)}
+            {live.length > 0 ? (
+              <div className="flex flex-col gap-0.5">
+                {live.map(mission => (
+                  <div
+                    className="truncate text-[0.71rem] text-(--ui-text-secondary)"
+                    key={mission.id ?? mission.title}
+                    title={mission.title ?? undefined}
+                  >
+                    <span className="text-(--ui-text-quaternary)">{mission.status}</span>
+                    {' · '}
+                    {mission.title || mission.id?.slice(0, 8) || 'mission'}
+                  </div>
+                ))}
               </div>
+            ) : (
+              <div className="text-[0.71rem] text-(--ui-text-quaternary)">{b.roadmapEmpty}</div>
+            )}
+            {nextAction && (
+              <div className="text-[0.625rem] text-(--ui-text-quaternary)">{b.nextActionArrow(nextAction)}</div>
             )}
           </div>
         )}
@@ -210,12 +229,6 @@ function RailBody({ slug }: { slug: string }) {
               {grantSummaryParts(b, detail.grant).join(' · ')}
             </span>
           </Section>
-        )}
-
-        {project?.next_action && (
-          <div className="text-[0.6875rem] text-(--ui-text-quaternary)">
-            {b.nextActionArrow(project.next_action)}
-          </div>
         )}
       </div>
 

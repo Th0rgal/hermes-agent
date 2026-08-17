@@ -551,7 +551,18 @@ export const publishProjectGoal = (slug: string, nextAction: string, mode?: stri
 
 /** Live missions in a project — the "agents" of the surface. */
 export function liveMissions(project: ProjectRow): MissionChip[] {
-  return project.missions.filter(m => m.status === 'active' || m.status === 'awaiting_user')
+  return project.missions.filter(
+    m =>
+      m.status === 'active' ||
+      m.status === 'pending' ||
+      m.status === 'waiting_background' ||
+      m.status === 'awaiting_user'
+  )
+}
+
+/** Controller next_action that is just "inspect <dead uuid>" — not a roadmap. */
+export function isInspectNextAction(next: null | string | undefined): boolean {
+  return /^\s*inspect\s+[0-9a-f-]{8,}/i.test(next ?? '')
 }
 
 /** Missions that need the operator — the attention accents. */

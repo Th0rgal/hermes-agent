@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  isInspectNextAction,
   isStaleControllerHeadline,
   itemAsRoadmapTask,
   leadSignal,
+  liveMissions,
   type ProjectDetail,
   type ProjectRow,
   railOpenItems,
@@ -18,6 +20,39 @@ const row = (partial: Partial<ProjectRow>): ProjectRow => ({
   missions: [],
   slug: 'verity-core',
   ...partial
+})
+
+describe('isInspectNextAction', () => {
+  it('matches inspect <uuid> and ignores real next actions', () => {
+    expect(
+      isInspectNextAction('inspect 51f37d4b-7e27-466a-8c2f-fec0be2bebed')
+    ).toBe(true)
+    expect(isInspectNextAction('watch #2367 CI then merge')).toBe(false)
+  })
+})
+
+describe('liveMissions', () => {
+  it('includes pending and waiting_background writers, not finished ones', () => {
+    const missions = liveMissions(
+      row({
+        missions: [
+          { github_pr: null, id: 'a', status: 'pending', title: 'queued', updated_at: null },
+          {
+            github_pr: null,
+            id: 'b',
+            status: 'waiting_background',
+            title: 'make test',
+            updated_at: null
+          },
+          { github_pr: null, id: 'c', status: 'active', title: 'writer', updated_at: null },
+          { github_pr: null, id: 'd', status: 'completed', title: 'done', updated_at: null },
+          { github_pr: null, id: 'e', status: 'failed', title: 'dead', updated_at: null }
+        ]
+      })
+    )
+
+    expect(missions.map(mission => mission.id)).toEqual(['a', 'b', 'c'])
+  })
 })
 
 describe('sessionGoalLead', () => {

@@ -31,6 +31,7 @@ import {
   fetchProjectState,
   fetchProjectTasks,
   isBoundConversation,
+  isInspectNextAction,
   liveSessionIdFor,
   type MissionChip,
   type ProjectDecision,
@@ -741,10 +742,16 @@ export function ProjectDrawer({
             <>
               {/* Rendered only when at least one field exists — an empty grid
                   still occupies a flex gap and reads as a layout bug. */}
-              {(project.objective || project.next_action || project.blocker || project.controller_cron_id || project.repository) && (
+              {(project.objective ||
+                (project.next_action && !isInspectNextAction(project.next_action)) ||
+                project.blocker ||
+                project.controller_cron_id ||
+                project.repository) && (
                 <div className="grid grid-cols-[8rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-[0.71rem]">
                   {project.objective && <MetaRow label={b.objective}>{project.objective}</MetaRow>}
-                  {project.next_action && <MetaRow label={b.nextAction}>{project.next_action}</MetaRow>}
+                  {project.next_action && !isInspectNextAction(project.next_action) && (
+                    <MetaRow label={b.nextAction}>{project.next_action}</MetaRow>
+                  )}
                   {project.blocker && (
                     <MetaRow label={b.blocker}>
                       <span className="text-amber-500">{project.blocker}</span>

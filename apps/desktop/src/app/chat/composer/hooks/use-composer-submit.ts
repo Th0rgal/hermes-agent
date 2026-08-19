@@ -5,7 +5,7 @@ import { triggerHaptic } from '@/lib/haptics'
 import { hasClarifyRequest, skipClarifyRequest } from '@/store/clarify'
 import { clearSessionDraft, type ComposerAttachment } from '@/store/composer'
 import { resetBrowseState } from '@/store/composer-input-history'
-import { enqueueQueuedPrompt, type QueuedPromptEntry } from '@/store/composer-queue'
+import { type QueuedPromptEntry } from '@/store/composer-queue'
 
 import { cloneAttachments, type QueueEditState } from '../composer-utils'
 import { onComposerSubmitRequest } from '../focus'
@@ -50,7 +50,6 @@ interface UseComposerSubmitArgs {
  * external-submit listener ref.
  */
 export function useComposerSubmit({
-  activeQueueSessionKey,
   activeQueueSessionKeyRef,
   attachments,
   busy,
@@ -78,7 +77,11 @@ export function useComposerSubmit({
 
   // Shared send primitive: fire onSubmit, and if the gateway rejects (accepted
   // === false) or throws, re-load + re-stash the draft so the words survive.
-  const dispatchSubmit = (text: string, attachments?: ComposerAttachment[]) => {
+  const dispatchSubmit = (
+    text: string,
+    attachments?: ComposerAttachment[],
+    extra?: { fromQueue?: boolean }
+  ) => {
     const submittedScope = activeQueueSessionKeyRef.current
     const submittedAttachments = attachments ?? []
 
@@ -92,9 +95,11 @@ export function useComposerSubmit({
     }
 
     void Promise.resolve(
-      attachments
-        ? onSubmit(text, { attachments, composerScope: submittedScope })
-        : onSubmit(text, { composerScope: submittedScope })
+      onSubmit(text, {
+        attachments: attachments ? submittedAttachments : undefined,
+        composerScope: submittedScope,
+        fromQueue: extra?.fromQueue
+      })
     )
       .then(accepted => void (accepted === false ? restore() : clearSessionDraft(submittedScope)))
       .catch(restore)
@@ -178,7 +183,7 @@ export function useComposerSubmit({
       } else if (!compacting && !attachments.length && text.trim()) {
         // Cursor-style stop-and-correct: interrupt the live turn and redirect
         // it with this text. redirect() preserves the shown reasoning/work; if
-        // the turn already ended, steerDraft re-queues so nothing is lost.
+        // the turn already ended, steerDraft sends a new turn (stale busy).
         steerDraft()
       } else if (payloadPresent) {
         // Attachments can't ride a redirect (no tool-result image carriage) —
@@ -206,7 +211,9 @@ export function useComposerSubmit({
 
   // Redirect the live turn with a correction. The gateway either restarts the
   // active model request with its displayed context or waits for the current
-  // tool boundary. If the turn already ended, queue the words instead.
+  // tool boundary. If the turn already ended, send a new turn immediately —
+  // parking in the composer queue only drains on busy→false, so a stale busy
+  // flag (missed terminal event) would swallow the operator's message forever.
   const steerDraft = () => {
     const text = draftRef.current.trim()
 
@@ -220,9 +227,11 @@ export function useComposerSubmit({
     clearDraft()
 
     void Promise.resolve(onSteer(text)).then(accepted => {
-      if (!accepted && activeQueueSessionKey) {
-        enqueueQueuedPrompt(activeQueueSessionKey, { text, attachments: [] })
+      if (accepted) {
+        return
       }
+
+      dispatchSubmit(text, undefined, { fromQueue: true })
     })
   }
 

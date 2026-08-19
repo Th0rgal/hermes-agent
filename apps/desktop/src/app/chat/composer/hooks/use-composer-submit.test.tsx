@@ -88,6 +88,28 @@ describe('useComposerSubmit busy-turn routing', () => {
     expect(onSubmit).not.toHaveBeenCalled()
   })
 
+  it('sends a new turn when steer is rejected because the live turn already ended', async () => {
+    const { hook, onCancel, onSteer, onSubmit, queueCurrentDraft } = renderSubmitHook({
+      busy: true,
+      text: 'route to another vps and find more torrents'
+    })
+    onSteer.mockResolvedValue(false)
+
+    act(() => {
+      hook.result.current.submitDraft()
+    })
+
+    await waitFor(() => expect(onSteer).toHaveBeenCalledWith('route to another vps and find more torrents'))
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith(
+        'route to another vps and find more torrents',
+        expect.objectContaining({ composerScope: 'stored-session', fromQueue: true })
+      )
+    )
+    expect(queueCurrentDraft).not.toHaveBeenCalled()
+    expect(onCancel).not.toHaveBeenCalled()
+  })
+
   it('queues a plain-text follow-up while the active turn is compacting', () => {
     const { hook, onCancel, onSteer, onSubmit, queueCurrentDraft } = renderSubmitHook({
       busy: true,

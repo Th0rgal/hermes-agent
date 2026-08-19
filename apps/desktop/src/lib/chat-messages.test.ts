@@ -9,6 +9,7 @@ import {
   chatMessageText,
   collectUnspokenTurnSpeech,
   completeOpenTimelineParts,
+  dedupeRepeatedTextInParts,
   mergeFinalAssistantText,
   preserveLocalAssistantErrors,
   reasoningPart,
@@ -42,6 +43,29 @@ describe('toChatMessages', () => {
 
     expect(toolPart).toBeDefined()
     expect((toolPart as { args: { command?: string } }).args.command).toBe(longCommand)
+  })
+
+  it('drops provider-echoed duplicate assistant text after a tool-call turn', () => {
+    // Providers re-send the same prose on the stop row after tool_calls.
+    // Turn merge concatenates both; without dedupe the reply paints twice
+    // (Hermes Desktop calendar "Done" bubble duplicated around the tool run).
+    const done =
+      'Done.\n\n- Doctor — dimanche 23 août 2026, 09:20-10:20 (Europe/Paris)\n- Rappel popup 30 min avant (08:50)'
+
+    const messages = toChatMessages([
+      {
+        role: 'assistant',
+        content: done,
+        timestamp: 1,
+        tool_calls: [{ id: 'tc', function: { name: 'terminal', arguments: '{"command":"gws calendar create"}' } }]
+      },
+      { role: 'tool', tool_call_id: 'tc', content: 'created', timestamp: 2 },
+      { role: 'assistant', content: done, timestamp: 3 }
+    ])
+
+    expect(messages).toHaveLength(1)
+    expect(chatMessageText(messages[0])).toBe(done)
+    expect(messages[0].parts.filter(part => part.type === 'text')).toHaveLength(1)
   })
 
   it('keeps a turn with interleaved tool-only rows in a single bubble', () => {
@@ -1443,5 +1467,17 @@ describe('sealOpenToolParts', () => {
     const messages = [assistantWithParts([done])]
 
     expect(sealOpenToolParts(messages)).toBe(messages)
+  })
+})
+
+describe('dedupeRepeatedTextInParts', () => {
+  it('keeps the last copy of verbatim assistant prose and all tool parts', () => {
+    const done = { type: 'text', text: 'Done.\n\n- Doctor — 09:20' } as ChatMessagePart
+    const echo = { type: 'text', text: 'Done.\n\n- Doctor — 09:20' } as ChatMessagePart
+    const tool = { type: 'tool-call', toolCallId: 'tc', toolName: 'terminal' } as ChatMessagePart
+
+    const next = dedupeRepeatedTextInParts([done, tool, echo])
+
+    expect(next).toEqual([tool, echo])
   })
 })

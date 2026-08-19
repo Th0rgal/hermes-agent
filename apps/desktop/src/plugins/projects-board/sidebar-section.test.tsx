@@ -77,7 +77,7 @@ describe('the Projects sidebar section', () => {
 
   it('shows an unread badge for new messages since last open, capped at 9+', async () => {
     const { setSessions } = await import('@/store/session')
-    const { $sessionLastSeenCounts } = await import('@/store/session-unread')
+    const { $sessionSeenCounts } = await import('@/store/session-unread')
 
     const sessionInfo = (id: string, messageCount: number) => ({
       archived: false,
@@ -99,7 +99,7 @@ describe('the Projects sidebar section', () => {
     })
 
     setSessions([sessionInfo('sess-verity', 12), sessionInfo('sess-hermes', 40)])
-    $sessionLastSeenCounts.set({ 'sess-hermes': 9, 'sess-verity': 9 })
+    $sessionSeenCounts.set({ default: { 'sess-hermes': 9, 'sess-verity': 9 } })
 
     const { dispose } = renderSection([
       row('verity', 'active', 'sess-verity'),
@@ -120,7 +120,7 @@ describe('the Projects sidebar section', () => {
     await waitFor(() => expect(screen.queryByText('3')).toBeNull())
 
     setSessions([])
-    $sessionLastSeenCounts.set({})
+    $sessionSeenCounts.set({})
     dispose()
   })
 

@@ -10,6 +10,7 @@ import {
   collectUnspokenTurnSpeech,
   completeOpenTimelineParts,
   dedupeRepeatedTextInParts,
+  dedupeRepeatedToolCallsInParts,
   mergeFinalAssistantText,
   preserveLocalAssistantErrors,
   reasoningPart,
@@ -1479,5 +1480,25 @@ describe('dedupeRepeatedTextInParts', () => {
     const next = dedupeRepeatedTextInParts([done, tool, echo])
 
     expect(next).toEqual([tool, echo])
+  })
+})
+
+describe('dedupeRepeatedToolCallsInParts', () => {
+  it('keeps the completed copy when the same toolCallId is echoed', () => {
+    const spinning = {
+      type: 'tool-call',
+      toolCallId: 'tc',
+      toolName: 'terminal'
+    } as ChatMessagePart
+    const done = {
+      type: 'tool-call',
+      toolCallId: 'tc',
+      toolName: 'terminal',
+      result: { output: 'ok' }
+    } as ChatMessagePart
+
+    const next = dedupeRepeatedToolCallsInParts([spinning, done])
+
+    expect(next).toEqual([done])
   })
 })

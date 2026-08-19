@@ -340,6 +340,48 @@ export function dedupeRepeatedTextInParts(parts: ChatMessagePart[]): ChatMessage
 }
 
 /**
+ * Collapse tool-call parts that share a `toolCallId`. Providers that echo a
+ * whole assistant row after tools replay the same calls; unique-id rewriting
+ * would then paint two "Ran …" groups (one still spinning). Prefer the copy
+ * that already has a result.
+ */
+export function dedupeRepeatedToolCallsInParts(parts: ChatMessagePart[]): ChatMessagePart[] {
+  const keep = new Map<string, number>()
+
+  parts.forEach((part, index) => {
+    if (part.type !== 'tool-call' || !part.toolCallId) {
+      return
+    }
+
+    const previous = keep.get(part.toolCallId)
+
+    if (previous === undefined) {
+      keep.set(part.toolCallId, index)
+      return
+    }
+
+    const previousPart = parts[previous]
+    const previousHasResult =
+      previousPart.type === 'tool-call' && 'result' in previousPart && previousPart.result != null
+    const hasResult = 'result' in part && part.result != null
+
+    if (hasResult && !previousHasResult) {
+      keep.set(part.toolCallId, index)
+    }
+  })
+
+  const dropped = parts.filter((part, index) => {
+    if (part.type !== 'tool-call' || !part.toolCallId) {
+      return true
+    }
+
+    return keep.get(part.toolCallId) === index
+  })
+
+  return dropped.length === parts.length ? parts : dropped
+}
+
+/**
  * Merge the final assistant text into a message's parts.
  *
  * - Removes all existing `text` parts (they were streamed deltas, now superseded
@@ -1430,7 +1472,12 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
 
   const withoutGeneratedImageEchoes = result.map(message =>
     message.role === 'assistant'
-      ? { ...message, parts: dedupeRepeatedTextInParts(dedupeGeneratedImageEchoesInParts(message.parts)) }
+      ? {
+          ...message,
+          parts: dedupeRepeatedToolCallsInParts(
+            dedupeRepeatedTextInParts(dedupeGeneratedImageEchoesInParts(message.parts))
+          )
+        }
       : message
   )
 

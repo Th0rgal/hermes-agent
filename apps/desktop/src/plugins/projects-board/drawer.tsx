@@ -645,7 +645,8 @@ export function ProjectDrawer({
   const { data: detail, error } = useQuery({
     enabled: Boolean(slug),
     queryFn: () => fetchProject(slug!),
-    queryKey: projectKey(slug ?? '')
+    queryKey: projectKey(slug ?? ''),
+    refetchInterval: 15_000
   })
 
   const { data: tasksFallback } = useQuery({

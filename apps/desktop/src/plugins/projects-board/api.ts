@@ -16,6 +16,7 @@ import {
   $goalsBySession,
   $projectBoundSessionIds,
   atom,
+  host,
   type PluginRestOptions,
   type PluginStorage,
   queryClient
@@ -246,14 +247,84 @@ const COLLAPSED_KEY = 'collapsedColumns'
 const NOTIFY_KEY = 'notifyAttention'
 const NOTIFIED_AT_KEY = 'attentionNotifiedAt'
 
-/** One `{invalidate, mission_id}` frame from the backend relay → refresh the
- *  roster. The poll stays as the fallback; the socket just makes a mission
- *  flipping to `awaiting_user` (or done) show up at once. */
+/** Prefix for every projects-board React Query key. Invalidating this root
+ *  refreshes the roster AND the open project's detail/roadmap/tasks — the
+ *  rail's checklist lives on `projectKey(slug)`, not on `PROJECTS_KEY`. */
+export const BOARD_QUERY_ROOT = ['projects-board'] as const
+
+/** Drop cached board data. A slug targets that project's detail/tasks/state
+ *  plus the roster; omitting it refreshes the whole plugin cache. */
+export function invalidateBoardQueries(slug?: null | string): void {
+  if (slug) {
+    void queryClient.invalidateQueries({ queryKey: PROJECTS_KEY })
+    void queryClient.invalidateQueries({ queryKey: projectKey(slug) })
+    void queryClient.invalidateQueries({ queryKey: tasksKey(slug) })
+    void queryClient.invalidateQueries({ queryKey: stateKey(slug) })
+    return
+  }
+
+  void queryClient.invalidateQueries({ queryKey: BOARD_QUERY_ROOT })
+}
+
+function slugForSession(sessionId?: null | string): null | string {
+  if (!sessionId) {
+    return null
+  }
+
+  return $projectBoundSessionIds.get()[sessionId] ?? null
+}
+
+const PROJECT_TOOL_RE =
+  /(?:^|_|:)(plan_project_tasks|get_project|list_project|patch_project|update_project|cancel_project|project_task|upsert_track)/i
+
+/** MCP / native tools that mutate or read the project item inventory. */
+export function projectToolRefreshesBoard(name: string): boolean {
+  return PROJECT_TOOL_RE.test(name)
+}
+
+/** Gateway events that mean the bound chat just changed project state.
+ *  Returns the slug to refresh, `true` for a full-board refresh, or null. */
+export function gatewayEventRefreshesBoard(event: {
+  payload?: { name?: string; running?: boolean } | null
+  session_id?: string
+  type?: string
+}): null | string | true {
+  const type = event.type
+  const slug = slugForSession(event.session_id)
+
+  if (type === 'message.complete' || (type === 'session.info' && event.payload?.running === false)) {
+    return slug
+  }
+
+  if (type === 'tool.complete' && projectToolRefreshesBoard(String(event.payload?.name ?? ''))) {
+    return slug ?? true
+  }
+
+  return null
+}
+
+function applyGatewayRefresh(event: {
+  payload?: { name?: string; running?: boolean } | null
+  session_id?: string
+  type?: string
+}): void {
+  const target = gatewayEventRefreshesBoard(event)
+
+  if (target === true) {
+    invalidateBoardQueries()
+  } else if (typeof target === 'string') {
+    invalidateBoardQueries(target)
+  }
+}
+
+/** One `{invalidate, slug?, mission_id}` frame from the backend relay. The
+ *  poll stays as the fallback; the socket makes a mission/item flip show up
+ *  in the open rail, not just the roster. */
 function onEventFrame(data: unknown): void {
-  const frame = data as { type?: string } | null
+  const frame = data as { slug?: string; type?: string } | null
 
   if (frame?.type === 'invalidate') {
-    void queryClient.invalidateQueries({ queryKey: PROJECTS_KEY })
+    invalidateBoardQueries(typeof frame.slug === 'string' && frame.slug.trim() ? frame.slug : null)
   }
 }
 
@@ -287,6 +358,10 @@ export function bindApi(restFn: Rest, storage?: PluginStorage, socket?: Socket):
   previousBuckets = null
 
   const unsubscribe = socket ? socket('/events', onEventFrame) : null
+
+  unsubs.push(host.onEvent('message.complete', applyGatewayRefresh))
+  unsubs.push(host.onEvent('session.info', applyGatewayRefresh))
+  unsubs.push(host.onEvent('tool.complete', applyGatewayRefresh))
 
   let lastGoalPost = ''
 

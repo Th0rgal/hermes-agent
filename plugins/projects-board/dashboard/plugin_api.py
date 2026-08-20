@@ -43,6 +43,8 @@ _REFRESH_EVENTS = frozenset(
         "mission_title_changed",
         "mission_metadata_updated",
         "mission_settings_updated",
+        "project_updated",
+        "project_status_changed",
     }
 )
 
@@ -404,12 +406,13 @@ async def steer_mission(
 
 @router.websocket("/events")
 async def stream_events(ws: WebSocket) -> None:
-    """Relay sandboxed.sh mission lifecycle events to the plugin so the surface
+    """Relay sandboxed.sh lifecycle events to the plugin so the surface
     updates on push, not just the poll. We open the backend SSE stream
     (`/api/control/stream`) with a minted token — the credential stays in the
     gateway, never the renderer — and forward a compact `{invalidate,
-    mission_id}` frame whenever a mission's lifecycle moves. The client turns
-    that into a targeted React Query invalidation.
+    mission_id, slug?}` frame whenever a mission or project row moves. The
+    client invalidates the roster AND the open project's roadmap, not just
+    the card list.
 
     The poll remains the fallback: if this stream drops or the backend is
     absent, the surface still refreshes on its interval.
@@ -451,9 +454,14 @@ async def stream_events(ws: WebSocket) -> None:
                     if not isinstance(event, dict):
                         continue
                     if event.get("type") in _REFRESH_EVENTS:
-                        await ws.send_json(
-                            {"type": "invalidate", "mission_id": event.get("mission_id")}
-                        )
+                        slug = event.get("slug") or event.get("project")
+                        frame = {
+                            "type": "invalidate",
+                            "mission_id": event.get("mission_id"),
+                        }
+                        if isinstance(slug, str) and slug.strip():
+                            frame["slug"] = slug.strip()
+                        await ws.send_json(frame)
     except WebSocketDisconnect:
         return
     except httpx.HTTPError as error:

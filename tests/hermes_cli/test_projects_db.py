@@ -68,6 +68,28 @@ def test_get_project_resolves_routes_json_alias(conn, tmp_path, monkeypatch):
     assert pdb.get_project(conn, "ghost") is None
 
 
+def test_get_project_resolves_canonical_slug_via_alias(conn, tmp_path, monkeypatch):
+    """deliver=project:verity-lido finds the Hermes row still slugged lido-audit."""
+    pid = pdb.create_project(conn, name="Lido audit", folders=["/tmp/lido"])
+    routes = tmp_path / "routes.json"
+    routes.write_text('{"lido-audit": "verity-lido", "lido": "verity-lido"}\n')
+    monkeypatch.setenv("HERMES_PROJECTS_DIR", str(tmp_path))
+
+    assert pdb.get_project(conn, "lido-audit").id == pid
+    assert pdb.get_project(conn, "verity-lido").id == pid
+    assert pdb.get_project(conn, "lido").id == pid
+
+
+def test_get_project_loads_routes_json_from_hermes_home(conn, tmp_path, monkeypatch):
+    pid = pdb.create_project(conn, name="Verity", folders=["/tmp/verity"])
+    overlay = tmp_path / "projects" / "active"
+    overlay.mkdir(parents=True)
+    (overlay / "routes.json").write_text('{"verity-core": "verity"}\n')
+    monkeypatch.setattr(pdb, "get_hermes_home", lambda: tmp_path)
+
+    assert pdb.get_project(conn, "verity-core").id == pid
+
+
 
 
 

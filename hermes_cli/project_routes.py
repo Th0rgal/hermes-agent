@@ -54,6 +54,13 @@ CREATE INDEX IF NOT EXISTS idx_project_session_routes_session
 # bind time so a route can never silently re-target a messaging thread.
 ROUTABLE_SESSION_SOURCES = frozenset({"desktop", "webui", "api_server", "subagent"})
 
+# Accidental SessionDB closures that must not kill a project control chat.
+# Desktop websocket teardown stamps ``ws_orphan_reap`` even while cron and
+# mission callbacks still have to land in that transcript (EIP-8282, 2026-08-24).
+RECLAIMABLE_SESSION_END_REASONS = frozenset(
+    {"ws_orphan_reap", "agent_close", "idle_timeout", "lru_evict"}
+)
+
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create the routes table if missing (idempotent, additive)."""
@@ -137,12 +144,37 @@ class _OwnedSessionDB:
         return False
 
 
+def reopen_reclaimable_session(db, session_id: str, row: Optional[dict] = None) -> Optional[dict]:
+    """Reopen a project-bound session ended only by a recoverable accident.
+
+    Compression / ``session_reset`` / ``session_switch`` stay closed — those
+    are real conversation boundaries. Returns the (possibly refreshed) row.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return row
+    current = row if row is not None else (db.get_session(sid) if hasattr(db, "get_session") else None)
+    if not current or not current.get("ended_at"):
+        return current
+    reason = str(current.get("end_reason") or "").strip().lower()
+    if reason not in RECLAIMABLE_SESSION_END_REASONS:
+        return current
+    reopen = getattr(db, "reopen_session", None)
+    if not callable(reopen):
+        return current
+    reopen(sid)
+    refreshed = db.get_session(sid) if hasattr(db, "get_session") else current
+    return refreshed or current
+
+
 def _live_session(db, session_id: str) -> tuple[str, dict]:
     """Resolve ``session_id`` to its live continuation tip + session row.
 
     Uses only public SessionDB API: exact/prefix resolution, then the
     compression-continuation walk. Raises LookupError when the session (or
     its tip) does not exist — callers must surface the error, not fall back.
+    A ``ws_orphan_reap`` (or similar accidental) end is reopened so cron
+    delivery keeps using the operator chat instead of looking dead.
     """
     sid = str(session_id or "").strip()
     if not sid:
@@ -155,6 +187,7 @@ def _live_session(db, session_id: str) -> tuple[str, dict]:
     row = db.get_session(resolved)
     if not row:
         raise LookupError(f"session '{session_id}' not found")
+    row = reopen_reclaimable_session(db, resolved, row) or row
     return resolved, row
 
 

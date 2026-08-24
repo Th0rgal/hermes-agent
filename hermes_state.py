@@ -10713,6 +10713,43 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
             return best if best is not None else session_id
 
+    def resolve_delivery_session_id(self, session_id: str) -> str:
+        """Live operator-facing tip for project/cron delivery.
+
+        ``resolve_resume_session_id`` refuses ``_delegate_from`` / subagent
+        children so ``--resume`` cannot hijack a worker. The operator often
+        *is* in that child (Lido ``c0b8a8`` is a subagent of ``e31271``).
+        Delivery must follow the live non-cron, non-tool descendant with the
+        most recent activity, then the compression walk already applied.
+        """
+        if not session_id:
+            return session_id
+        current = self.resolve_resume_session_id(session_id) or session_id
+        seen = {current}
+        with self._lock:
+            for _ in range(32):
+                try:
+                    row = self._conn.execute(
+                        "SELECT id FROM sessions "
+                        "WHERE parent_session_id = ? "
+                        "  AND ended_at IS NULL "
+                        "  AND COALESCE(source, '') NOT IN ('cron', 'tool') "
+                        "ORDER BY COALESCE(last_activity_at, started_at) DESC, "
+                        "  started_at DESC, id DESC "
+                        "LIMIT 1",
+                        (current,),
+                    ).fetchone()
+                except Exception:
+                    return current
+                if row is None:
+                    break
+                child_id = row["id"] if hasattr(row, "keys") else row[0]
+                if not child_id or child_id in seen:
+                    break
+                seen.add(child_id)
+                current = child_id
+        return current
+
     def get_messages_as_conversation(
         self,
         session_id: str,

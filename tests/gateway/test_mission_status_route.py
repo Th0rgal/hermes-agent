@@ -253,9 +253,11 @@ def test_origin_ownership_walks_compression_parent():
     assert resolve_mission_delivery_session(payload, db) == "child"
 
 
-def test_should_wake_skips_huge_operator_sessions():
+def test_should_wake_huge_operator_sessions():
+    # The wake prompt forbids tools; a 500-message control chat still needs
+    # the one-line "mission finished" notice.
     db = _FakeSessionDB({"s1": {"source": "desktop", "message_count": 515}})
-    assert should_wake_mission_callback(db, "s1") is False
+    assert should_wake_mission_callback(db, "s1") is True
     db = _FakeSessionDB({"s1": {"source": "desktop", "message_count": 12}})
     assert should_wake_mission_callback(db, "s1") is True
     assert PROJECT_OPERATOR_WAKE_MESSAGE_CAP == 80

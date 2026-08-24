@@ -30,10 +30,10 @@ _TERMINAL = {
     "awaitinguser",
 }
 
-# An operator project chat that already holds this many messages is the
-# control surface, not a worker. Waking it with "inspect and continue"
-# dumps hundreds of tools into the session the user is typing in and then
-# auto-compresses — the Verity/Lido "session storage was busy" loop.
+# Legacy cap kept for tests/import compatibility. The wake prompt is now a
+# one-or-two-sentence notice that forbids tools, so a large operator session
+# must still be woken — otherwise callbacks append silently and the chat
+# looks dead (Lido/EIP-8282, 2026-08-24). Only a compression lock skips.
 PROJECT_OPERATOR_WAKE_MESSAGE_CAP = 80
 
 MISSION_CALLBACK_WAKE_PROMPT = (
@@ -294,9 +294,9 @@ def _last_message_role(session_db: Any, session_id: str) -> Optional[str]:
 def should_wake_mission_callback(session_db: Any, live_id: str) -> bool:
     """Whether to start an agent turn after appending a mission callback.
 
-    Append always happens. The wake is what starts a 200-tool inspect loop
-    in the operator session. Skip it when the session is already huge or
-    another writer is compacting — the project controller owns autonomy.
+    Append always happens. The wake prompt is a one-or-two-sentence notice
+    that forbids tools. Skip only while another writer holds the compression
+    lock — a large operator session must still be told that a mission finished.
     """
     sid = (live_id or "").strip()
     if not sid:
@@ -312,23 +312,6 @@ def should_wake_mission_callback(session_db: Any, live_id: str) -> bool:
                 return False
         except Exception:
             logger.debug("compression-lock check failed for %s", sid, exc_info=True)
-    getter = getattr(db, "get_session", None)
-    if callable(getter):
-        try:
-            row = getter(sid) or {}
-        except Exception:
-            row = {}
-        count = None
-        if isinstance(row, dict):
-            count = row.get("message_count")
-        if isinstance(count, int) and count >= PROJECT_OPERATOR_WAKE_MESSAGE_CAP:
-            logger.info(
-                "skip mission wake for %s: message_count=%s >= %s",
-                sid,
-                count,
-                PROJECT_OPERATOR_WAKE_MESSAGE_CAP,
-            )
-            return False
     return True
 
 

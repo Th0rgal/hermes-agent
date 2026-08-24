@@ -2119,7 +2119,11 @@ def cron_delivery_targets() -> list[dict]:
 # WebUI and Desktop are local session-store surfaces, not gateway platforms.
 # They must never reach ``gateway.config.Platform(...)``. Tag their targets so
 # ``_deliver_result`` can split them out before the messaging-adapter loop.
-_LOCAL_SESSION_PLATFORMS = frozenset({"desktop", "webui"})
+# Every SessionDB-backed surface. ``api_server`` / ``subagent`` used to fall
+# through to the messaging-adapter loop, which then failed with
+# "API server uses HTTP request/response, not send()" and never appended
+# the cron result to the conversation the operator is looking at.
+_LOCAL_SESSION_PLATFORMS = frozenset({"desktop", "webui", "api_server", "subagent", "webhook"})
 _LOCAL_SESSION_TARGET_KIND = "local_session"
 
 
@@ -2153,9 +2157,10 @@ def _resolve_project_route_target(job: dict, project_token: str) -> Optional[dic
     is dropped and the delivery reports an error. It must NEVER fall back to
     the currently open Desktop session, the active project, or a platform
     home channel: that fallback is exactly the misrouting this store exists
-    to prevent. Compression/continuation is handled inside
+    to prevent. Compression/continuation and the live operator descendant
+    (including a subagent adopted as the control chat) are handled inside
     ``resolve_route_target``, which atomically migrates the stored route to
-    the live continuation tip before returning it.
+    the live tip. Delivery is always a SessionDB append.
     """
     token = (project_token or "").strip()
     if not token:
@@ -2180,24 +2185,11 @@ def _resolve_project_route_target(job: dict, project_token: str) -> Optional[dic
         )
         return None
 
-    if target.source in _LOCAL_SESSION_PLATFORMS or target.source == "webhook":
+    if target.source in _LOCAL_SESSION_PLATFORMS:
         # A route only exists because an operator explicitly bound this session.
-        # `webhook` sessions are not routable by default (ROUTABLE_SESSION_SOURCES
-        # in hermes_cli/project_routes.py) — they can only be bound via
-        # allow_unroutable_source=True, which is exactly how a live project
-        # conversation backed by the Hermes Conversations bridge gets bound.
-        # Honor that binding: append to the session like any other local
-        # surface, rather than silently dropping every controller delivery for
-        # not being desktop/webui (the bug that made active projects look dead).
+        # Honor that binding: append to the SessionDB transcript. Never send()
+        # through a gateway adapter — api_server/subagent have no send().
         return _local_session_delivery_target(target.source, target.session_id)
-    if target.source == "api_server":
-        # _deliver_result routes api_server targets through the same durable
-        # local-session append; it just isn't tagged as a local platform.
-        return {
-            "platform": "api_server",
-            "chat_id": target.session_id,
-            "thread_id": None,
-        }
     logger.warning(
         "Job '%s': project '%s' routes to session %s with unsupported "
         "source '%s' — dropping target",
@@ -2650,7 +2642,11 @@ def _deliver_to_local_session(
         db = SessionDB()
         try:
             sid = session_id
-            for resolver_name in ("resolve_session_id", "resolve_resume_session_id"):
+            for resolver_name in (
+                "resolve_session_id",
+                "resolve_resume_session_id",
+                "resolve_delivery_session_id",
+            ):
                 resolver = getattr(db, resolver_name, None)
                 if callable(resolver):
                     sid = resolver(sid) or sid

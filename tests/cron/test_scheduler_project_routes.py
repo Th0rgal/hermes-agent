@@ -92,14 +92,23 @@ class TestProjectTargetResolution:
         assert target["platform"] == "webui"
         assert target["session_id"] == "web-1"
 
-    def test_api_server_source_routes_as_api_server_target(self, route_env):
+    def test_api_server_source_routes_as_local_session_target(self, route_env):
         _bind(route_env, "Aurora", "api-1", source="api_server")
         target = _resolve_delivery_target({"id": "j", "deliver": "project:aurora"})
         assert target == {
+            "kind": "local_session",
             "platform": "api_server",
             "chat_id": "api-1",
+            "session_id": "api-1",
             "thread_id": None,
         }
+
+    def test_subagent_source_routes_as_local_session_target(self, route_env):
+        _bind(route_env, "Aurora", "sub-1", source="subagent")
+        target = _resolve_delivery_target({"id": "j", "deliver": "project:aurora"})
+        assert target["kind"] == "local_session"
+        assert target["platform"] == "subagent"
+        assert target["session_id"] == "sub-1"
 
     def test_unbound_project_yields_no_target(self, route_env, monkeypatch):
         """No route → no target. A configured home channel and an open
@@ -171,6 +180,29 @@ class TestProjectRouteContinuation:
         first = _resolve_delivery_target({"id": "j", "deliver": "project:aurora"})
         second = _resolve_delivery_target({"id": "j", "deliver": "project:aurora"})
         assert first["session_id"] == second["session_id"] == "child"
+
+    def test_delivery_follows_live_subagent_child(self, route_env):
+        """Operator often lives in a subagent child of the bound session
+        (Lido c0b8a8). Resume refuses _delegate_from; delivery must follow."""
+        session_db = route_env["session_db"]
+        _bind(route_env, "Aurora", "parent", source="api_server")
+        session_db.create_session(
+            session_id="child",
+            source="subagent",
+            parent_session_id="parent",
+        )
+        session_db.append_message("child", "user", "operator is here")
+
+        target = _resolve_delivery_target({"id": "j", "deliver": "project:aurora"})
+        assert target["session_id"] == "child"
+        assert target["kind"] == "local_session"
+
+        job = {"id": "j", "name": "aurora-report", "deliver": "project:aurora"}
+        assert _deliver_result(job, "hello from cron") is None
+        child_msgs = session_db.get_messages("child")
+        assert any("hello from cron" in str(m.get("content", "")) for m in child_msgs)
+        parent_msgs = session_db.get_messages("parent")
+        assert not any("hello from cron" in str(m.get("content", "")) for m in parent_msgs)
 
 
 class TestProjectRouteDelivery:

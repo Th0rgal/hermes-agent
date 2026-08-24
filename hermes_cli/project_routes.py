@@ -52,7 +52,7 @@ CREATE INDEX IF NOT EXISTS idx_project_session_routes_session
 # delivery surface is the SessionDB transcript itself. Gateway chat platforms
 # (telegram/discord/...) have their own origin routing and are rejected at
 # bind time so a route can never silently re-target a messaging thread.
-ROUTABLE_SESSION_SOURCES = frozenset({"desktop", "webui", "api_server"})
+ROUTABLE_SESSION_SOURCES = frozenset({"desktop", "webui", "api_server", "subagent"})
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -149,6 +149,9 @@ def _live_session(db, session_id: str) -> tuple[str, dict]:
         raise LookupError("session_id is required")
     resolved = db.resolve_session_id(sid) or sid
     resolved = db.resolve_resume_session_id(resolved) or resolved
+    delivery = getattr(db, "resolve_delivery_session_id", None)
+    if callable(delivery):
+        resolved = delivery(resolved) or resolved
     row = db.get_session(resolved)
     if not row:
         raise LookupError(f"session '{session_id}' not found")

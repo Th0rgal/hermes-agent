@@ -169,6 +169,41 @@ class TestResolveRouteTarget:
         assert target.project_id == project_id
         assert target.session_id == "sess-verity"
 
+    def test_canonical_slug_resolves_when_db_row_uses_alias(
+        self, conn, session_db, tmp_path, monkeypatch
+    ):
+        """deliver=project:verity-lido finds the bound lido-audit row."""
+        project_id = pdb.create_project(
+            conn, name="Lido audit", folders=["/tmp/lido"]
+        )
+        _mk_session(session_db, "sess-lido")
+        routes.bind_route(conn, project_id, "sess-lido", session_db=session_db)
+        (tmp_path / "routes.json").write_text(
+            '{"lido-audit": "verity-lido", "lido": "verity-lido"}\n'
+        )
+        monkeypatch.setenv("HERMES_PROJECTS_DIR", str(tmp_path))
+
+        target = routes.resolve_route_target(
+            conn, "verity-lido", session_db=session_db
+        )
+        assert target.project_id == project_id
+        assert target.session_id == "sess-lido"
+
+    def test_resolve_reopens_ws_orphan_reaped_session(
+        self, conn, session_db, project_id
+    ):
+        _mk_session(session_db, "sess-1")
+        routes.bind_route(conn, project_id, "sess-1", session_db=session_db)
+        session_db.end_session("sess-1", end_reason="ws_orphan_reap")
+        assert session_db.get_session("sess-1")["ended_at"] is not None
+
+        target = routes.resolve_route_target(
+            conn, project_id, session_db=session_db
+        )
+        assert target.session_id == "sess-1"
+        row = session_db.get_session("sess-1")
+        assert row["ended_at"] is None
+
     def test_archived_project_raises(self, conn, session_db, project_id):
         _mk_session(session_db, "sess-1")
         routes.bind_route(conn, project_id, "sess-1", session_db=session_db)

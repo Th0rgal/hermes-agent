@@ -2652,6 +2652,12 @@ def _deliver_to_local_session(
                     sid = resolver(sid) or sid
             if not db.get_session(sid):
                 return f"{platform_name} session '{session_id}' not found"
+            try:
+                from hermes_cli.project_routes import reopen_reclaimable_session
+
+                reopen_reclaimable_session(db, sid)
+            except Exception:
+                pass
             # Signature-based flood suppression: skip when this controller's
             # normalized STATE_SIGNATURE is identical to the last one delivered
             # into this session (unchanged material state).

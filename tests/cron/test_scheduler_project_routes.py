@@ -181,6 +181,43 @@ class TestProjectRouteContinuation:
         second = _resolve_delivery_target({"id": "j", "deliver": "project:aurora"})
         assert first["session_id"] == second["session_id"] == "child"
 
+    def test_canonical_slug_resolves_when_db_row_uses_alias(
+        self, route_env, tmp_path, monkeypatch
+    ):
+        """Sandboxed routes.json maps lido-audit -> verity-lido while the
+        Hermes Project row stays slug=lido-audit. Cron deliver=project:verity-lido
+        must find that bound session, not drop the target."""
+        _bind(route_env, "Lido audit", "sess-lido")
+        (tmp_path / "routes.json").write_text(
+            '{"lido-audit": "verity-lido", "lido": "verity-lido"}\n'
+        )
+        monkeypatch.setenv("HERMES_PROJECTS_DIR", str(tmp_path))
+
+        target = _resolve_delivery_target(
+            {"id": "j", "deliver": "project:verity-lido"}
+        )
+        assert target is not None
+        assert target["session_id"] == "sess-lido"
+        assert target["kind"] == "local_session"
+
+    def test_delivery_reopens_ws_orphan_reaped_session(self, route_env):
+        """Desktop websocket teardown stamps ws_orphan_reap. Delivery must
+        still append and reopen so the operator chat is live again."""
+        session_db = route_env["session_db"]
+        _bind(route_env, "Aurora", "sess-1")
+        session_db.append_message("sess-1", "user", "hi")
+        session_db.end_session("sess-1", end_reason="ws_orphan_reap")
+        assert session_db.get_session("sess-1")["ended_at"] is not None
+
+        job = {"id": "j", "name": "aurora-report", "deliver": "project:aurora"}
+        assert _deliver_result(job, "back online") is None
+
+        row = session_db.get_session("sess-1")
+        assert row["ended_at"] is None
+        assert row.get("end_reason") in (None, "")
+        msgs = session_db.get_messages("sess-1")
+        assert any("back online" in str(m.get("content", "")) for m in msgs)
+
     def test_delivery_follows_live_subagent_child(self, route_env):
         """Operator often lives in a subagent child of the bound session
         (Lido c0b8a8). Resume refuses _delegate_from; delivery must follow."""

@@ -452,7 +452,15 @@ def _project_alias_map() -> dict[str, str]:
     if env:
         candidates.append(Path(env) / "routes.json")
     home = get_hermes_home()
+    # HERMES_HOME is sometimes the profile dir (`~/.hermes`) and sometimes the
+    # workspace that *contains* `.hermes` (agent-core). Try both, plus cwd,
+    # so `deliver=project:verity-lido` still folds onto the bound `lido-audit`
+    # row when the overlay lives in either layout.
+    candidates.append(home / "projects" / "active" / "routes.json")
     candidates.append(home / ".hermes" / "projects" / "active" / "routes.json")
+    cwd = Path.cwd()
+    candidates.append(cwd / ".hermes" / "projects" / "active" / "routes.json")
+    candidates.append(cwd / "projects" / "active" / "routes.json")
     for path in candidates:
         try:
             raw = path.read_text(encoding="utf-8")

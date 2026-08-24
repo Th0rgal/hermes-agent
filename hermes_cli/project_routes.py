@@ -29,9 +29,11 @@ API is used.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional
 
 from hermes_cli.sqlite_util import write_txn
@@ -241,6 +243,7 @@ def bind_route(
         )
     route = get_route(conn, proj.id)
     assert route is not None
+    write_sandboxed_binding(proj.slug, live_id)
     return route
 
 
@@ -279,6 +282,131 @@ def list_routes(conn: sqlite3.Connection) -> List[ProjectRoute]:
         "SELECT * FROM project_session_routes ORDER BY project_id ASC"
     ).fetchall()
     return [_route_from_row(r) for r in rows]
+
+
+def _sandboxed_projects_db() -> Optional[Path]:
+    env = (os.environ.get("SANDBOXED_PROJECTS_DB") or "").strip()
+    if env:
+        path = Path(env)
+        if path.is_file():
+            return path
+    for candidate in (Path("/root/.sandboxed-sh/projects.db"),):
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def lookup_sandboxed_binding(slug: str) -> Optional[str]:
+    """Roster bind for ``slug`` (and routes.json nicknames). None if unavailable."""
+    token = str(slug or "").strip()
+    if not token:
+        return None
+    path = _sandboxed_projects_db()
+    if path is None:
+        return None
+    keys = [token]
+    try:
+        from hermes_cli.projects_db import _slug_lookup_keys
+
+        for key in _slug_lookup_keys(token):
+            if key not in keys:
+                keys.append(key)
+    except Exception:
+        pass
+    try:
+        sdb = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        for key in keys:
+            row = sdb.execute(
+                "SELECT control_session_id FROM project_bindings WHERE slug = ?",
+                (key,),
+            ).fetchone()
+            if row and str(row[0] or "").strip():
+                return str(row[0]).strip()
+    finally:
+        sdb.close()
+    return None
+
+
+def write_sandboxed_binding(canonical: str, session_id: str) -> None:
+    """Best-effort replica of a Hermes bind into the roster store."""
+    slug = str(canonical or "").strip()
+    sid = str(session_id or "").strip()
+    if not slug or not sid:
+        return
+    path = _sandboxed_projects_db()
+    if path is None:
+        return
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        sdb = sqlite3.connect(str(path))
+        try:
+            sdb.execute(
+                "INSERT INTO project_bindings (slug, control_session_id, bound_at, bound_by) "
+                "VALUES (?, ?, ?, 'hermes') "
+                "ON CONFLICT(slug) DO UPDATE SET "
+                "control_session_id = excluded.control_session_id, "
+                "bound_at = excluded.bound_at, "
+                "bound_by = excluded.bound_by",
+                (slug, sid, now),
+            )
+            sdb.commit()
+        finally:
+            sdb.close()
+    except sqlite3.Error:
+        return
+
+
+def _repair_route_from_sandboxed(conn: sqlite3.Connection, proj, *, session_db=None) -> Optional[ProjectRoute]:
+    """If the roster has a bind and Hermes does not, copy it in. Never invent."""
+    sid = lookup_sandboxed_binding(proj.slug)
+    if not sid:
+        return None
+    try:
+        return bind_route(conn, proj.id, sid, session_db=session_db)
+    except (LookupError, ValueError):
+        return None
+
+
+def session_is_project_control(session_id: str, *, session_db=None) -> bool:
+    """True when ``session_id`` is (or is a continuation of) a bound control chat."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    from hermes_cli import projects_db as pdb
+
+    chain = {sid}
+    with _OwnedSessionDB(session_db) as db:
+        current = sid
+        for _ in range(32):
+            row = db.get_session(current) if hasattr(db, "get_session") else None
+            if not row:
+                break
+            parent = str(row.get("parent_session_id") or "").strip()
+            if not parent or parent in chain:
+                break
+            chain.add(parent)
+            current = parent
+        try:
+            live = _live_session(db, sid)[0]
+            chain.add(live)
+        except LookupError:
+            pass
+    try:
+        with pdb.connect_closing() as conn:
+            ensure_schema(conn)
+            rows = conn.execute("SELECT session_id FROM project_session_routes").fetchall()
+    except Exception:
+        return False
+    bound = {str(r[0] if not hasattr(r, "keys") else r["session_id"]) for r in rows}
+    return bool(chain & bound)
 
 
 def migrate_session_routes(
@@ -331,11 +459,22 @@ def resolve_route_target(
         "SELECT * FROM project_session_routes WHERE project_id = ?", (proj.id,)
     ).fetchone()
     if row is None:
-        raise LookupError(
-            f"project '{proj.slug}' has no explicit session route; bind one "
-            f"with project_route_set (explicit routes are required — the "
-            f"current Desktop session is never used as a fallback)"
-        )
+        repaired = _repair_route_from_sandboxed(conn, proj, session_db=session_db)
+        if repaired is None:
+            raise LookupError(
+                f"project '{proj.slug}' has no explicit session route; bind one "
+                f"with project_route_set (explicit routes are required — the "
+                f"current Desktop session is never used as a fallback)"
+            )
+        row = conn.execute(
+            "SELECT * FROM project_session_routes WHERE project_id = ?", (proj.id,)
+        ).fetchone()
+        if row is None:
+            raise LookupError(
+                f"project '{proj.slug}' has no explicit session route; bind one "
+                f"with project_route_set (explicit routes are required — the "
+                f"current Desktop session is never used as a fallback)"
+            )
     route = _route_from_row(row)
     with _OwnedSessionDB(session_db) as db:
         live_id, session_row = _live_session(db, route.session_id)

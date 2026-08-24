@@ -153,6 +153,34 @@ class TestResolveRouteTarget:
         with pytest.raises(LookupError, match="unknown project"):
             routes.resolve_route_target(conn, "ghost", session_db=session_db)
 
+    def test_sandboxed_binding_repairs_a_missing_hermes_route(
+        self, conn, session_db, tmp_path, monkeypatch
+    ):
+        import sqlite3
+
+        project_id = pdb.create_project(
+            conn, name="Verity core", folders=["/tmp/verity-core"]
+        )
+        _mk_session(session_db, "sess-1299f6")
+        roster = tmp_path / "sandboxed-projects.db"
+        sdb = sqlite3.connect(roster)
+        sdb.execute(
+            "CREATE TABLE project_bindings "
+            "(slug TEXT PRIMARY KEY, control_session_id TEXT, bound_at TEXT, bound_by TEXT)"
+        )
+        sdb.execute(
+            "INSERT INTO project_bindings VALUES ('verity-core', 'sess-1299f6', 'now', 'test')"
+        )
+        sdb.commit()
+        sdb.close()
+        monkeypatch.setenv("SANDBOXED_PROJECTS_DB", str(roster))
+
+        target = routes.resolve_route_target(
+            conn, "verity-core", session_db=session_db
+        )
+        assert target.session_id == "sess-1299f6"
+        assert routes.get_route(conn, project_id).session_id == "sess-1299f6"
+
     def test_routes_json_alias_resolves_to_the_bound_slug(
         self, conn, session_db, tmp_path, monkeypatch
     ):

@@ -2682,6 +2682,12 @@ def _deliver_to_local_session(
             db.append_message(sid, "assistant", delivery_content, observed=True)
             if hasattr(db, "record_delivery_receipt"):
                 db.record_delivery_receipt(delivery_id, sid, platform_name)
+            try:
+                from tui_gateway.server import _broadcast_global_event
+
+                _broadcast_global_event("session.transcript", {"session_id": sid})
+            except Exception:
+                pass
             return None
         finally:
             db.close()

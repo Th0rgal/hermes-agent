@@ -833,7 +833,25 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
                     source = (row or {}).get("source", "")
                     _tui_owns_lifecycle = not _is_gateway_owned_source(source)
                     if _tui_owns_lifecycle:
-                        db.end_session(session_id, end_reason)
+                        reclaim = end_reason in (
+                            "idle_timeout",
+                            "lru_evict",
+                            "ws_orphan_reap",
+                        )
+                        bound = False
+                        if reclaim:
+                            try:
+                                from hermes_cli.project_routes import (
+                                    session_is_project_control,
+                                )
+
+                                bound = session_is_project_control(
+                                    session_id, session_db=db
+                                )
+                            except Exception:
+                                bound = False
+                        if not (reclaim and bound):
+                            db.end_session(session_id, end_reason)
         except Exception:
             pass
 

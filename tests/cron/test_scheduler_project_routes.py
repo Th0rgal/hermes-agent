@@ -92,6 +92,33 @@ class TestProjectTargetResolution:
         assert target["platform"] == "webui"
         assert target["session_id"] == "web-1"
 
+    def test_explicit_webhook_uses_adapter_but_bound_webhook_is_local(self, route_env):
+        session_db = route_env["session_db"]
+        session_db.create_session(session_id="hook-session", source="webhook")
+        with pdb.connect_closing(db_path=route_env["projects_path"]) as conn:
+            project_id = pdb.create_project(conn, name="Aurora", folders=[])
+            routes.bind_route(
+                conn,
+                project_id,
+                "hook-session",
+                session_db=session_db,
+                allow_unroutable_source=True,
+            )
+
+        explicit = _resolve_delivery_target(
+            {"id": "j", "deliver": "webhook:external-hook"}
+        )
+        assert explicit == {
+            "platform": "webhook",
+            "chat_id": "external-hook",
+            "thread_id": None,
+        }
+        bound = _resolve_delivery_target(
+            {"id": "j", "deliver": "project:aurora"}
+        )
+        assert bound["kind"] == "local_session"
+        assert bound["session_id"] == "hook-session"
+
     def test_api_server_source_routes_as_local_session_target(self, route_env):
         _bind(route_env, "Aurora", "api-1", source="api_server")
         target = _resolve_delivery_target({"id": "j", "deliver": "project:aurora"})
@@ -218,28 +245,35 @@ class TestProjectRouteContinuation:
         msgs = session_db.get_messages("sess-1")
         assert any("back online" in str(m.get("content", "")) for m in msgs)
 
-    def test_delivery_follows_live_subagent_child(self, route_env):
-        """Operator often lives in a subagent child of the bound session
-        (Lido c0b8a8). Resume refuses _delegate_from; delivery must follow."""
+    def test_delivery_requires_explicit_adoption_of_subagent_child(self, route_env):
+        """A newer worker child cannot hijack the bound control conversation."""
         session_db = route_env["session_db"]
         _bind(route_env, "Aurora", "parent", source="api_server")
         session_db.create_session(
             session_id="child",
             source="subagent",
             parent_session_id="parent",
+            model_config={"_delegate_from": "parent"},
         )
         session_db.append_message("child", "user", "operator is here")
 
         target = _resolve_delivery_target({"id": "j", "deliver": "project:aurora"})
-        assert target["session_id"] == "child"
+        assert target["session_id"] == "parent"
         assert target["kind"] == "local_session"
 
         job = {"id": "j", "name": "aurora-report", "deliver": "project:aurora"}
         assert _deliver_result(job, "hello from cron") is None
-        child_msgs = session_db.get_messages("child")
-        assert any("hello from cron" in str(m.get("content", "")) for m in child_msgs)
         parent_msgs = session_db.get_messages("parent")
-        assert not any("hello from cron" in str(m.get("content", "")) for m in parent_msgs)
+        assert any("hello from cron" in str(m.get("content", "")) for m in parent_msgs)
+        child_msgs = session_db.get_messages("child")
+        assert not any("hello from cron" in str(m.get("content", "")) for m in child_msgs)
+
+        with pdb.connect_closing(db_path=route_env["projects_path"]) as conn:
+            routes.bind_route(conn, "aurora", "child", session_db=session_db)
+        adopted = _resolve_delivery_target(
+            {"id": "j", "deliver": "project:aurora"}
+        )
+        assert adopted["session_id"] == "child"
 
 
 class TestProjectRouteDelivery:
@@ -282,7 +316,11 @@ class TestProjectRouteDelivery:
         )
         job = {"id": "j", "name": "aurora-report", "deliver": "project:aurora"}
 
-        assert _deliver_result(job, "route me exactly") is None
+        with patch("tui_gateway.server._broadcast_global_event") as broadcast:
+            assert _deliver_result(job, "route me exactly") is None
+        broadcast.assert_called_once_with(
+            "sessions.changed", {"session_id": "sess-1"}
+        )
 
         routed = session_db.get_messages("sess-1")
         assert any("route me exactly" in str(m.get("content", "")) for m in routed)

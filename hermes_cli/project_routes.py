@@ -262,13 +262,17 @@ def get_route(conn: sqlite3.Connection, project: str) -> Optional[ProjectRoute]:
 
 
 def unbind_route(conn: sqlite3.Connection, project: str) -> bool:
-    """Remove a project's explicit route. Returns True when a row was deleted."""
+    """Remove a route from the authoritative roster and Hermes replica."""
     ensure_schema(conn)
     from hermes_cli import projects_db as pdb
 
     proj = pdb.get_project(conn, str(project or "").strip())
     if proj is None:
         return False
+    if not clear_sandboxed_binding(proj.slug):
+        raise RuntimeError(
+            f"could not clear sandboxed.sh binding for project '{proj.slug}'"
+        )
     with write_txn(conn):
         cur = conn.execute(
             "DELETE FROM project_session_routes WHERE project_id = ?", (proj.id,)
@@ -321,16 +325,48 @@ def lookup_sandboxed_binding(slug: str) -> Optional[str]:
     except sqlite3.Error:
         return None
     try:
-        for key in keys:
-            row = sdb.execute(
-                "SELECT control_session_id FROM project_bindings WHERE slug = ?",
-                (key,),
-            ).fetchone()
-            if row and str(row[0] or "").strip():
-                return str(row[0]).strip()
+        try:
+            for key in keys:
+                row = sdb.execute(
+                    "SELECT control_session_id FROM project_bindings WHERE slug = ?",
+                    (key,),
+                ).fetchone()
+                if row and str(row[0] or "").strip():
+                    return str(row[0]).strip()
+        except sqlite3.Error:
+            return None
     finally:
         sdb.close()
     return None
+
+
+def clear_sandboxed_binding(canonical: str) -> bool:
+    """Clear the roster's authoritative bind before deleting its replica.
+
+    A missing database or pre-binding schema has nothing to clear. Other
+    write failures are reported so callers do not claim an unbind that the
+    next reconciliation would immediately undo.
+    """
+    slug = str(canonical or "").strip()
+    if not slug:
+        return True
+    path = _sandboxed_projects_db()
+    if path is None:
+        return True
+    try:
+        sdb = sqlite3.connect(str(path))
+        try:
+            sdb.execute("DELETE FROM project_bindings WHERE slug = ?", (slug,))
+            sdb.commit()
+        finally:
+            sdb.close()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return True
+        return False
+    except sqlite3.Error:
+        return False
+    return True
 
 
 def write_sandboxed_binding(canonical: str, session_id: str) -> None:

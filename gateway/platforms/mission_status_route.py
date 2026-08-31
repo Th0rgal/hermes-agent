@@ -30,10 +30,9 @@ _TERMINAL = {
     "awaitinguser",
 }
 
-# Legacy cap kept for tests/import compatibility. The wake prompt is now a
-# one-or-two-sentence notice that forbids tools, so a large operator session
-# must still be woken — otherwise callbacks append silently and the chat
-# looks dead (Lido/EIP-8282, 2026-08-24). Only a compression lock skips.
+# A callback is always appended, but waking a very large conversation can
+# trigger compression or an expensive agent turn despite the brief prompt.
+# The controller remains responsible for autonomous follow-up.
 PROJECT_OPERATOR_WAKE_MESSAGE_CAP = 80
 
 MISSION_CALLBACK_WAKE_PROMPT = (
@@ -312,6 +311,21 @@ def should_wake_mission_callback(session_db: Any, live_id: str) -> bool:
                 return False
         except Exception:
             logger.debug("compression-lock check failed for %s", sid, exc_info=True)
+    getter = getattr(db, "get_session", None)
+    if callable(getter):
+        try:
+            row = getter(sid) or {}
+        except Exception:
+            row = {}
+        count = row.get("message_count") if isinstance(row, dict) else None
+        if isinstance(count, int) and count >= PROJECT_OPERATOR_WAKE_MESSAGE_CAP:
+            logger.info(
+                "skip mission wake for %s: message_count=%s >= %s",
+                sid,
+                count,
+                PROJECT_OPERATOR_WAKE_MESSAGE_CAP,
+            )
+            return False
     return True
 
 

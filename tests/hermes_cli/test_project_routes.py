@@ -118,6 +118,30 @@ class TestBindRoute:
         assert routes.get_route(conn, project_id) is None
         assert routes.unbind_route(conn, project_id) is False
 
+    def test_unbind_clears_authoritative_sandboxed_binding(
+        self, conn, session_db, project_id, tmp_path, monkeypatch
+    ):
+        import sqlite3
+
+        roster = tmp_path / "sandboxed-projects.db"
+        sdb = sqlite3.connect(roster)
+        sdb.execute(
+            "CREATE TABLE project_bindings "
+            "(slug TEXT PRIMARY KEY, control_session_id TEXT, bound_at TEXT, bound_by TEXT)"
+        )
+        sdb.commit()
+        sdb.close()
+        monkeypatch.setenv("SANDBOXED_PROJECTS_DB", str(roster))
+
+        _mk_session(session_db, "sess-1")
+        routes.bind_route(conn, project_id, "sess-1", session_db=session_db)
+        assert routes.lookup_sandboxed_binding("aurora") == "sess-1"
+
+        assert routes.unbind_route(conn, project_id) is True
+        assert routes.lookup_sandboxed_binding("aurora") is None
+        with pytest.raises(LookupError, match="no explicit session route"):
+            routes.resolve_route_target(conn, project_id, session_db=session_db)
+
     def test_route_cascades_on_project_delete(self, conn, session_db, project_id):
         _mk_session(session_db, "sess-1")
         routes.bind_route(conn, project_id, "sess-1", session_db=session_db)
@@ -180,6 +204,22 @@ class TestResolveRouteTarget:
         )
         assert target.session_id == "sess-1299f6"
         assert routes.get_route(conn, project_id).session_id == "sess-1299f6"
+
+    def test_old_sandboxed_schema_is_treated_as_unavailable(
+        self, conn, session_db, project_id, tmp_path, monkeypatch
+    ):
+        import sqlite3
+
+        roster = tmp_path / "old-sandboxed-projects.db"
+        sdb = sqlite3.connect(roster)
+        sdb.execute("CREATE TABLE projects (id TEXT PRIMARY KEY)")
+        sdb.commit()
+        sdb.close()
+        monkeypatch.setenv("SANDBOXED_PROJECTS_DB", str(roster))
+
+        assert routes.lookup_sandboxed_binding("aurora") is None
+        with pytest.raises(LookupError, match="no explicit session route"):
+            routes.resolve_route_target(conn, project_id, session_db=session_db)
 
     def test_routes_json_alias_resolves_to_the_bound_slug(
         self, conn, session_db, tmp_path, monkeypatch

@@ -2123,7 +2123,7 @@ def cron_delivery_targets() -> list[dict]:
 # through to the messaging-adapter loop, which then failed with
 # "API server uses HTTP request/response, not send()" and never appended
 # the cron result to the conversation the operator is looking at.
-_LOCAL_SESSION_PLATFORMS = frozenset({"desktop", "webui", "api_server", "subagent", "webhook"})
+_LOCAL_SESSION_PLATFORMS = frozenset({"desktop", "webui", "api_server", "subagent"})
 _LOCAL_SESSION_TARGET_KIND = "local_session"
 
 
@@ -2157,10 +2157,9 @@ def _resolve_project_route_target(job: dict, project_token: str) -> Optional[dic
     is dropped and the delivery reports an error. It must NEVER fall back to
     the currently open Desktop session, the active project, or a platform
     home channel: that fallback is exactly the misrouting this store exists
-    to prevent. Compression/continuation and the live operator descendant
-    (including a subagent adopted as the control chat) are handled inside
+    to prevent. Compression continuations are handled inside
     ``resolve_route_target``, which atomically migrates the stored route to
-    the live tip. Delivery is always a SessionDB append.
+    the live tip. A different child conversation must be explicitly rebound.
     """
     token = (project_token or "").strip()
     if not token:
@@ -2185,10 +2184,11 @@ def _resolve_project_route_target(job: dict, project_token: str) -> Optional[dic
         )
         return None
 
-    if target.source in _LOCAL_SESSION_PLATFORMS:
+    if target.source in _LOCAL_SESSION_PLATFORMS or target.source == "webhook":
         # A route only exists because an operator explicitly bound this session.
-        # Honor that binding: append to the SessionDB transcript. Never send()
-        # through a gateway adapter — api_server/subagent have no send().
+        # Honor that binding as a SessionDB append. This special-cases a bound
+        # webhook session without globally reclassifying explicit
+        # deliver=webhook:<chat_id>, which still uses the webhook adapter.
         return _local_session_delivery_target(target.source, target.session_id)
     logger.warning(
         "Job '%s': project '%s' routes to session %s with unsupported "
@@ -2685,7 +2685,7 @@ def _deliver_to_local_session(
             try:
                 from tui_gateway.server import _broadcast_global_event
 
-                _broadcast_global_event("session.transcript", {"session_id": sid})
+                _broadcast_global_event("sessions.changed", {"session_id": sid})
             except Exception:
                 pass
             return None

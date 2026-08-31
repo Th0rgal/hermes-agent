@@ -254,10 +254,10 @@ def test_origin_ownership_walks_compression_parent():
 
 
 def test_should_wake_huge_operator_sessions():
-    # The wake prompt forbids tools; a 500-message control chat still needs
-    # the one-line "mission finished" notice.
+    # The callback is appended, but an extra model turn is too expensive once
+    # the control conversation has crossed the cap.
     db = _FakeSessionDB({"s1": {"source": "desktop", "message_count": 515}})
-    assert should_wake_mission_callback(db, "s1") is True
+    assert should_wake_mission_callback(db, "s1") is False
     db = _FakeSessionDB({"s1": {"source": "desktop", "message_count": 12}})
     assert should_wake_mission_callback(db, "s1") is True
     assert PROJECT_OPERATOR_WAKE_MESSAGE_CAP == 80

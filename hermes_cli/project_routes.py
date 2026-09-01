@@ -59,9 +59,12 @@ ROUTABLE_SESSION_SOURCES = frozenset({"desktop", "webui", "api_server", "subagen
 # Accidental SessionDB closures that must not kill a project control chat.
 # Desktop websocket teardown stamps ``ws_orphan_reap`` even while cron and
 # mission callbacks still have to land in that transcript (EIP-8282, 2026-08-24).
-RECLAIMABLE_SESSION_END_REASONS = frozenset(
-    {"ws_orphan_reap", "agent_close", "idle_timeout", "lru_evict"}
-)
+RECLAIMABLE_SESSION_END_REASONS = frozenset({
+    "ws_orphan_reap",
+    "agent_close",
+    "idle_timeout",
+    "lru_evict",
+})
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -146,7 +149,9 @@ class _OwnedSessionDB:
         return False
 
 
-def reopen_reclaimable_session(db, session_id: str, row: Optional[dict] = None) -> Optional[dict]:
+def reopen_reclaimable_session(
+    db, session_id: str, row: Optional[dict] = None
+) -> Optional[dict]:
     """Reopen a project-bound session ended only by a recoverable accident.
 
     Compression / ``session_reset`` / ``session_switch`` stay closed — those
@@ -155,7 +160,11 @@ def reopen_reclaimable_session(db, session_id: str, row: Optional[dict] = None) 
     sid = str(session_id or "").strip()
     if not sid:
         return row
-    current = row if row is not None else (db.get_session(sid) if hasattr(db, "get_session") else None)
+    current = (
+        row
+        if row is not None
+        else (db.get_session(sid) if hasattr(db, "get_session") else None)
+    )
     if not current or not current.get("ended_at"):
         return current
     reason = str(current.get("end_reason") or "").strip().lower()
@@ -303,14 +312,11 @@ def _sandboxed_projects_db() -> Optional[Path]:
     return None
 
 
-def lookup_sandboxed_binding(slug: str) -> Optional[str]:
-    """Roster bind for ``slug`` (and routes.json nicknames). None if unavailable."""
+def _sandboxed_binding_keys(slug: str) -> list[str]:
+    """Every roster key equivalent to ``slug``, canonical key first."""
     token = str(slug or "").strip()
     if not token:
-        return None
-    path = _sandboxed_projects_db()
-    if path is None:
-        return None
+        return []
     keys = [token]
     try:
         from hermes_cli.projects_db import _slug_lookup_keys
@@ -320,6 +326,17 @@ def lookup_sandboxed_binding(slug: str) -> Optional[str]:
                 keys.append(key)
     except Exception:
         pass
+    return keys
+
+
+def lookup_sandboxed_binding(slug: str) -> Optional[str]:
+    """Roster bind for ``slug`` (and routes.json nicknames). None if unavailable."""
+    keys = _sandboxed_binding_keys(slug)
+    if not keys:
+        return None
+    path = _sandboxed_projects_db()
+    if path is None:
+        return None
     try:
         sdb = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     except sqlite3.Error:
@@ -347,8 +364,8 @@ def clear_sandboxed_binding(canonical: str) -> bool:
     write failures are reported so callers do not claim an unbind that the
     next reconciliation would immediately undo.
     """
-    slug = str(canonical or "").strip()
-    if not slug:
+    keys = _sandboxed_binding_keys(canonical)
+    if not keys:
         return True
     path = _sandboxed_projects_db()
     if path is None:
@@ -356,7 +373,11 @@ def clear_sandboxed_binding(canonical: str) -> bool:
     try:
         sdb = sqlite3.connect(str(path))
         try:
-            sdb.execute("DELETE FROM project_bindings WHERE slug = ?", (slug,))
+            placeholders = ", ".join("?" for _ in keys)
+            sdb.execute(
+                f"DELETE FROM project_bindings WHERE slug IN ({placeholders})",
+                tuple(keys),
+            )
             sdb.commit()
         finally:
             sdb.close()
@@ -400,7 +421,9 @@ def write_sandboxed_binding(canonical: str, session_id: str) -> None:
         return
 
 
-def _repair_route_from_sandboxed(conn: sqlite3.Connection, proj, *, session_db=None) -> Optional[ProjectRoute]:
+def _repair_route_from_sandboxed(
+    conn: sqlite3.Connection, proj, *, session_db=None
+) -> Optional[ProjectRoute]:
     """If the roster has a bind and Hermes does not, copy it in. Never invent."""
     sid = lookup_sandboxed_binding(proj.slug)
     if not sid:
@@ -428,6 +451,12 @@ def session_is_project_control(session_id: str, *, session_db=None) -> bool:
             parent = str(row.get("parent_session_id") or "").strip()
             if not parent or parent in chain:
                 break
+            parent_row = db.get_session(parent) if hasattr(db, "get_session") else None
+            if (
+                not parent_row
+                or str(parent_row.get("end_reason") or "").lower() != "compression"
+            ):
+                break
             chain.add(parent)
             current = parent
         try:
@@ -438,7 +467,9 @@ def session_is_project_control(session_id: str, *, session_db=None) -> bool:
     try:
         with pdb.connect_closing() as conn:
             ensure_schema(conn)
-            rows = conn.execute("SELECT session_id FROM project_session_routes").fetchall()
+            rows = conn.execute(
+                "SELECT session_id FROM project_session_routes"
+            ).fetchall()
     except Exception:
         return False
     bound = {str(r[0] if not hasattr(r, "keys") else r["session_id"]) for r in rows}

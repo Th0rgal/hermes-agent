@@ -179,6 +179,35 @@ class TestBindRoute:
         pdb.delete_project(conn, project_id)
         assert routes.list_routes(conn) == []
 
+    def test_project_delete_clears_equivalent_roster_bindings(
+        self, conn, project_id, tmp_path, monkeypatch
+    ):
+        import sqlite3
+
+        roster = tmp_path / "sandboxed-projects.db"
+        sdb = sqlite3.connect(roster)
+        sdb.execute(
+            "CREATE TABLE project_bindings "
+            "(slug TEXT PRIMARY KEY, control_session_id TEXT, bound_at TEXT, bound_by TEXT)"
+        )
+        sdb.executemany(
+            "INSERT INTO project_bindings VALUES (?, 'old-session', 'now', 'test')",
+            [("aurora",), ("verity-aurora",)],
+        )
+        sdb.commit()
+        sdb.close()
+        (tmp_path / "routes.json").write_text('{"aurora": "verity-aurora"}\n')
+        monkeypatch.setenv("HERMES_PROJECTS_DIR", str(tmp_path))
+        monkeypatch.setenv("SANDBOXED_PROJECTS_DB", str(roster))
+
+        assert pdb.delete_project(conn, project_id) is True
+
+        sdb = sqlite3.connect(roster)
+        try:
+            assert sdb.execute("SELECT slug FROM project_bindings").fetchall() == []
+        finally:
+            sdb.close()
+
 
 # ---------------------------------------------------------------------------
 # resolution: explicit-or-nothing (no current-Desktop fallback)

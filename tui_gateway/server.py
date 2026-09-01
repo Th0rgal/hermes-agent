@@ -1784,6 +1784,7 @@ def _compute_host_turn_frame(
     queued_prompt_generation: int | None = None,
     display_kind: str | None = None,
 ) -> dict:
+    _merge_observed_session_messages(session)
     with session["history_lock"]:
         history = list(session.get("history", []))
         history_version = int(session.get("history_version", 0))
@@ -3486,6 +3487,78 @@ def _clear_session_context(tokens: list) -> None:
         clear_session_vars(tokens)
     except Exception:
         pass
+
+
+def _merge_observed_session_messages(session: dict) -> int:
+    """Merge externally persisted local deliveries into live history.
+
+    A scheduler may append to SessionDB from another process while Desktop or
+    WebUI keeps an in-memory transcript. Before the next turn snapshot, import
+    only missing ``observed`` messages so the model sees what the operator
+    already sees. Ordinary database edits never replace live state.
+    """
+    if _session_source(session) not in {"desktop", "webui"}:
+        return 0
+    session_key = str(session.get("session_key") or "")
+    if not session_key:
+        return 0
+
+    try:
+        with _session_db(session) as db:
+            if db is None or not db.get_session(session_key):
+                return 0
+            stored = db.get_messages_as_conversation(session_key)
+    except Exception:
+        logger.debug(
+            "failed to load observed local-session messages for %s",
+            session_key,
+            exc_info=True,
+        )
+        return 0
+
+    def identity(message: dict) -> tuple[str, str, str]:
+        try:
+            content = json.dumps(
+                message.get("content"),
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+        except Exception:
+            content = str(message.get("content"))
+        return (
+            str(message.get("role") or ""),
+            content,
+            str(message.get("timestamp") or ""),
+        )
+
+    with session["history_lock"]:
+        known = [
+            identity(message)
+            for message in session.get("history", [])
+            if message.get("observed")
+        ]
+        missing = []
+        for message in stored:
+            if not message.get("observed"):
+                continue
+            marker = identity(message)
+            if marker in known:
+                known.remove(marker)
+                continue
+            missing.append(dict(message))
+        if not missing:
+            return 0
+        session["history"].extend(missing)
+        session["history_version"] = int(session.get("history_version", 0)) + 1
+
+    logger.info(
+        "merged %d observed delivery message(s) into live %s session %s",
+        len(missing),
+        _session_source(session),
+        session_key,
+    )
+    return len(missing)
 
 
 def _enable_gateway_prompts() -> None:
@@ -10626,6 +10699,7 @@ def _run_prompt_submit(
     image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None,
 ) -> bool:
+    _merge_observed_session_messages(session)
     with session["history_lock"]:
         if session.get("_closing"):
             session["running"] = False

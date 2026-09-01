@@ -691,9 +691,18 @@ def restore_project(conn: sqlite3.Connection, project_id: str) -> bool:
 
 
 def delete_project(conn: sqlite3.Connection, project_id: str) -> bool:
-    """Hard-delete a project and its folders (cascade)."""
+    """Hard-delete a project and every authoritative conversation binding."""
+    project = get_project(conn, project_id)
+    if project is None:
+        return False
+    from hermes_cli.project_routes import clear_sandboxed_binding
+
+    if not clear_sandboxed_binding(project.slug):
+        raise RuntimeError(
+            f"could not clear sandboxed.sh binding for project '{project.slug}'"
+        )
     with write_txn(conn):
-        cur = conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        cur = conn.execute("DELETE FROM projects WHERE id = ?", (project.id,))
     return cur.rowcount > 0
 
 

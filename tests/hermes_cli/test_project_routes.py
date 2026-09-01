@@ -142,6 +142,37 @@ class TestBindRoute:
         with pytest.raises(LookupError, match="no explicit session route"):
             routes.resolve_route_target(conn, project_id, session_db=session_db)
 
+    def test_unbind_clears_every_equivalent_roster_alias(
+        self, conn, session_db, project_id, tmp_path, monkeypatch
+    ):
+        import sqlite3
+
+        roster = tmp_path / "sandboxed-projects.db"
+        sdb = sqlite3.connect(roster)
+        sdb.execute(
+            "CREATE TABLE project_bindings "
+            "(slug TEXT PRIMARY KEY, control_session_id TEXT, bound_at TEXT, bound_by TEXT)"
+        )
+        sdb.executemany(
+            "INSERT INTO project_bindings VALUES (?, 'sess-1', 'now', 'test')",
+            [("aurora",), ("verity-aurora",)],
+        )
+        sdb.commit()
+        sdb.close()
+        (tmp_path / "routes.json").write_text('{"aurora": "verity-aurora"}\n')
+        monkeypatch.setenv("HERMES_PROJECTS_DIR", str(tmp_path))
+        monkeypatch.setenv("SANDBOXED_PROJECTS_DB", str(roster))
+
+        _mk_session(session_db, "sess-1")
+        routes.bind_route(conn, project_id, "sess-1", session_db=session_db)
+        assert routes.unbind_route(conn, project_id) is True
+
+        sdb = sqlite3.connect(roster)
+        try:
+            assert sdb.execute("SELECT slug FROM project_bindings").fetchall() == []
+        finally:
+            sdb.close()
+
     def test_route_cascades_on_project_delete(self, conn, session_db, project_id):
         _mk_session(session_db, "sess-1")
         routes.bind_route(conn, project_id, "sess-1", session_db=session_db)
@@ -199,9 +230,7 @@ class TestResolveRouteTarget:
         sdb.close()
         monkeypatch.setenv("SANDBOXED_PROJECTS_DB", str(roster))
 
-        target = routes.resolve_route_target(
-            conn, "verity-core", session_db=session_db
-        )
+        target = routes.resolve_route_target(conn, "verity-core", session_db=session_db)
         assert target.session_id == "sess-1299f6"
         assert routes.get_route(conn, project_id).session_id == "sess-1299f6"
 
@@ -231,9 +260,7 @@ class TestResolveRouteTarget:
         (tmp_path / "routes.json").write_text('{"verity": "verity-core"}\n')
         monkeypatch.setenv("HERMES_PROJECTS_DIR", str(tmp_path))
 
-        target = routes.resolve_route_target(
-            conn, "verity-core", session_db=session_db
-        )
+        target = routes.resolve_route_target(conn, "verity-core", session_db=session_db)
         assert target.project_id == project_id
         assert target.session_id == "sess-verity"
 
@@ -241,9 +268,7 @@ class TestResolveRouteTarget:
         self, conn, session_db, tmp_path, monkeypatch
     ):
         """deliver=project:verity-lido finds the bound lido-audit row."""
-        project_id = pdb.create_project(
-            conn, name="Lido audit", folders=["/tmp/lido"]
-        )
+        project_id = pdb.create_project(conn, name="Lido audit", folders=["/tmp/lido"])
         _mk_session(session_db, "sess-lido")
         routes.bind_route(conn, project_id, "sess-lido", session_db=session_db)
         (tmp_path / "routes.json").write_text(
@@ -251,9 +276,7 @@ class TestResolveRouteTarget:
         )
         monkeypatch.setenv("HERMES_PROJECTS_DIR", str(tmp_path))
 
-        target = routes.resolve_route_target(
-            conn, "verity-lido", session_db=session_db
-        )
+        target = routes.resolve_route_target(conn, "verity-lido", session_db=session_db)
         assert target.project_id == project_id
         assert target.session_id == "sess-lido"
 
@@ -265,9 +288,7 @@ class TestResolveRouteTarget:
         session_db.end_session("sess-1", end_reason="ws_orphan_reap")
         assert session_db.get_session("sess-1")["ended_at"] is not None
 
-        target = routes.resolve_route_target(
-            conn, project_id, session_db=session_db
-        )
+        target = routes.resolve_route_target(conn, project_id, session_db=session_db)
         assert target.session_id == "sess-1"
         row = session_db.get_session("sess-1")
         assert row["ended_at"] is None
@@ -302,7 +323,9 @@ class TestResolveRouteTarget:
 
 
 class TestRouteMigration:
-    def test_migrate_session_routes_is_atomic_update(self, conn, session_db, project_id):
+    def test_migrate_session_routes_is_atomic_update(
+        self, conn, session_db, project_id
+    ):
         _mk_session(session_db, "old")
         routes.bind_route(conn, project_id, "old", session_db=session_db)
         moved = routes.migrate_session_routes(conn, "old", "new")
@@ -362,6 +385,50 @@ class TestRouteMigration:
         assert routes.get_route(conn, project_id).session_id == "gen2"
 
 
+class TestSessionIsProjectControl:
+    def test_isolated_branch_does_not_inherit_control_binding(
+        self, conn, session_db, project_id, monkeypatch
+    ):
+        import contextlib
+
+        _mk_session(session_db, "control")
+        routes.bind_route(conn, project_id, "control", session_db=session_db)
+        _mk_session(
+            session_db,
+            "branch",
+            parent_session_id="control",
+            model_config={"_branched_from": "control"},
+        )
+        monkeypatch.setattr(
+            pdb, "connect_closing", lambda: contextlib.nullcontext(conn)
+        )
+
+        assert (
+            routes.session_is_project_control("control", session_db=session_db) is True
+        )
+        assert (
+            routes.session_is_project_control("branch", session_db=session_db) is False
+        )
+
+    def test_compression_continuation_inherits_control_binding(
+        self, conn, session_db, project_id, monkeypatch
+    ):
+        import contextlib
+
+        _mk_session(session_db, "control")
+        routes.bind_route(conn, project_id, "control", session_db=session_db)
+        session_db.end_session("control", end_reason="compression")
+        _mk_session(session_db, "continuation", parent_session_id="control")
+        monkeypatch.setattr(
+            pdb, "connect_closing", lambda: contextlib.nullcontext(conn)
+        )
+
+        assert (
+            routes.session_is_project_control("continuation", session_db=session_db)
+            is True
+        )
+
+
 class TestBindRouteSourceOverride:
     """The source allowlist is a heuristic; an operator may override it.
 
@@ -374,7 +441,9 @@ class TestBindRouteSourceOverride:
     cleverer predicate.
     """
 
-    def test_an_unroutable_source_is_refused_by_default(self, conn, session_db, project_id):
+    def test_an_unroutable_source_is_refused_by_default(
+        self, conn, session_db, project_id
+    ):
         _mk_session(session_db, "sess-hook", source="webhook")
         with pytest.raises(ValueError) as caught:
             routes.bind_route(conn, project_id, "sess-hook", session_db=session_db)
@@ -385,22 +454,32 @@ class TestBindRouteSourceOverride:
     def test_the_override_binds_it(self, conn, session_db, project_id):
         _mk_session(session_db, "sess-hook", source="webhook")
         route = routes.bind_route(
-            conn, project_id, "sess-hook",
-            session_db=session_db, allow_unroutable_source=True,
+            conn,
+            project_id,
+            "sess-hook",
+            session_db=session_db,
+            allow_unroutable_source=True,
         )
         assert route.session_id == "sess-hook"
         assert routes.get_route(conn, project_id).session_id == "sess-hook"
 
-    def test_the_override_bypasses_only_the_source_check(self, conn, session_db, project_id):
+    def test_the_override_bypasses_only_the_source_check(
+        self, conn, session_db, project_id
+    ):
         # A missing session is still an error, or the override would become a
         # way to bind a project to anything at all.
         with pytest.raises(LookupError):
             routes.bind_route(
-                conn, project_id, "no-such-session",
-                session_db=session_db, allow_unroutable_source=True,
+                conn,
+                project_id,
+                "no-such-session",
+                session_db=session_db,
+                allow_unroutable_source=True,
             )
 
     def test_a_routable_source_needs_no_override(self, conn, session_db, project_id):
         _mk_session(session_db, "sess-desktop", source="desktop")
-        route = routes.bind_route(conn, project_id, "sess-desktop", session_db=session_db)
+        route = routes.bind_route(
+            conn, project_id, "sess-desktop", session_db=session_db
+        )
         assert route.session_id == "sess-desktop"

@@ -301,6 +301,35 @@ class TestClassifyApiError:
         e = MockAPIError("Bad Gateway", status_code=502)
         result = classify_api_error(e)
         assert result.reason == FailoverReason.server_error
+        assert result.should_fallback is False
+
+    def test_502_proxy_chain_unavailable_should_fallback(self):
+        """Paloma/sandboxed.sh exhausts a one-entry chain with HTTP 502.
+
+        Retrying the same model id cannot recover — continuation against
+        the dead provider is what used to produce "Response remained
+        truncated after 4 continuation attempts".
+        """
+        e = MockAPIError(
+            "All 1 providers in chain 'xai/grok-4.6-latest' are "
+            "unavailable (server/network errors)",
+            status_code=502,
+            body={"error": {"code": "upstream_unavailable"}},
+        )
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.server_error
+        assert result.retryable is True
+        assert result.should_fallback is True
+
+    def test_message_only_proxy_chain_unavailable_should_fallback(self):
+        """SSE/RuntimeError wrappers may not carry status_code."""
+        e = RuntimeError(
+            "Error code: 502 - All 1 providers in chain "
+            "'xai/grok-4.6-latest' are unavailable (server/network errors)"
+        )
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.server_error
+        assert result.should_fallback is True
 
     def test_503_overloaded(self):
         e = MockAPIError("Service Unavailable", status_code=503)

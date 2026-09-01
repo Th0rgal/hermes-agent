@@ -497,6 +497,149 @@ class TestContentFilterStallActivatesFallback:
 
 
 
+class TestProviderOutageStallActivatesFallback:
+    """A proxy-chain 502 (Paloma ``All 1 providers in chain … unavailable``)
+    is swallowed into a finish_reason=length stub so partial tokens survive.
+    Continuation against the same dead chain used to burn 4 retries and
+    surface "Response remained truncated after 4 continuation attempts".
+    """
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_streaming_call_tags_chain_unavailable_stub(
+        self, _mock_close, mock_create, monkeypatch,
+    ):
+        def _chain_stall():
+            yield _make_stream_chunk(content="Je clone le paper")
+            raise RuntimeError(
+                "Error code: 502 - All 1 providers in chain "
+                "'xai/grok-4.6-latest' are unavailable (server/network errors)"
+            )
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = (
+            lambda *a, **kw: _chain_stall()
+        )
+        mock_create.return_value = mock_client
+
+        agent = _make_agent()
+        agent._fire_stream_delta = lambda text: None
+        agent._current_streamed_assistant_text = "Je clone le paper"
+
+        monkeypatch.setenv("HERMES_STREAM_RETRIES", "0")
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response.id == PARTIAL_STREAM_STUB_ID
+        assert getattr(response, "_provider_outage_terminated", False) is True, (
+            "Proxy chain-unavailable 502 must tag the stub so the loop "
+            "fails over instead of burning continuation retries."
+        )
+        assert "providers in chain" in (
+            getattr(response, "_stream_error_message", "") or ""
+        ).lower()
+
+    def test_tagged_outage_stub_activates_fallback_first_pass(self, loop_agent):
+        from tests.run_agent.test_run_agent import _mock_assistant_msg, _mock_response
+
+        def _outage_stub():
+            return SimpleNamespace(
+                id=PARTIAL_STREAM_STUB_ID,
+                model="xai/grok-4.6-latest",
+                choices=[SimpleNamespace(
+                    index=0,
+                    message=_mock_assistant_msg(content="Je clone le paper"),
+                    finish_reason=FINISH_REASON_LENGTH,
+                )],
+                usage=None,
+                _provider_outage_terminated=True,
+                _stream_error_message=(
+                    "All 1 providers in chain 'xai/grok-4.6-latest' "
+                    "are unavailable (server/network errors)"
+                ),
+            )
+
+        recovery = _mock_response(
+            content=" suite du manuscrit.", finish_reason="stop",
+        )
+        loop_agent.client.chat.completions.create.side_effect = [
+            _outage_stub(), recovery,
+        ]
+        loop_agent._fallback_chain = [
+            {"provider": "openrouter", "model": "anthropic/claude-sonnet-4.7"},
+        ]
+        loop_agent._fallback_index = 0
+        fb_calls = {"n": 0}
+
+        def _fake_activate(reason=None):
+            fb_calls["n"] += 1
+            loop_agent._fallback_index = len(loop_agent._fallback_chain)
+            return True
+
+        with (
+            patch.object(loop_agent, "_persist_session"),
+            patch.object(loop_agent, "_save_trajectory"),
+            patch.object(loop_agent, "_cleanup_task_resources"),
+            patch.object(loop_agent, "_try_activate_fallback",
+                         side_effect=_fake_activate),
+        ):
+            result = loop_agent.run_conversation("continue")
+
+        assert fb_calls["n"] == 1, (
+            "Provider-outage stub must activate fallback on the first pass "
+            "instead of exhausting 4 continuation attempts."
+        )
+        assert result["completed"] is True
+        assert "Je clone le paper" in (result["final_response"] or "")
+        assert "suite du manuscrit" in (result["final_response"] or "")
+        assert "truncated after 4 continuation attempts" not in (
+            result.get("error") or ""
+        )
+
+    def test_tagged_outage_stub_without_fallback_surfaces_real_error(
+        self, loop_agent,
+    ):
+        from tests.run_agent.test_run_agent import _mock_assistant_msg
+
+        outage_msg = (
+            "All 1 providers in chain 'xai/grok-4.6-latest' "
+            "are unavailable (server/network errors)"
+        )
+        stub = SimpleNamespace(
+            id=PARTIAL_STREAM_STUB_ID,
+            model="xai/grok-4.6-latest",
+            choices=[SimpleNamespace(
+                index=0,
+                message=_mock_assistant_msg(content="partial so far"),
+                finish_reason=FINISH_REASON_LENGTH,
+            )],
+            usage=None,
+            _provider_outage_terminated=True,
+            _stream_error_message=outage_msg,
+        )
+        loop_agent.client.chat.completions.create.side_effect = [stub]
+        loop_agent._fallback_chain = []
+        loop_agent._fallback_index = 0
+
+        with (
+            patch.object(loop_agent, "_persist_session"),
+            patch.object(loop_agent, "_save_trajectory"),
+            patch.object(loop_agent, "_cleanup_task_resources"),
+        ):
+            result = loop_agent.run_conversation("continue")
+
+        assert loop_agent.client.chat.completions.create.call_count == 1, (
+            "A dead chain with no fallback must not burn continuation retries."
+        )
+        assert result["completed"] is False
+        assert result["partial"] is True
+        assert "partial so far" in (result["final_response"] or "")
+        assert "providers in chain" in (result.get("error") or "")
+        assert "truncated after 4 continuation attempts" not in (
+            result.get("error") or ""
+        )
+
+
+
 class TestEmptyPartialStreamStubNotPersisted:
     """Regression for the session-poisoning bug hit with moonshotai/kimi-k3
     via OpenRouter (2026-07-20): a stream dropped mid-``write_file`` tool

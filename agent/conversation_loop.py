@@ -3742,6 +3742,125 @@ def run_conversation(
                                 f"(may re-hit filter)...",
                                 force=True,
                             )
+                        # ── Provider-outage stream stall → fallback ──
+                        # A 502/unavailable from the proxy (e.g. Paloma
+                        # "All 1 providers in chain 'xai/grok-4.6-latest'
+                        # are unavailable") is swallowed into a
+                        # finish_reason=length stub so the loop can keep
+                        # partial tokens.  Continuation against the same
+                        # dead chain just re-502s four times and used to
+                        # surface "Response remained truncated after 4
+                        # continuation attempts".  Fail over (keeping the
+                        # partial) or stop with the real outage error.
+                        _outage_terminated = getattr(
+                            response, "_provider_outage_terminated", False
+                        )
+                        if _outage_terminated:
+                            _outage_error = (
+                                getattr(response, "_stream_error_message", None)
+                                or "Provider unavailable mid-stream"
+                            )
+                            if (
+                                agent._fallback_index < len(agent._fallback_chain)
+                                and agent._try_activate_fallback()
+                            ):
+                                agent._vprint(
+                                    f"{agent.log_prefix}⚠️  Provider unavailable "
+                                    f"mid-stream — activating fallback provider...",
+                                    force=True,
+                                )
+                                agent._emit_status(
+                                    "Provider unavailable mid-stream; switching to fallback..."
+                                )
+                                if (
+                                    assistant_message is not None
+                                    and not _trunc_has_tool_calls
+                                ):
+                                    _is_empty_outage_stub = (
+                                        getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID
+                                        and not getattr(assistant_message, "content", None)
+                                    )
+                                    if not _is_empty_outage_stub:
+                                        interim_msg = agent._build_assistant_message(
+                                            assistant_message, finish_reason
+                                        )
+                                        interim_msg["_length_continuation_fragment"] = True
+                                        messages.append(interim_msg)
+                                        if assistant_message.content:
+                                            truncated_response_parts.append(
+                                                assistant_message.content
+                                            )
+                                        messages.append({
+                                            "role": "user",
+                                            "content": _get_continuation_prompt(
+                                                True,
+                                                getattr(response, "_dropped_tool_names", None),
+                                            ),
+                                            "_length_continuation_nudge": True,
+                                        })
+                                        agent._session_messages = messages
+                                        length_continue_retries = 0
+                                        retry_count = 0
+                                        compression_attempts = 0
+                                        _retry.primary_recovery_attempted = False
+                                        _retry.restart_with_length_continuation = True
+                                        break
+                                agent._session_messages = messages
+                                length_continue_retries = 0
+                                retry_count = 0
+                                compression_attempts = 0
+                                _retry.primary_recovery_attempted = False
+                                _retry.restart_with_rebuilt_messages = True
+                                break
+                            agent._vprint(
+                                f"{agent.log_prefix}⚠️  Provider unavailable "
+                                f"mid-stream and no fallback is configured — "
+                                f"stopping instead of retrying a dead chain.",
+                                force=True,
+                            )
+                            if (
+                                assistant_message is not None
+                                and getattr(assistant_message, "content", None)
+                            ):
+                                truncated_response_parts.append(
+                                    assistant_message.content
+                                )
+                            partial_response = agent._strip_think_blocks(
+                                _join_truncated_parts(truncated_response_parts)
+                            ).strip()
+                            _turn_start = (
+                                current_turn_user_idx + 1
+                                if isinstance(current_turn_user_idx, int)
+                                and current_turn_user_idx >= 0
+                                else 0
+                            )
+                            messages[_turn_start:] = [
+                                m for m in messages[_turn_start:]
+                                if not (
+                                    isinstance(m, dict)
+                                    and (
+                                        m.get("_length_continuation_fragment")
+                                        or m.get("_length_continuation_nudge")
+                                    )
+                                )
+                            ]
+                            if partial_response:
+                                messages.append({
+                                    "role": "assistant",
+                                    "content": partial_response,
+                                    "finish_reason": "length",
+                                })
+                            agent._session_messages = messages
+                            agent._cleanup_task_resources(effective_task_id)
+                            agent._persist_session(messages, conversation_history)
+                            return {
+                                "final_response": partial_response or None,
+                                "messages": messages,
+                                "api_calls": api_call_count,
+                                "completed": False,
+                                "partial": True,
+                                "error": _outage_error,
+                            }
                         if assistant_message is not None and not _trunc_has_tool_calls:
                             length_continue_retries += 1
                             # An EMPTY partial-stream stub (stream dropped
@@ -5240,6 +5359,7 @@ def run_conversation(
                 _is_transport_failure = classified.reason in {
                     FailoverReason.timeout,
                     FailoverReason.overloaded,
+                    FailoverReason.server_error,
                 }
                 # Z.AI Coding Plan GLM-5.2 overload 429s classify as
                 # `overloaded` (to spare the credential pool), but `overloaded`
@@ -5253,8 +5373,13 @@ def run_conversation(
                 )
                 if _is_zai_coding_overload:
                     max_retries = max(max_retries, zai_coding_overload_retry_ceiling())
+                _is_chain_outage = (
+                    classified.reason == FailoverReason.server_error
+                    and classified.should_fallback
+                )
                 _should_fallback = (
                     is_rate_limited
+                    or _is_chain_outage
                     or (_is_transport_failure and retry_count >= 2)
                 )
                 if _should_fallback and agent._fallback_index < len(agent._fallback_chain):
@@ -5266,9 +5391,12 @@ def run_conversation(
                     # pool can't help when the *upstream* model (DeepSeek,
                     # etc.) is throttling OpenRouter, so always fall back to a
                     # different model regardless of pool state.
+                    # Same for a proxy chain that already exhausted every
+                    # entry (Paloma 502 "providers in chain … unavailable"):
+                    # rotating the caller's key cannot revive a dead chain.
                     _is_upstream = classified.reason == FailoverReason.upstream_rate_limit
                     pool_may_recover = (
-                        False if _is_upstream
+                        False if (_is_upstream or _is_chain_outage)
                         else _ra()._pool_may_recover_from_rate_limit(
                             agent._credential_pool,
                         )

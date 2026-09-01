@@ -231,6 +231,22 @@ _OVERLOADED_PATTERNS = [
     "over capacity",
 ]
 
+# Proxy / aggregator chain-exhausted outages (e.g. Paloma sandboxed.sh
+# HTTP 502 "All N providers in chain 'xai/grok-4.6-latest' are unavailable").
+# Retrying the same chain cannot recover — every continuation attempt just
+# re-hits the dead provider and the conversation loop used to give up with
+# "Response remained truncated after 4 continuation attempts".  Match these
+# as server_error + should_fallback so the stream-stub path and the
+# exception path both consult the fallback chain instead of burning
+# length-continuation retries.
+_PROVIDER_CHAIN_UNAVAILABLE_PATTERNS = [
+    "providers in chain",
+    "all providers in chain",
+    "upstream_unavailable",
+    "are unavailable (server/network errors)",
+    "are currently in cooldown or unconfigured",
+]
+
 # Usage-limit patterns that need disambiguation (could be billing OR rate_limit)
 _USAGE_LIMIT_PATTERNS = [
     "usage limit",
@@ -1340,6 +1356,14 @@ def _classify_by_status(
                 retryable=True,
                 should_compress=True,
             )
+        if any(p in error_msg for p in _PROVIDER_CHAIN_UNAVAILABLE_PATTERNS):
+            # Every entry in the proxy chain already failed.  Retrying the
+            # same model id cannot recover — fail over immediately.
+            return result_fn(
+                FailoverReason.server_error,
+                retryable=True,
+                should_fallback=True,
+            )
         return result_fn(FailoverReason.server_error, retryable=True)
 
     if status_code in {503, 529}:
@@ -1840,6 +1864,15 @@ def _classify_by_message(
     # was never established is not a context-overflow signal.
     if any(p in error_msg for p in _CONNECTION_MESSAGE_PATTERNS):
         return result_fn(FailoverReason.timeout, retryable=True)
+
+    # Proxy chain-exhausted outages with no HTTP status on the exception
+    # (RuntimeError wrapping the body, SSE error frames, etc.).
+    if any(p in error_msg for p in _PROVIDER_CHAIN_UNAVAILABLE_PATTERNS):
+        return result_fn(
+            FailoverReason.server_error,
+            retryable=True,
+            should_fallback=True,
+        )
 
     return None
 

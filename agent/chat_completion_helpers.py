@@ -32,6 +32,7 @@ from hermes_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH
 from agent.error_classifier import (
     FailoverReason,
     PROVIDER_STREAM_NON_JSON_ERROR_CODE,
+    classify_api_error,
 )
 from agent.errors import EmptyStreamError
 from agent.turn_context import substitute_api_content
@@ -5286,29 +5287,44 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 role="assistant", content=_partial_text, tool_calls=None,
                 reasoning_content=None,
             )
-            # Detect provider output-layer content filtering (e.g. MiniMax
-            # "output new_sensitive (1027)", Azure/OpenAI content_filter,
-            # Anthropic safety refusal).  The raw error is about to be
-            # swallowed into a finish_reason=length stub, so classify it HERE
-            # while we still have it and stamp the stub.  Retrying such a
-            # content-deterministic filter on the same primary just re-hits
-            # the filter — the conversation loop reads this tag and activates
-            # the fallback chain instead of burning continuation retries.
-            # error_classifier is the single source of truth for "what counts
-            # as a content filter" (#32421).
+            # Classify the swallowed error while we still have it.  Two
+            # tags the conversation loop reads before burning length-
+            # continuation retries:
+            #   * ``_content_filter_terminated`` — MiniMax/Azure/Anthropic
+            #     output-layer safety filter; retrying the same primary
+            #     just re-hits it (#32421).
+            #   * ``_provider_outage_terminated`` — proxy chain exhausted
+            #     (e.g. Paloma HTTP 502 "All N providers in chain … are
+            #     unavailable").  Continuation against the same dead
+            #     provider is how "Response remained truncated after 4
+            #     continuation attempts" used to fire on a 502.
+            # error_classifier is the single source of truth for both.
             _content_filter_terminated = False
+            _provider_outage_terminated = False
+            _stream_error_message = None
             try:
-                from agent.error_classifier import classify_api_error, FailoverReason
                 _cls = classify_api_error(
                     result["error"],
                     provider=str(getattr(agent, "provider", "") or ""),
                     model=str(getattr(agent, "model", "") or ""),
                 )
-                _content_filter_terminated = (
-                    _cls.reason == FailoverReason.content_policy_blocked
-                )
+                if _cls.reason == FailoverReason.content_policy_blocked:
+                    _content_filter_terminated = True
+                elif _cls.should_fallback and _cls.reason in {
+                    FailoverReason.server_error,
+                    FailoverReason.overloaded,
+                    FailoverReason.model_not_found,
+                    FailoverReason.auth,
+                    FailoverReason.auth_permanent,
+                }:
+                    _provider_outage_terminated = True
+                    _stream_error_message = (
+                        (_cls.message or str(result["error"]) or "").strip()
+                        or None
+                    )
             except Exception:
                 _content_filter_terminated = False
+                _provider_outage_terminated = False
             _stub = SimpleNamespace(
                 id=PARTIAL_STREAM_STUB_ID,
                 model=getattr(agent, "model", "unknown"),
@@ -5320,6 +5336,10 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             )
             if _content_filter_terminated:
                 _stub._content_filter_terminated = True
+            if _provider_outage_terminated:
+                _stub._provider_outage_terminated = True
+                if _stream_error_message:
+                    _stub._stream_error_message = _stream_error_message
             # Partial-stream stub: chunks WERE received (deltas fired), so
             # the provider is demonstrably responsive — clear the circuit
             # breaker (#58962) just like the full-success return below.

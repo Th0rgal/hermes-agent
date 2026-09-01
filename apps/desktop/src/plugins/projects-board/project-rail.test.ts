@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  authoritativeRoadmap,
   isInspectNextAction,
   isStaleControllerHeadline,
   itemAsRoadmapTask,
@@ -25,9 +26,7 @@ const row = (partial: Partial<ProjectRow>): ProjectRow => ({
 
 describe('isInspectNextAction', () => {
   it('matches inspect <uuid> and ignores real next actions', () => {
-    expect(
-      isInspectNextAction('inspect 51f37d4b-7e27-466a-8c2f-fec0be2bebed')
-    ).toBe(true)
+    expect(isInspectNextAction('inspect 51f37d4b-7e27-466a-8c2f-fec0be2bebed')).toBe(true)
     expect(isInspectNextAction('watch #2367 CI then merge')).toBe(false)
   })
 })
@@ -156,9 +155,7 @@ describe('railOpenItems', () => {
           open: true
         },
         {
-          attempts: [
-            { id: 'live', status: 'active', title: 'Grok #2332', updated_at: '2026-08-14T21:08:22Z' }
-          ],
+          attempts: [{ id: 'live', status: 'active', title: 'Grok #2332', updated_at: '2026-08-14T21:08:22Z' }],
           key: 'c5-preflight-pr2332',
           open: true
         },
@@ -183,9 +180,7 @@ describe('railOpenItems', () => {
     const detail: ProjectDetail = {
       items: [
         {
-          attempts: [
-            { id: 'live', status: 'active', title: 're-pin Verity', updated_at: '2026-08-15T10:00:00Z' }
-          ],
+          attempts: [{ id: 'live', status: 'active', title: 're-pin Verity', updated_at: '2026-08-15T10:00:00Z' }],
           desired_state: 'proven Verity tx',
           key: 'lido-verity-closure-v2',
           open: true
@@ -208,10 +203,7 @@ describe('railOpenItems', () => {
 
     const roadmap = roadmapFromItems(detail)
     expect(roadmap.summary).toEqual({ done: 1, failed: 0, running: 1, total: 2 })
-    expect(roadmap.tasks.map(task => task.task_key)).toEqual([
-      'lido-verity-closure-v2',
-      'certify-pr46'
-    ])
+    expect(roadmap.tasks.map(task => task.task_key)).toEqual(['lido-verity-closure-v2', 'certify-pr46'])
   })
 
   it('drops unacknowledged failed attempts from the public roadmap', () => {
@@ -254,5 +246,35 @@ describe('railOpenItems', () => {
 
     expect(roadmap.tasks.map(task => task.task_key)).toEqual(['pr-69', 'pr-63'])
     expect(roadmap.summary).toEqual({ done: 1, failed: 0, running: 0, total: 2 })
+  })
+
+  it('uses the server-declared denominator even when detail contains a live undeclared attempt', () => {
+    const detail: ProjectDetail = {
+      items: [
+        { attempts: [], key: 'declared', kind: 'track', open: false, status: 'done' },
+        { attempts: [{ id: 'live', status: 'active', updated_at: 'now' }], key: 'ad-hoc', open: true }
+      ],
+      project: { slug: 'verity-lido', status: 'active' }
+    }
+    const server = {
+      summary: {
+        declared_total: 1,
+        done: 1,
+        executing: 0,
+        failed: 0,
+        inconsistencies: 0,
+        running: 0,
+        satisfied: 1,
+        total: 1,
+        unplanned_attempts: 1
+      },
+      tasks: [{ status: 'accepted', task_key: 'declared', title: 'Declared' }],
+      unplanned_attempts: [{ status: 'running', task_key: 'ad-hoc', title: 'Ad hoc' }]
+    }
+
+    const roadmap = authoritativeRoadmap(server, detail)
+    expect(roadmap?.summary?.total).toBe(1)
+    expect(roadmap?.tasks.map(task => task.task_key)).toEqual(['declared'])
+    expect(roadmap && 'unplanned_attempts' in roadmap ? roadmap.unplanned_attempts : []).toHaveLength(1)
   })
 })

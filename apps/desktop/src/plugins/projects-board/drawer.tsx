@@ -26,6 +26,7 @@ import { type ReactNode, useEffect, useState } from 'react'
 
 import {
   answerDecision,
+  authoritativeRoadmap,
   type AutonomyLevel,
   fetchProject,
   fetchProjectState,
@@ -35,13 +36,11 @@ import {
   liveSessionIdFor,
   type MissionChip,
   type ProjectDecision,
-  projectDetailHasItems,
   type ProjectGrant,
   projectKey,
   type ProjectRow,
   PROJECTS_KEY,
   type ProjectTask,
-  roadmapFromItems,
   saveGrant,
   stateKey,
   tasksKey,
@@ -227,7 +226,10 @@ export function TaskRow({ task }: { task: ProjectTask }) {
   return (
     <div className="rounded-md text-[0.71rem]">
       <button
-        className={cn('flex w-full items-center gap-2 rounded px-1 py-0.5 text-left', expandable && 'hover:bg-(--ui-bg-quinary)')}
+        className={cn(
+          'flex w-full items-center gap-2 rounded px-1 py-0.5 text-left',
+          expandable && 'hover:bg-(--ui-bg-quinary)'
+        )}
         onClick={() => expandable && setOpen(o => !o)}
         type="button"
       >
@@ -235,17 +237,25 @@ export function TaskRow({ task }: { task: ProjectTask }) {
         <span
           className={cn(
             'min-w-0 flex-1 truncate',
-            task.status === 'accepted' ? 'text-(--ui-text-quaternary) line-through decoration-(--ui-stroke-secondary)' : 'text-(--ui-text-secondary)'
+            task.status === 'accepted'
+              ? 'text-(--ui-text-quaternary) line-through decoration-(--ui-stroke-secondary)'
+              : 'text-(--ui-text-secondary)'
           )}
         >
           {task.title}
         </span>
-        {task.pr_url && <Codicon className="shrink-0 text-(--ui-text-quaternary)" name="git-pull-request" size="0.7rem" />}
+        {task.pr_url && (
+          <Codicon className="shrink-0 text-(--ui-text-quaternary)" name="git-pull-request" size="0.7rem" />
+        )}
         {(task.attempts ?? 0) > 1 && (
           <span className="shrink-0 text-[0.5625rem] text-amber-500">{b.taskAttempts(task.attempts!)}</span>
         )}
         {expandable && (
-          <Codicon className="shrink-0 text-(--ui-text-quaternary)" name={open ? 'chevron-up' : 'chevron-down'} size="0.7rem" />
+          <Codicon
+            className="shrink-0 text-(--ui-text-quaternary)"
+            name={open ? 'chevron-up' : 'chevron-down'}
+            size="0.7rem"
+          />
         )}
       </button>
       {open && (
@@ -306,9 +316,7 @@ export function ActivityRow({ decision }: { decision: ProjectDecision }) {
         )}
       </div>
       {decision.rationale && <div className="pl-0.5 text-(--ui-text-quaternary)">{decision.rationale}</div>}
-      {answered && decision.answer && (
-        <div className="pl-0.5 text-(--ui-text-tertiary)">→ {decision.answer}</div>
-      )}
+      {answered && decision.answer && <div className="pl-0.5 text-(--ui-text-tertiary)">→ {decision.answer}</div>}
       {pr && (
         <a
           className="inline-flex w-fit items-center gap-1 text-[0.6875rem] text-indigo-400 hover:underline"
@@ -352,19 +360,29 @@ type MergeChoice = '' | 'custom' | 'full' | 'repos' | 'review-first'
 export function parseMergeAuthority(raw: null | string | undefined): { choice: MergeChoice; detail: string } {
   const value = (raw ?? '').trim()
 
-  if (!value) {return { choice: '', detail: '' }}
+  if (!value) {
+    return { choice: '', detail: '' }
+  }
 
-  if (value === 'full') {return { choice: 'full', detail: '' }}
+  if (value === 'full') {
+    return { choice: 'full', detail: '' }
+  }
 
-  if (value === 'review-first') {return { choice: 'review-first', detail: '' }}
+  if (value === 'review-first') {
+    return { choice: 'review-first', detail: '' }
+  }
 
-  if (value.startsWith('repo:')) {return { choice: 'repos', detail: value.slice('repo:'.length) }}
+  if (value.startsWith('repo:')) {
+    return { choice: 'repos', detail: value.slice('repo:'.length) }
+  }
 
   return { choice: 'custom', detail: value }
 }
 
 export function serializeMergeAuthority(choice: MergeChoice, detail: string): null | string {
-  if (choice === 'full' || choice === 'review-first') {return choice}
+  if (choice === 'full' || choice === 'review-first') {
+    return choice
+  }
 
   if (choice === 'repos') {
     const repos = detail
@@ -375,7 +393,9 @@ export function serializeMergeAuthority(choice: MergeChoice, detail: string): nu
     return repos.length > 0 ? `repo:${repos.join(',')}` : null
   }
 
-  if (choice === 'custom') {return detail.trim() || null}
+  if (choice === 'custom') {
+    return detail.trim() || null
+  }
 
   return null
 }
@@ -385,22 +405,23 @@ const BUDGET_PRESETS = ['1 mission', '2 missions', 'unbounded'] as const
 function parseBudget(raw: null | string | undefined): { detail: string; preset: string } {
   const value = (raw ?? '').trim()
 
-  if (!value) {return { detail: '', preset: '' }}
+  if (!value) {
+    return { detail: '', preset: '' }
+  }
 
-  if ((BUDGET_PRESETS as readonly string[]).includes(value)) {return { detail: '', preset: value }}
+  if ((BUDGET_PRESETS as readonly string[]).includes(value)) {
+    return { detail: '', preset: value }
+  }
 
   return { detail: value, preset: 'custom' }
 }
 
 /** The grant as one scannable line — shared by the drawer's collapsed panel
  *  and the chat rail. */
-export function grantSummaryParts(
-  b: ReturnType<typeof useBoard>,
-  grant: null | ProjectGrant | undefined
-): string[] {
+export function grantSummaryParts(b: ReturnType<typeof useBoard>, grant: null | ProjectGrant | undefined): string[] {
   return [
     grant?.autonomy_level
-      ? b.autonomy[grant.autonomy_level as keyof typeof b.autonomy] ?? grant.autonomy_level
+      ? (b.autonomy[grant.autonomy_level as keyof typeof b.autonomy] ?? grant.autonomy_level)
       : b.grantUnset,
     b.mergeSummary(grant?.merge_authority || b.grantUnset),
     ...(grant?.budget_per_tick ? [b.budgetSummary(grant.budget_per_tick)] : []),
@@ -490,7 +511,10 @@ function GrantPanel({ grant, slug }: { grant: null | ProjectGrant | undefined; s
         <>
           <span className="text-[0.625rem] text-(--ui-text-quaternary)">{b.grantHint}</span>
           <div className="grid grid-cols-[8rem_minmax(0,1fr)] items-center gap-x-3 gap-y-1.5 text-[0.71rem]">
-            <FieldLabel label={b.autonomyLevel} tip={level ? b.autonomyTip[level as keyof typeof b.autonomyTip] ?? '' : b.grantHint} />
+            <FieldLabel
+              label={b.autonomyLevel}
+              tip={level ? (b.autonomyTip[level as keyof typeof b.autonomyTip] ?? '') : b.grantHint}
+            />
             <select
               className="h-6 rounded border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary) px-1.5 text-[0.6875rem] text-(--ui-text-secondary)"
               onChange={event => setLevel(event.target.value)}
@@ -514,7 +538,9 @@ function GrantPanel({ grant, slug }: { grant: null | ProjectGrant | undefined; s
 
                   // Repo lists and legacy free text do not share meaning —
                   // clear the detail when the shape changes.
-                  if (next !== 'repos' && next !== 'custom') {setMergeDetail('')}
+                  if (next !== 'repos' && next !== 'custom') {
+                    setMergeDetail('')
+                  }
                 }}
                 value={mergeChoice}
               >
@@ -540,7 +566,9 @@ function GrantPanel({ grant, slug }: { grant: null | ProjectGrant | undefined; s
                 onChange={event => {
                   setBudgetPreset(event.target.value)
 
-                  if (event.target.value !== 'custom') {setBudgetDetail('')}
+                  if (event.target.value !== 'custom') {
+                    setBudgetDetail('')
+                  }
                 }}
                 value={budgetPreset}
               >
@@ -648,8 +676,8 @@ export function ProjectDrawer({
     queryKey: projectKey(slug ?? '')
   })
 
-  const { data: tasksFallback } = useQuery({
-    enabled: Boolean(slug) && Boolean(detail) && !projectDetailHasItems(detail!),
+  const { data: serverRoadmap } = useQuery({
+    enabled: Boolean(slug),
     queryFn: () => fetchProjectTasks(slug!),
     queryKey: tasksKey(slug ?? '')
   })
@@ -660,21 +688,7 @@ export function ProjectDrawer({
     queryKey: stateKey(slug ?? '')
   })
 
-  const roadmap = detail
-    ? projectDetailHasItems(detail)
-      ? roadmapFromItems(detail)
-      : tasksFallback
-        ? {
-            summary: tasksFallback.summary ?? {
-              done: 0,
-              failed: 0,
-              running: 0,
-              total: tasksFallback.tasks.length
-            },
-            tasks: tasksFallback.tasks
-          }
-        : null
-    : null
+  const roadmap = authoritativeRoadmap(serverRoadmap, detail)
 
   if (!slug) {
     return null
@@ -692,10 +706,7 @@ export function ProjectDrawer({
   const tasks = roadmap?.tasks ?? []
   const summary = roadmap?.summary
 
-  const autonomyLevel = (detail?.grant?.autonomy_level ?? row?.autonomy_level) as
-    | AutonomyLevel
-    | null
-    | undefined
+  const autonomyLevel = (detail?.grant?.autonomy_level ?? row?.autonomy_level) as AutonomyLevel | null | undefined
 
   return (
     <Dialog onOpenChange={open => !open && onClose()} open>
@@ -731,7 +742,10 @@ export function ProjectDrawer({
             )}
           </DialogTitle>
         </DialogHeader>
-        <div className="flex max-h-[min(72vh,44rem)] flex-col gap-4 overflow-y-auto pr-0.5 text-sm" data-selectable-text="true">
+        <div
+          className="flex max-h-[min(72vh,44rem)] flex-col gap-4 overflow-y-auto pr-0.5 text-sm"
+          data-selectable-text="true"
+        >
           {errorMessage ? (
             <ErrorState title={errorMessage} />
           ) : !detail || !project ? (
@@ -786,6 +800,16 @@ export function ProjectDrawer({
                       : b.roadmap
                   }
                 >
+                  {(serverRoadmap?.inconsistencies?.length ?? 0) > 0 && (
+                    <div className="mb-1.5 rounded border border-amber-400/25 bg-amber-400/10 px-2 py-1 text-[0.625rem] text-amber-500">
+                      <div>{b.roadmapInconsistencies(serverRoadmap!.inconsistencies!.length)}</div>
+                      {serverRoadmap!.inconsistencies!.map(issue => (
+                        <div className="truncate font-mono" key={`${issue.kind}-${issue.track}`}>
+                          {issue.track} · {issue.kind}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {tasks.length === 0 ? (
                     <span className="text-[0.71rem] text-(--ui-text-quaternary)">{b.roadmapEmpty}</span>
                   ) : (
@@ -795,6 +819,16 @@ export function ProjectDrawer({
                       ))}
                     </div>
                   )}
+                </Section>
+              )}
+
+              {(serverRoadmap?.unplanned_attempts?.length ?? 0) > 0 && (
+                <Section label={`${b.unplannedAttempts} · ${serverRoadmap!.unplanned_attempts!.length}`}>
+                  <div className="flex flex-col gap-0.5">
+                    {serverRoadmap!.unplanned_attempts!.map((task, index) => (
+                      <TaskRow key={task.id ?? `${task.task_key}-${index}`} task={task} />
+                    ))}
+                  </div>
                 </Section>
               )}
 

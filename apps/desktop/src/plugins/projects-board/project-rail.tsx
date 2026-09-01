@@ -23,16 +23,15 @@ import { useState } from 'react'
 
 import {
   $railCollapsed,
+  authoritativeRoadmap,
   fetchProject,
   fetchProjects,
   fetchProjectTasks,
   isInspectNextAction,
   leadSignal,
   liveMissions,
-  projectDetailHasItems,
   projectKey,
   PROJECTS_KEY,
-  roadmapFromItems,
   sessionGoalLead,
   tasksKey
 } from './api'
@@ -78,10 +77,10 @@ function RailBody({ slug }: { slug: string }) {
     retry: false
   })
 
-  const { data: tasksFallback } = useQuery({
-    enabled: Boolean(detail) && !projectDetailHasItems(detail!),
+  const { data: serverRoadmap } = useQuery({
     queryFn: () => fetchProjectTasks(slug),
     queryKey: tasksKey(slug),
+    refetchInterval: 60_000,
     retry: false
   })
 
@@ -96,16 +95,10 @@ function RailBody({ slug }: { slug: string }) {
   const pending = detail?.open_decisions ?? []
   const activity = (detail?.recent_decisions ?? []).slice(0, 5)
 
-  const roadmap = detail
-    ? projectDetailHasItems(detail)
-      ? roadmapFromItems(detail)
-      : tasksFallback
-        ? {
-            summary: tasksFallback.summary ?? { done: 0, failed: 0, running: 0, total: tasksFallback.tasks.length },
-            tasks: tasksFallback.tasks
-          }
-        : null
-    : null
+  // The API projection is authoritative: live mission-only attempts must not
+  // inflate the declared denominator. Keep local derivation only as a
+  // compatibility fallback while talking to an older/unavailable backend.
+  const roadmap = authoritativeRoadmap(serverRoadmap, detail)
 
   const tasks = roadmap?.tasks ?? []
   const summary = roadmap?.summary
@@ -202,6 +195,11 @@ function RailBody({ slug }: { slug: string }) {
               : b.roadmap
           }
         >
+          {(serverRoadmap?.summary?.inconsistencies ?? 0) > 0 && (
+            <div className="mb-1 text-[0.625rem] text-amber-500">
+              {b.roadmapInconsistencies(serverRoadmap!.summary!.inconsistencies)}
+            </div>
+          )}
           {tasks.length === 0 ? (
             <span className="text-[0.71rem] text-(--ui-text-quaternary)">{b.roadmapEmpty}</span>
           ) : (
@@ -212,6 +210,16 @@ function RailBody({ slug }: { slug: string }) {
             </div>
           )}
         </Section>
+
+        {(serverRoadmap?.unplanned_attempts?.length ?? 0) > 0 && (
+          <Section label={`${b.unplannedAttempts} · ${serverRoadmap!.unplanned_attempts!.length}`}>
+            <div className="flex flex-col gap-0.5">
+              {serverRoadmap!.unplanned_attempts!.map((task, index) => (
+                <TaskRow key={task.task_key || `${index}`} task={task} />
+              ))}
+            </div>
+          </Section>
+        )}
 
         {activity.length > 0 && (
           <Section label={b.recentActivity}>

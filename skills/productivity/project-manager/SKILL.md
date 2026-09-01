@@ -31,27 +31,33 @@ projects with real data, never from memory. Every project is identified by its
    health. Start here when the owner asks "how are my projects doing?".
 2. `get_project <slug>` — objective, status/mode, blocker, next action, grant,
    open decisions, recent decisions (the decision ledger), tracks.
-3. `get_project_tasks <slug>` — the roadmap: board tasks planned by the
-   project's boss missions plus chat-planned proposals (`status: "proposed"`),
-   with result digests, PR links, attempts, and a done/total summary.
+3. `get_project_tasks <slug>` — the server-authoritative roadmap projection.
+   `tasks` contains only declared, non-cancelled tracks; its
+   `declared_total` denominator never includes ad-hoc missions.
+   `unplanned_attempts` lists live undeclared work separately, while
+   `inconsistencies` explains evidence/lifecycle debt.
 
 When summarizing, lead with what needs the owner (open decisions, blockers,
 failed tasks), then progress (summary done/total), then what is running.
 
 ## Shaping the roadmap from conversation
 
-- `plan_project_tasks` — add items. Keys are stable kebab-case, unique per
-  project (`task_key`). A proposal is a *plan*, not dispatched work: the
-  project's controller adopts it by planning a real board task under the same
-  key, at which point the proposal drops out automatically.
-- `update_project_task` — edit an open proposal (title, prompt, acceptance
-  criteria, dependencies). Board tasks already adopted belong to their boss
-  mission — steer the mission instead.
-- `cancel_project_task` — remove an open proposal.
+- `plan_project_tasks` — declare tracks. Keys are stable kebab-case, unique per
+  project (`task_key`). Replanning preserves satisfied/cancelled lifecycle;
+  it cannot silently reopen terminal work.
+- `update_project_task` — revise a non-terminal track's title, desired state,
+  acceptance criteria, or dependencies.
+- `cancel_project_task` — cancel a non-terminal declared track.
+- Project mission launches include `project`, `track`, acceptance criteria,
+  and one stable `idempotency_key`. The backend atomically declares/revises
+  the track, owns/links the attempt, and supersedes the prior owner.
 
 Prefer small, verifiable items with acceptance criteria over vague epics.
-Re-planning an existing key updates it in place (idempotent), and revives it
-if it was cancelled.
+Completion is evidence-derived. Use `accept_project_track_evidence` only for
+an immutable receipt that satisfies the exact current criterion at the
+governed artifact version. Mission self-report is not evidence. Reopen a
+satisfied track only with `reopen_project_track`, recording the owner's real
+reason; this advances the revision so old evidence cannot satisfy it.
 
 ## Decisions and autonomy
 

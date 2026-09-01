@@ -19,10 +19,7 @@ type BoardMessages = {
   countTip: (active: number, attention: number) => string
   liveCount: (n: number) => string
   needsYou: (n: number) => string
-  col: Record<
-    'archived' | 'active' | 'attention' | 'paused',
-    { help: string; label: string }
-  >
+  col: Record<'archived' | 'active' | 'attention' | 'paused', { help: string; label: string }>
   attentionLocked: string
   moveTo: (label: string) => string
   openProject: string
@@ -109,6 +106,8 @@ type BoardMessages = {
   roadmapEmpty: string
   roadmapUnavailable: string
   roadmapProgress: (done: number, total: number) => string
+  unplannedAttempts: string
+  roadmapInconsistencies: (n: number) => string
   taskAttempts: (n: number) => string
   openPr: string
   workerMission: string
@@ -278,6 +277,8 @@ const en: BoardMessages = {
   roadmapEmpty: 'No open items.',
   roadmapUnavailable: 'Roadmap temporarily unavailable — retrying.',
   roadmapProgress: (done, total) => `${done}/${total} done`,
+  unplannedAttempts: 'Unplanned attempts',
+  roadmapInconsistencies: n => `${n} roadmap ${n === 1 ? 'inconsistency' : 'inconsistencies'}`,
   taskAttempts: n => `${n} attempt${n === 1 ? '' : 's'}`,
   openPr: 'Open PR',
   workerMission: 'Worker mission',

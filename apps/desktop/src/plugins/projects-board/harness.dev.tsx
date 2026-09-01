@@ -39,7 +39,11 @@ const projects: ProjectRow[] = [
     attention_reasons: ['controller blocked on CI'],
     autonomy_level: 'propose',
     conversation: { session_id: '20260806-verity-controller', source: 'binding' },
-    latest_update: { at: new Date(Date.now() - 3600e3).toISOString(), headline: 'CI red on #2213', mode: 'blocked: ci' },
+    latest_update: {
+      at: new Date(Date.now() - 3600e3).toISOString(),
+      headline: 'CI red on #2213',
+      mode: 'blocked: ci'
+    },
     missions: [{ github_pr: '#2213', id: 'm1', status: 'awaiting_user', title: 'Fix receipts CI', updated_at: null }],
     pending_decisions: 1
   }),
@@ -116,7 +120,17 @@ const details: Record<string, ProjectDetail> = {
 const tasks: Record<string, ProjectTasksResponse> = {
   coldcard: { tasks: [] },
   hermes: {
-    summary: { done: 1, failed: 0, running: 1, total: 3 },
+    summary: {
+      declared_total: 3,
+      done: 1,
+      executing: 1,
+      failed: 0,
+      inconsistencies: 0,
+      running: 1,
+      satisfied: 1,
+      total: 3,
+      unplanned_attempts: 0
+    },
     tasks: [
       { status: 'accepted', task_key: 'drawer-header', title: 'Consolidate drawer header' },
       { status: 'running', task_key: 'typed-grant', title: 'Typed grant panel', worker_mission_id: 'abcd1234' },
@@ -126,7 +140,17 @@ const tasks: Record<string, ProjectTasksResponse> = {
   },
   lido: { tasks: [] },
   verity: {
-    summary: { done: 2, failed: 1, running: 1, total: 5 },
+    summary: {
+      declared_total: 5,
+      done: 2,
+      executing: 1,
+      failed: 1,
+      inconsistencies: 0,
+      running: 1,
+      satisfied: 2,
+      total: 5,
+      unplanned_attempts: 0
+    },
     tasks: [
       { status: 'accepted', task_key: 'receipts', title: 'Exact-head receipts on #2213' },
       {
@@ -138,7 +162,12 @@ const tasks: Record<string, ProjectTasksResponse> = {
         task_key: 'ci-lane',
         title: 'Stabilize receipts CI lane'
       },
-      { status: 'running', task_key: 'bundle-digest', title: 'Bundle digest verification', worker_mission_id: 'wxyz9876' },
+      {
+        status: 'running',
+        task_key: 'bundle-digest',
+        title: 'Bundle digest verification',
+        worker_mission_id: 'wxyz9876'
+      },
       { status: 'failed', task_key: 'toolchain', title: 'Toolchain pinning sweep' },
       { status: 'pending', task_key: 'campaign', title: 'Validation campaign rollup' }
     ]
@@ -149,13 +178,21 @@ bindApi(<T,>(path: string): Promise<T> => {
   const detail = /^\/projects\/([^/]+)$/.exec(path)
   const taskList = /^\/projects\/([^/]+)\/tasks$/.exec(path)
 
-  if (path === '/projects') {return Promise.resolve({ projects } as T)}
+  if (path === '/projects') {
+    return Promise.resolve({ projects } as T)
+  }
 
-  if (taskList) {return Promise.resolve((tasks[taskList[1]] ?? { tasks: [] }) as T)}
+  if (taskList) {
+    return Promise.resolve((tasks[taskList[1]] ?? { tasks: [] }) as T)
+  }
 
-  if (detail) {return Promise.resolve(details[detail[1]] as T)}
+  if (detail) {
+    return Promise.resolve(details[detail[1]] as T)
+  }
 
-  if (path.includes('/state')) {return Promise.resolve({ states: [] } as T)}
+  if (path.includes('/state')) {
+    return Promise.resolve({ states: [] } as T)
+  }
 
   return Promise.reject(Object.assign(new Error('404'), { status: 404 }))
 })

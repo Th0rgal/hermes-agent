@@ -185,9 +185,30 @@ export interface ProjectTask {
   worker_mission_id?: null | string
 }
 
+export interface ProjectRoadmapSummary {
+  declared_total: number
+  done: number
+  executing: number
+  failed: number
+  inconsistencies: number
+  running: number
+  satisfied: number
+  total: number
+  unplanned_attempts: number
+}
+
+export interface ProjectRoadmapInconsistency {
+  error?: string
+  kind: string
+  revision?: null | number
+  track: string
+}
+
 export interface ProjectTasksResponse {
-  summary?: { done: number; failed: number; running: number; total: number }
+  inconsistencies?: ProjectRoadmapInconsistency[]
+  summary?: ProjectRoadmapSummary
   tasks: ProjectTask[]
+  unplanned_attempts?: ProjectTask[]
 }
 
 /** Only an explicit binding is a writable Desktop conversation.  The
@@ -347,10 +368,7 @@ export const tasksKey = (slug: string) => ['projects-board', 'tasks', slug] as c
 /** Projects newly ENTERING attention relative to the previous roster snapshot.
  *  A null previous (startup / rebind) yields none — a standing alert the app
  *  boots into is not a transition. */
-export function attentionTransitions(
-  previous: null | Record<string, string>,
-  projects: ProjectRow[]
-): string[] {
+export function attentionTransitions(previous: null | Record<string, string>, projects: ProjectRow[]): string[] {
   if (!previous) {
     return []
   }
@@ -662,12 +680,9 @@ export function controllerStop(project: ProjectRow, now = Date.now()): Controlle
 
   // The freshest proof of life wins: a scheduler heartbeat (the job ran, even
   // if its [SILENT] tick delivered nothing) counts as much as a delivery.
-  const heartbeatAt = project.controller_heartbeat_at
-    ? Date.parse(project.controller_heartbeat_at)
-    : Number.NaN
+  const heartbeatAt = project.controller_heartbeat_at ? Date.parse(project.controller_heartbeat_at) : Number.NaN
 
-  const freshestAt =
-    Number.isNaN(lastAt) || (!Number.isNaN(heartbeatAt) && heartbeatAt > lastAt) ? heartbeatAt : lastAt
+  const freshestAt = Number.isNaN(lastAt) || (!Number.isNaN(heartbeatAt) && heartbeatAt > lastAt) ? heartbeatAt : lastAt
 
   // The server saw the controller link + heartbeat; when it says healthy, the
   // client's 2h delivery-age heuristic must not overrule it into "stale" — a
@@ -704,8 +719,7 @@ const chipRecency = (chip: MissionChip): number => {
 
 /** Headlines that only restate an auto-resume or a stale writer-lease claim.
  *  When a writer is live these are not the project's current state. */
-const STALE_CONTROLLER_HEADLINE =
-  /lease writer|bloqu[ée]e par le lease|campagne relanc/i
+const STALE_CONTROLLER_HEADLINE = /lease writer|bloqu[ée]e par le lease|campagne relanc/i
 
 const LIVE_ITEM_STATUS = new Set([
   'active',
@@ -719,10 +733,7 @@ const LIVE_ITEM_STATUS = new Set([
 
 const CONTROLLER_BEHIND_MS = 15 * 60 * 1000
 
-export function isStaleControllerHeadline(
-  headline: string | null | undefined,
-  liveCount: number
-): boolean {
+export function isStaleControllerHeadline(headline: string | null | undefined, liveCount: number): boolean {
   if (liveCount < 1 || !headline) {
     return false
   }
@@ -768,9 +779,7 @@ export function leadSignal(project: ProjectRow): LeadSignal {
   const lastWorkAt = latestLiveWorkAt(project)
   const pendingDecisions = project.pending_decisions ?? 0
 
-  const headline = isStaleControllerHeadline(rawHeadline, liveCount)
-    ? nextAction
-    : (nextAction ?? rawHeadline)
+  const headline = isStaleControllerHeadline(rawHeadline, liveCount) ? nextAction : (nextAction ?? rawHeadline)
 
   return {
     blocker: project.latest_update?.blocker?.trim() || null,
@@ -794,11 +803,7 @@ function latestLiveWorkAt(project: ProjectRow): string | null {
   )
 }
 
-function isControllerBehind(
-  lastSignalAt: string | null,
-  lastWorkAt: string | null,
-  liveCount: number
-): boolean {
+function isControllerBehind(lastSignalAt: string | null, lastWorkAt: string | null, liveCount: number): boolean {
   if (liveCount < 1 || !lastSignalAt || !lastWorkAt) {
     return false
   }
@@ -859,9 +864,7 @@ export function itemAsRoadmapTask(item: ProjectItem): ProjectTask {
           : 'pending'
 
   const title =
-    item.desired_state?.trim() ||
-    item.attempts.find(attempt => attempt.title?.trim())?.title?.trim() ||
-    item.key
+    item.desired_state?.trim() || item.attempts.find(attempt => attempt.title?.trim())?.title?.trim() || item.key
 
   return {
     attempts: item.attempts.length,
@@ -922,6 +925,12 @@ export function roadmapFromItems(detail: ProjectDetail): {
   return { summary: { done, failed, running, total: tasks.length }, tasks }
 }
 
+/** Prefer the backend's declarative projection. Item-derived progress exists
+ * only for compatibility with older runtimes that do not expose /tasks. */
+export function authoritativeRoadmap(server: ProjectTasksResponse | undefined, detail: ProjectDetail | undefined) {
+  return server ?? (detail ? roadmapFromItems(detail) : null)
+}
+
 /** Open items, live first, capped so the rail cannot dump a 120-track graveyard. */
 export function railOpenItems(detail: ProjectDetail, cap = 8): RailItem[] {
   const ranked = (detail.items ?? [])
@@ -946,10 +955,7 @@ export function railOpenItems(detail: ProjectDetail, cap = 8): RailItem[] {
  *  and the rest folded into one "+N" count. A card with nothing live never
  *  renders a wall of dead chips: at most ONE most-recent chip + "+N". The
  *  drawer keeps the full list. */
-export function selectChips(
-  missions: MissionChip[],
-  cap = 3
-): { chips: MissionChip[]; overflow: number } {
+export function selectChips(missions: MissionChip[], cap = 3): { chips: MissionChip[]; overflow: number } {
   const live = missions
     .filter(m => m.status in LIVE_CHIP_ORDER)
     .sort((a, b) => LIVE_CHIP_ORDER[a.status] - LIVE_CHIP_ORDER[b.status] || chipRecency(b) - chipRecency(a))

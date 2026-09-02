@@ -23,18 +23,22 @@ import { useState } from 'react'
 
 import {
   $railCollapsed,
+  ackReconciliation,
   fetchProject,
   fetchProjects,
   fetchProjectTasks,
+  invalidateBoardQueries,
   isInspectNextAction,
   leadSignal,
   liveMissions,
   projectDetailHasItems,
   projectKey,
+  type ProjectReconciliation,
   PROJECTS_KEY,
   roadmapFromItems,
+  type RoadmapSummary,
   sessionGoalLead,
-  tasksKey
+  tasksKey,
 } from './api'
 import {
   ActivityRow,
@@ -62,6 +66,36 @@ function useActiveProjectSlug(): null | string {
   }
 
   return null
+}
+
+function ReconciliationBanner({ receipt, slug }: { receipt: ProjectReconciliation; slug: string }) {
+  const b = useBoard()
+  const [busy, setBusy] = useState(false)
+  const corrections = receipt.payload?.corrections
+  const count = Array.isArray(corrections) ? corrections.length : 0
+
+  if (count === 0) {
+    return null
+  }
+
+  return (
+    <div className="flex items-center gap-2 rounded-md border border-indigo-400/25 bg-indigo-400/10 px-2.5 py-1.5 text-[0.6875rem] text-indigo-300">
+      <span className="min-w-0 flex-1">{b.reconcileBanner(count)}</span>
+      <button
+        className="shrink-0 rounded px-1.5 py-0.5 text-[0.625rem] uppercase tracking-wide text-indigo-200 hover:bg-indigo-400/20 disabled:opacity-50"
+        disabled={busy}
+        onClick={() => {
+          setBusy(true)
+          ackReconciliation(slug, receipt.id)
+            .then(() => invalidateBoardQueries(slug))
+            .finally(() => setBusy(false))
+        }}
+        type="button"
+      >
+        {b.reconcileAck}
+      </button>
+    </div>
+  )
 }
 
 function RailBody({ slug }: { slug: string }) {
@@ -105,7 +139,12 @@ function RailBody({ slug }: { slug: string }) {
       ? roadmapFromItems(detail)
       : tasksFallback
         ? {
-            summary: tasksFallback.summary ?? { done: 0, failed: 0, running: 0, total: tasksFallback.tasks.length },
+            summary: (tasksFallback.summary ?? {
+              done: 0,
+              failed: 0,
+              running: 0,
+              total: tasksFallback.tasks.length
+            }) as RoadmapSummary,
             tasks: tasksFallback.tasks
           }
         : null
@@ -169,7 +208,11 @@ function RailBody({ slug }: { slug: string }) {
                 ))}
               </div>
             ) : (
-              <div className="text-[0.71rem] text-(--ui-text-quaternary)">{b.roadmapEmpty}</div>
+              <div className="text-[0.71rem] text-(--ui-text-quaternary)">
+                {summary?.serverAuthoritative
+                  ? b.statusCounters(summary.liveAttempts ?? 0, summary.open ?? 0)
+                  : b.noLiveMissions}
+              </div>
             )}
             {nextAction && (
               <div className="text-[0.625rem] text-(--ui-text-quaternary)">{b.nextActionArrow(nextAction)}</div>
@@ -199,13 +242,26 @@ function RailBody({ slug }: { slug: string }) {
           </Section>
         )}
 
+        {detail?.reconciliation && (
+          <ReconciliationBanner receipt={detail.reconciliation} slug={slug} />
+        )}
+
         <Section
           label={
             summary && summary.total > 0
-              ? `${b.roadmap} · ${b.roadmapProgress(summary.done, summary.total)}`
+              ? [
+                  b.roadmap,
+                  b.roadmapProgress(summary.done, summary.total),
+                  summary.claimOnly ? b.roadmapClaimOnly(summary.claimOnly) : null
+                ]
+                  .filter(Boolean)
+                  .join(' · ')
               : b.roadmap
           }
         >
+          {summary?.sourceUnavailable && (
+            <div className="mb-1 text-[0.6875rem] text-amber-500">{b.roadmapSourceUnavailable}</div>
+          )}
           {tasks.length === 0 ? (
             <span className="text-[0.71rem] text-(--ui-text-quaternary)">{b.roadmapEmpty}</span>
           ) : (

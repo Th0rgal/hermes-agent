@@ -150,13 +150,57 @@ export interface ProjectItemAttempt {
   updated_at: string
 }
 
+/** Canonical plan state from the situation builder (sandboxed.sh ≥ tracks v2).
+ *  Absent on older backends; every field below is then derived client-side. */
+export type ItemDerivedState =
+  | 'blocked'
+  | 'cancelled'
+  | 'claim_only'
+  | 'executing'
+  | 'inconsistent'
+  | 'ready'
+  | 'satisfied'
+  | 'waiting'
+
 export interface ProjectItem {
+  acceptance?: { claim_only: boolean; total: number; verified: number } | null
   attempts: ProjectItemAttempt[]
+  blocked_by?: string[]
+  blocker?: null | string
+  derived_state?: ItemDerivedState | null
   desired_state?: null | string
+  id?: null | string
   key: string
   kind?: string
   open: boolean
+  /** declared | imported | absorbed — `absorbed` rows are unplanned. */
+  origin?: null | string
+  owner?: { attempt_id: string; lease_until?: null | string; status: string } | null
   status?: null | string
+  /** Server-computed display title (never the raw key). */
+  title?: null | string
+}
+
+/** The one summary every surface renders (sandboxed.sh `situation.summary`). */
+export interface ProjectSummary {
+  as_of?: string
+  blocked: number
+  cancelled?: number
+  claim_only: number
+  cursor?: string
+  live_attempts: number
+  open: number
+  source_unavailable?: boolean
+  total: number
+  verified_satisfied: number
+}
+
+/** A `reconcile` receipt the operator has not acknowledged yet. */
+export interface ProjectReconciliation {
+  id: string
+  kind: string
+  observed_at: string
+  payload?: { corrections?: unknown[] } | null
 }
 
 export interface ProjectDetail {
@@ -167,6 +211,8 @@ export interface ProjectDetail {
   project: ProjectRecord
   /** Autonomous acts + answered escalations, newest first. */
   recent_decisions?: ProjectDecision[]
+  reconciliation?: null | ProjectReconciliation
+  summary?: null | ProjectSummary
   tracks?: TrackHealth[]
 }
 
@@ -176,14 +222,35 @@ export interface ProjectTask {
   attempts?: number
   boss_mission_id?: null | string
   depends_on?: string[]
+  derived_state?: ItemDerivedState | null
   id?: null | string
   pr_url?: null | string
   result_digest?: null | string
+  /** accepted | claimed | running | blocked | failed | proposed | pending | cancelled */
   status: string
   task_key: string
   title: string
+  /** `origin = absorbed`: a mission tag nobody planned. */
+  unplanned?: boolean
   updated_at?: null | string
   worker_mission_id?: null | string
+}
+
+/** What the rail/card render. `done` is verified satisfaction when the server
+ *  summary is present (claims are counted apart); legacy backends fold claims
+ *  into `done` because they cannot tell the two apart. */
+export interface RoadmapSummary {
+  blocked?: number
+  claimOnly?: number
+  done: number
+  failed: number
+  liveAttempts?: number
+  open?: number
+  running: number
+  /** True when the numbers came from `situation.summary`, not a client count. */
+  serverAuthoritative?: boolean
+  sourceUnavailable?: boolean
+  total: number
 }
 
 export interface ProjectTasksResponse {
@@ -260,6 +327,7 @@ export function invalidateBoardQueries(slug?: null | string): void {
     void queryClient.invalidateQueries({ queryKey: projectKey(slug) })
     void queryClient.invalidateQueries({ queryKey: tasksKey(slug) })
     void queryClient.invalidateQueries({ queryKey: stateKey(slug) })
+
     return
   }
 
@@ -589,6 +657,14 @@ export const fetchProjectState = (slug: string, limit = 20) =>
 export const fetchProjectTasks = (slug: string) =>
   call<ProjectTasksResponse>(`/projects/${encodeURIComponent(slug)}/tasks`)
 
+/** Acknowledge a migration/import reconciliation receipt (appends an ack;
+ *  the receipt itself is immutable). */
+export const ackReconciliation = (slug: string, receiptId: string) =>
+  call(`/projects/${encodeURIComponent(slug)}/reconcile/ack`, {
+    body: { receipt_id: receiptId },
+    method: 'POST'
+  })
+
 // ── writes ───────────────────────────────────────────────────────────────────
 
 export type ProjectAction = 'archive' | 'delete' | 'pause' | 'resume' | 'unarchive'
@@ -916,6 +992,29 @@ export type RailItem = {
 /** Map a project item onto the checklist row the rail/drawer already render.
  *  The backend `/tasks` endpoint now returns this same list — items ARE the
  *  roadmap — so the desktop must not keep a second board-task fetch. */
+/** Checklist status from the server's derived state. */
+function statusFromDerivedState(state: ItemDerivedState, failedOnly: boolean, proposed: boolean): string {
+  switch (state) {
+    case 'satisfied':
+      return 'accepted'
+
+    case 'claim_only':
+      return 'claimed'
+
+    case 'executing':
+      return 'running'
+
+    case 'blocked':
+      return 'blocked'
+
+    case 'cancelled':
+      return 'cancelled'
+
+    default:
+      return proposed ? 'proposed' : failedOnly ? 'failed' : 'pending'
+  }
+}
+
 export function itemAsRoadmapTask(item: ProjectItem): ProjectTask {
   const live = item.attempts.some(attempt => LIVE_ITEM_STATUS.has(attempt.status))
 
@@ -923,28 +1022,35 @@ export function itemAsRoadmapTask(item: ProjectItem): ProjectTask {
     item.attempts.length > 0 &&
     item.attempts.every(attempt => attempt.status === 'failed' || attempt.status === 'interrupted')
 
-  const status = !item.open
-    ? 'accepted'
-    : live
-      ? 'running'
-      : item.status === 'proposed'
-        ? 'proposed'
-        : failedOnly
-          ? 'failed'
-          : 'pending'
+  const status = item.derived_state
+    ? statusFromDerivedState(item.derived_state, failedOnly, item.status === 'proposed')
+    : !item.open
+      ? 'accepted'
+      : live
+        ? 'running'
+        : item.status === 'proposed'
+          ? 'proposed'
+          : failedOnly
+            ? 'failed'
+            : 'pending'
 
+  // The server title wins; the raw key is the last resort and only for
+  // backends that predate `title`.
   const title =
+    item.title?.trim() ||
     item.desired_state?.trim() ||
     item.attempts.find(attempt => attempt.title?.trim())?.title?.trim() ||
     item.key
 
   return {
     attempts: item.attempts.length,
+    derived_state: item.derived_state ?? null,
     status,
     task_key: item.key,
     title,
+    unplanned: item.origin === 'absorbed',
     updated_at: item.attempts[0]?.updated_at ?? null,
-    worker_mission_id: item.attempts[0]?.id ?? null
+    worker_mission_id: item.owner?.attempt_id ?? item.attempts[0]?.id ?? null
   }
 }
 
@@ -957,7 +1063,23 @@ export function projectDetailHasItems(detail: ProjectDetail): boolean {
  *  Mirrors sandboxed.sh `item_belongs_on_roadmap`. Mission-only rows have no
  *  declared `status`; keeping every `open` item dumps 100 failed certs. */
 export function itemBelongsOnRoadmap(item: ProjectItem): boolean {
-  if (item.attempts.some(attempt => LIVE_ITEM_STATUS.has(attempt.status))) {
+  const live = item.attempts.some(attempt => LIVE_ITEM_STATUS.has(attempt.status))
+
+  if (item.derived_state) {
+    // Canonical rule (mirrors sandboxed.sh `situation::belongs_on_roadmap`):
+    // cancelled never; an unplanned (absorbed) row only while something is live.
+    if (item.derived_state === 'cancelled') {
+      return false
+    }
+
+    if (item.derived_state === 'executing' || live) {
+      return true
+    }
+
+    return item.origin !== 'absorbed'
+  }
+
+  if (live) {
     return true
   }
 
@@ -975,14 +1097,14 @@ export function itemBelongsOnRoadmap(item: ProjectItem): boolean {
 }
 
 export function roadmapFromItems(detail: ProjectDetail): {
-  summary: { done: number; failed: number; running: number; total: number }
+  summary: RoadmapSummary
   tasks: ProjectTask[]
 } {
   const tasks = (detail.items ?? []).filter(itemBelongsOnRoadmap).map(itemAsRoadmapTask)
 
-  let done = 0
   let running = 0
   let failed = 0
+  let done = 0
 
   for (const task of tasks) {
     if (task.status === 'accepted') {
@@ -994,6 +1116,29 @@ export function roadmapFromItems(detail: ProjectDetail): {
     }
   }
 
+  const server = detail.summary
+
+  if (server && typeof server.total === 'number') {
+    // The server summary is the only progress number: `done` is verified
+    // satisfaction, claims ride separately, and the client never recounts.
+    return {
+      summary: {
+        blocked: server.blocked,
+        claimOnly: server.claim_only,
+        done: server.verified_satisfied,
+        failed,
+        liveAttempts: server.live_attempts,
+        open: server.open,
+        running,
+        serverAuthoritative: true,
+        sourceUnavailable: Boolean(server.source_unavailable),
+        total: server.total
+      },
+      tasks
+    }
+  }
+
+  // Legacy backend: `done` cannot tell a claim from a verified track.
   return { summary: { done, failed, running, total: tasks.length }, tasks }
 }
 

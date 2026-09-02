@@ -109,6 +109,14 @@ type BoardMessages = {
   roadmapEmpty: string
   roadmapUnavailable: string
   roadmapProgress: (done: number, total: number) => string
+  roadmapClaimOnly: (n: number) => string
+  roadmapSourceUnavailable: string
+  statusCounters: (live: number, open: number) => string
+  noLiveMissions: string
+  reconcileBanner: (n: number) => string
+  reconcileAck: string
+  unplannedTag: string
+  claimedTitle: string
   taskAttempts: (n: number) => string
   openPr: string
   workerMission: string
@@ -278,6 +286,14 @@ const en: BoardMessages = {
   roadmapEmpty: 'No open items.',
   roadmapUnavailable: 'Roadmap temporarily unavailable — retrying.',
   roadmapProgress: (done, total) => `${done}/${total} done`,
+  roadmapClaimOnly: n => `${n} claimed`,
+  roadmapSourceUnavailable: 'Roadmap source unavailable — counts are partial.',
+  statusCounters: (live, open) => `${live} live · ${open} open`,
+  noLiveMissions: 'No live missions.',
+  reconcileBanner: n => `${n} roadmap correction${n === 1 ? '' : 's'} from the migration — review, then acknowledge.`,
+  reconcileAck: 'Acknowledge',
+  unplannedTag: 'unplanned',
+  claimedTitle: 'Marked done without evidence',
   taskAttempts: n => `${n} attempt${n === 1 ? '' : 's'}`,
   openPr: 'Open PR',
   workerMission: 'Worker mission',

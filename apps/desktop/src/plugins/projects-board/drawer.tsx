@@ -206,7 +206,11 @@ export function PendingDecisionRow({ decision, slug }: { decision: ProjectDecisi
  *  boss's verdict" — rendered as done-ish but muted. */
 const TASK_GLYPH: Record<string, { icon: string; tone: string }> = {
   accepted: { icon: 'pass-filled', tone: '#34d399' },
+  // Something is in the way: an open dependency or an operator-declared blocker.
+  blocked: { icon: 'lock', tone: '#fbbf24' },
   cancelled: { icon: 'circle-slash', tone: 'var(--ui-text-quaternary)' },
+  // Marked done before receipts existed — a claim, not verified satisfaction.
+  claimed: { icon: 'pass', tone: 'var(--ui-text-tertiary)' },
   failed: { icon: 'error', tone: '#f87171' },
   pending: { icon: 'circle-large-outline', tone: 'var(--ui-text-quaternary)' },
   // Planned in chat / by the controller, not yet dispatched to a worker.
@@ -231,15 +235,30 @@ export function TaskRow({ task }: { task: ProjectTask }) {
         onClick={() => expandable && setOpen(o => !o)}
         type="button"
       >
-        <Codicon className="shrink-0" name={glyph.icon} size="0.8rem" style={{ color: glyph.tone }} />
+        <Codicon
+          className="shrink-0"
+          name={glyph.icon}
+          size="0.8rem"
+          style={{ color: glyph.tone }}
+          title={task.status === 'claimed' ? b.claimedTitle : undefined}
+        />
         <span
           className={cn(
             'min-w-0 flex-1 truncate',
-            task.status === 'accepted' ? 'text-(--ui-text-quaternary) line-through decoration-(--ui-stroke-secondary)' : 'text-(--ui-text-secondary)'
+            task.status === 'accepted'
+              ? 'text-(--ui-text-quaternary) line-through decoration-(--ui-stroke-secondary)'
+              : task.status === 'claimed'
+                ? 'text-(--ui-text-tertiary) italic'
+                : 'text-(--ui-text-secondary)'
           )}
         >
           {task.title}
         </span>
+        {task.unplanned && (
+          <span className="shrink-0 rounded bg-(--ui-bg-quaternary) px-1 text-[0.5625rem] uppercase tracking-wide text-(--ui-text-quaternary)">
+            {b.unplannedTag}
+          </span>
+        )}
         {task.pr_url && <Codicon className="shrink-0 text-(--ui-text-quaternary)" name="git-pull-request" size="0.7rem" />}
         {(task.attempts ?? 0) > 1 && (
           <span className="shrink-0 text-[0.5625rem] text-amber-500">{b.taskAttempts(task.attempts!)}</span>

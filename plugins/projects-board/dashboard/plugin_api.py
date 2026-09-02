@@ -256,6 +256,27 @@ async def get_project_tasks(slug: str) -> Dict[str, Any]:
     return body
 
 
+@router.post("/projects/{slug}/reconcile/ack")
+async def ack_reconciliation(slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Acknowledge a roadmap reconciliation receipt (migration / tracker
+    import corrections). Appends an ack receipt on sandboxed.sh; nothing is
+    edited or deleted."""
+    slug = _clean_slug(slug)
+    receipt_id = str((payload or {}).get("receipt_id") or "").strip()
+    if not receipt_id:
+        raise HTTPException(status_code=400, detail="receipt_id is required")
+    body = await _sandboxed_request(
+        "POST",
+        f"/api/projects/{slug}/reconcile/ack",
+        body={"receipt_id": receipt_id, "actor": "desktop"},
+    )
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=502, detail="sandboxed.sh returned an unexpected ack shape"
+        )
+    return body
+
+
 @router.get("/sessions/{session_id}/resolve")
 async def resolve_session(session_id: str) -> Dict[str, Any]:
     """Follow continuation/resume pointers to the LIVE session id.

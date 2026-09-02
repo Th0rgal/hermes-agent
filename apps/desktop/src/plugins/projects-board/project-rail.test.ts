@@ -8,6 +8,7 @@ import {
   leadSignal,
   liveMissions,
   type ProjectDetail,
+  type ProjectItem,
   type ProjectRow,
   railOpenItems,
   roadmapFromItems,
@@ -222,6 +223,7 @@ describe('railOpenItems', () => {
         open: true
       }
     ]
+
     const declaredDone: ProjectDetail['items'] = [
       {
         attempts: [],
@@ -232,6 +234,7 @@ describe('railOpenItems', () => {
         status: 'done'
       }
     ]
+
     const declaredOpen: ProjectDetail['items'] = [
       {
         attempts: [],
@@ -254,5 +257,103 @@ describe('railOpenItems', () => {
 
     expect(roadmap.tasks.map(task => task.task_key)).toEqual(['pr-69', 'pr-63'])
     expect(roadmap.summary).toEqual({ done: 1, failed: 0, running: 0, total: 2 })
+  })
+})
+
+
+describe('roadmapFromItems with the server situation summary', () => {
+  it('renders verified/total from the server and never recounts, with claims apart', () => {
+    const detail: ProjectDetail = {
+      items: [
+        {
+          attempts: [],
+          derived_state: 'claim_only',
+          key: 's3',
+          open: false,
+          origin: 'declared',
+          status: 'done',
+          title: 'S3 token transfer completeness'
+        },
+        {
+          attempts: [{ id: 'm1', status: 'active', title: 'repair', updated_at: '2026-09-01T00:00:00Z' }],
+          derived_state: 'executing',
+          key: 'ux1',
+          open: true,
+          origin: 'declared',
+          owner: { attempt_id: 'm1', lease_until: '2026-09-02T00:00:00Z', status: 'active' },
+          status: 'open',
+          title: 'UX1 Lido acceptance pass'
+        },
+        {
+          attempts: [],
+          derived_state: 'blocked',
+          key: 'ux2',
+          open: true,
+          origin: 'declared',
+          status: 'open',
+          title: 'UX2 deploy and obtain acceptance'
+        },
+        {
+          attempts: [{ id: 'dead', status: 'failed', title: 'old', updated_at: '2026-08-01T00:00:00Z' }],
+          derived_state: 'ready',
+          key: 'pr-233-repair',
+          open: true,
+          origin: 'absorbed',
+          status: 'open',
+          title: 'PR 233 Repair'
+        },
+        {
+          attempts: [],
+          derived_state: 'cancelled',
+          key: 'wave-3',
+          open: false,
+          origin: 'declared',
+          status: 'cancelled',
+          title: 'Wave 3'
+        }
+      ],
+      project: { slug: 'verity-lido', status: 'active' },
+      summary: {
+        blocked: 1,
+        cancelled: 1,
+        claim_only: 1,
+        live_attempts: 1,
+        open: 2,
+        source_unavailable: false,
+        total: 3,
+        verified_satisfied: 0
+      }
+    }
+
+    const roadmap = roadmapFromItems(detail)
+    expect(roadmap.summary.serverAuthoritative).toBe(true)
+    expect(roadmap.summary.done).toBe(0)
+    expect(roadmap.summary.total).toBe(3)
+    expect(roadmap.summary.claimOnly).toBe(1)
+    expect(roadmap.summary.blocked).toBe(1)
+    expect(roadmap.summary.liveAttempts).toBe(1)
+    // unplanned row without a live attempt and the cancelled wave stay off the list
+    expect(roadmap.tasks.map(task => task.task_key)).toEqual(['s3', 'ux1', 'ux2'])
+    expect(roadmap.tasks.map(task => task.status)).toEqual(['claimed', 'running', 'blocked'])
+    // server titles, never raw keys; the lease holder is the worker
+    expect(roadmap.tasks[1].title).toBe('UX1 Lido acceptance pass')
+    expect(roadmap.tasks[1].worker_mission_id).toBe('m1')
+  })
+
+  it('shows an unplanned row while something is live on it and tags it', () => {
+    const item: ProjectItem = {
+      attempts: [{ id: 'm9', status: 'active', title: null, updated_at: '2026-09-01T00:00:00Z' }],
+      derived_state: 'executing',
+      key: 'repair-pr-233',
+      open: true,
+      origin: 'absorbed',
+      status: 'open',
+      title: 'Repair PR 233'
+    }
+
+    expect(itemBelongsOnRoadmap(item)).toBe(true)
+    const task = itemAsRoadmapTask(item)
+    expect(task.unplanned).toBe(true)
+    expect(task.title).toBe('Repair PR 233')
   })
 })

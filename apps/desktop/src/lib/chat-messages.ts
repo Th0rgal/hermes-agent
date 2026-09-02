@@ -357,12 +357,15 @@ export function dedupeRepeatedToolCallsInParts(parts: ChatMessagePart[]): ChatMe
 
     if (previous === undefined) {
       keep.set(part.toolCallId, index)
+
       return
     }
 
     const previousPart = parts[previous]
+
     const previousHasResult =
       previousPart.type === 'tool-call' && 'result' in previousPart && previousPart.result != null
+
     const hasResult = 'result' in part && part.result != null
 
     if (hasResult && !previousHasResult) {
@@ -527,6 +530,64 @@ function transcriptContent(displayKind: SessionMessage['display_kind'], content:
   return displayKind === 'hidden' || displayKind === 'intentional_silence' ? null : content
 }
 
+/** Rows the mission-callback route wrote before it typed them. Same three
+ *  fixed prefixes as `tui_gateway/server.py::_legacy_display_kind`; this is
+ *  the migration for transcripts already on disk, not how new rows get typed. */
+const MISSION_CALLBACK_WAKE_PREFIX = 'A routed mission-complete callback'
+const MISSION_CALLBACK_SEPARATOR_PREFIX = 'A mission you started has finished'
+const MISSION_CALLBACK_PREFIX = '[Mission callback:'
+
+export function legacyDisplayKind(role: SessionMessage['role'], text: string): SessionMessage['display_kind'] | undefined {
+  const stripped = text.trimStart()
+
+  if (role === 'user' && stripped.startsWith(MISSION_CALLBACK_WAKE_PREFIX)) {
+    return 'mission_callback_wake'
+  }
+
+  if (role === 'user' && stripped.startsWith(MISSION_CALLBACK_SEPARATOR_PREFIX)) {
+    return 'hidden'
+  }
+
+  if (role === 'assistant' && stripped.startsWith(MISSION_CALLBACK_PREFIX)) {
+    return 'mission_callback'
+  }
+
+  return undefined
+}
+
+/** User rows that are events, not operator prompts. They render as timeline
+ *  lines and must never take part in prompt de-duplication. */
+export const SYSTEM_TYPED_USER_KINDS: ReadonlySet<string> = new Set([
+  'model_switch',
+  'async_delegation_complete',
+  'auto_continue',
+  'personality_switch',
+  'mission_callback_wake'
+])
+
+function missionCallbackFacts(metadata: SessionMessage['display_metadata'], content: string): { status: string; title: string } {
+  const parsed = parseDisplayMetadata(metadata)
+  const metaTitle = typeof parsed?.title === 'string' ? parsed.title.trim() : ''
+  const metaStatus = typeof parsed?.status === 'string' ? parsed.status.trim() : ''
+  // Legacy rows carry the facts in the prose: "[Mission callback: <title>]\nstatus=<s> mission=…".
+  const headerTitle = /^\s*\[Mission callback:\s*([^\]]*)\]/.exec(content)?.[1]?.trim() ?? ''
+  const proseStatus = /^status=(\S+)/m.exec(content)?.[1]?.trim() ?? ''
+
+  return { status: metaStatus || proseStatus, title: metaTitle || headerTitle }
+}
+
+/** "mission finished · <title> · <status>" — the divider / timeline label. */
+export function missionCallbackLabel(metadata: SessionMessage['display_metadata'], content: string): string {
+  const { status, title } = missionCallbackFacts(metadata, content)
+
+  return ['mission finished', title, status].filter(Boolean).join(' · ')
+}
+
+/** The callback prose without its machine header line — the divider carries it. */
+function missionCallbackBody(content: string): string {
+  return content.replace(/^\s*\[Mission callback:[^\n]*\n?/, '').replace(/^status=[^\n]*\n?/, '')
+}
+
 const INTENTIONAL_SILENCE_MARKERS = new Set(['[SILENT]', 'SILENT', 'NO_REPLY', 'NO REPLY'])
 
 function withoutIntentionalSilenceTurns(messages: SessionMessage[]): SessionMessage[] {
@@ -613,6 +674,11 @@ function timelineDisplayContent(message: SessionMessage, content: string): strin
     return count === undefined
       ? 'background agent work finished'
       : `${count} background agent${count === 1 ? '' : 's'} finished`
+  }
+
+  if (message.display_kind === 'mission_callback_wake') {
+    // Never the wake prompt itself — the operator did not type it.
+    return missionCallbackLabel(message.display_metadata, '')
   }
 
   return content
@@ -1335,29 +1401,37 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
 
     const isObservedCronDelivery = message.role === 'user' && deliveryMatch !== null
 
+    // Untyped legacy mission-callback rows get their kind from the fixed prefix.
+    const displayKind = message.display_kind ?? legacyDisplayKind(message.role, contentText)
+    const typedMessage: SessionMessage = displayKind === message.display_kind ? message : { ...message, display_kind: displayKind }
+
     const durableDisplayRole: SessionMessage['role'] =
-      message.display_kind === 'model_switch' ||
-      message.display_kind === 'async_delegation_complete' ||
-      message.display_kind === 'auto_continue' ||
-      message.display_kind === 'personality_switch'
-        ? 'system'
-        : message.role
+      displayKind !== undefined && SYSTEM_TYPED_USER_KINDS.has(displayKind) ? 'system' : message.role
 
     const displayRole: SessionMessage['role'] = isObservedCronDelivery
       ? 'assistant'
       : durableDisplayRole
 
-    const delivery =
-      deliveryMatch && displayRole === 'assistant' ? { label: deliveryMatch[1].trim() || 'cron' } : undefined
+    const isMissionCallback = displayKind === 'mission_callback' && message.role === 'assistant'
+
+    const delivery = isMissionCallback
+      ? { label: missionCallbackLabel(message.display_metadata, contentText) }
+      : deliveryMatch && displayRole === 'assistant'
+        ? { label: deliveryMatch[1].trim() || 'cron' }
+        : undefined
 
     const rawDisplayContent = transcriptContent(
-      message.display_kind,
-      timelineDisplayContent(message, displayContentForMessage(message.role, content))
+      displayKind,
+      timelineDisplayContent(typedMessage, displayContentForMessage(message.role, content))
     )
 
     // The sentinel is provenance, not prose — the divider carries the label.
     const sentinelStrippedContent = stripStateSignature(
-      delivery && rawDisplayContent ? rawDisplayContent.replace(CRON_DELIVERY_SENTINEL_RE, '') : rawDisplayContent
+      delivery && rawDisplayContent
+        ? isMissionCallback
+          ? missionCallbackBody(rawDisplayContent)
+          : rawDisplayContent.replace(CRON_DELIVERY_SENTINEL_RE, '')
+        : rawDisplayContent
     )
 
     // Persisted user turns carry `@image:<path>` directive lines inline in

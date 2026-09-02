@@ -125,3 +125,56 @@ def test_deliver_wake_retries_429_then_succeeds(monkeypatch):
     assert calls["n"] == 2
 
 
+
+
+def test_deliver_wake_types_the_synthetic_turn_when_asked(monkeypatch):
+    """A mission-callback wake carries `hermes.display_kind` so the API server
+    persists the prompt as an event row, never as an operator bubble."""
+    from aiohttp import web
+
+    seen = {}
+
+    async def handler(request):
+        seen["body"] = await request.json()
+        return web.json_response({"choices": [{"message": {"content": "ok"}}]})
+
+    async def run():
+        runner, port = await _serve(handler)
+        try:
+            adapter = ApiServerLikeAdapter(host="0.0.0.0", port=port, key="sekrit")
+            await deliver_wake(
+                adapter,
+                text="A routed mission-complete callback was just appended…",
+                session_id="raw-sid-42",
+                display_kind="mission_callback_wake",
+                display_metadata={"mission_id": "m1", "status": "completed", "title": "PR #27"},
+            )
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())
+    assert seen["body"]["hermes"] == {
+        "display_kind": "mission_callback_wake",
+        "display_metadata": {"mission_id": "m1", "status": "completed", "title": "PR #27"},
+    }
+
+
+def test_deliver_wake_without_typing_sends_no_hermes_block(monkeypatch):
+    from aiohttp import web
+
+    seen = {}
+
+    async def handler(request):
+        seen["body"] = await request.json()
+        return web.json_response({"choices": [{"message": {"content": "ok"}}]})
+
+    async def run():
+        runner, port = await _serve(handler)
+        try:
+            adapter = ApiServerLikeAdapter(host="0.0.0.0", port=port, key="sekrit")
+            await deliver_wake(adapter, text="plain wake", session_id="raw-sid-42")
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())
+    assert "hermes" not in seen["body"]

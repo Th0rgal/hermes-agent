@@ -1717,3 +1717,49 @@ describe('overlayConcurrentMessageChanges', () => {
     ])
   })
 })
+
+
+describe('appendLiveSessionProjection — retained failed turn after a mission callback', () => {
+  const prompt = 'comment progresse la roadmap pour Lido ?'
+
+  it('does not resurrect a failed prompt whose reply is committed once callback rows follow it', () => {
+    const transcript = [
+      msg('u1', 'user', prompt),
+      msg('a1', 'assistant', 'Voici l’état de la roadmap.'),
+      // Rows the mission-callback route appended after the operator's turn;
+      // the wake is a system-typed row on read, the callback an assistant drop.
+      msg('a2', 'assistant', 'La mission #27 est terminée et propre.', { delivery: { label: 'mission finished' } }),
+      msg('s1', 'system', 'mission finished · PR #27 · completed'),
+      msg('a3', 'assistant', 'Rien à faire de ton côté.')
+    ]
+
+    const restored = appendLiveSessionProjection(transcript, {
+      inflight: { assistant: '', error: 'provider 429', status: 'error', streaming: false, user: prompt },
+      session_id: 'sid'
+    } as never)
+
+    expect(restored.some(message => message.id === 'user-inflight-sid')).toBe(false)
+  })
+
+  it('still projects a failed prompt that was never answered', () => {
+    const transcript = [msg('u1', 'user', 'older question'), msg('a1', 'assistant', 'older answer')]
+
+    const restored = appendLiveSessionProjection(transcript, {
+      inflight: { assistant: '', error: 'provider 429', status: 'error', streaming: false, user: prompt },
+      session_id: 'sid'
+    } as never)
+
+    expect(restored.some(message => message.id === 'user-inflight-sid')).toBe(true)
+  })
+
+  it('keeps a live repeat of an earlier prompt visible', () => {
+    const transcript = [msg('u1', 'user', prompt), msg('a1', 'assistant', 'first answer'), msg('u2', 'user', 'other'), msg('a2', 'assistant', 'other answer')]
+
+    const restored = appendLiveSessionProjection(transcript, {
+      inflight: { assistant: '', streaming: true, user: prompt },
+      session_id: 'sid'
+    } as never)
+
+    expect(restored.some(message => message.id === 'user-inflight-sid')).toBe(true)
+  })
+})

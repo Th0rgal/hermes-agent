@@ -289,3 +289,66 @@ def test_next_turn_replaces_retained_error_snapshot(emits, turn_env):
     completes = _events(emits, "message.complete")
     assert len(completes) == 1
     assert completes[0]["status"] == "complete"
+
+
+def test_error_snapshot_is_stale_once_the_session_moved_on():
+    """A row persisted after the failure (mission wake via the API server,
+    cron delivery, another client) proves the failed prompt is no longer the
+    turn in progress; a snapshot with no newer rows is kept."""
+    turn = {"status": "error", "user": "do it", "updated_at": 1000.0}
+    older = [{"role": "user", "content": "do it", "timestamp": 999.0}]
+    newer = older + [
+        {"role": "user", "content": "A routed mission-complete callback…", "timestamp": 1500.0},
+        {"role": "assistant", "content": "PR #27 finished.", "timestamp": 1501.0},
+    ]
+    assert server._error_snapshot_is_stale(turn, older) is False
+    assert server._error_snapshot_is_stale(turn, newer) is True
+    # ISO / SQLite text timestamps count too.
+    iso = older + [{"role": "assistant", "content": "x", "timestamp": "2100-01-01T00:00:00+00:00"}]
+    assert server._error_snapshot_is_stale(turn, iso) is True
+    # Only failed snapshots are subject to this; a live turn is never stale.
+    assert server._error_snapshot_is_stale({"status": "streaming", "updated_at": 1.0}, newer) is False
+    assert server._error_snapshot_is_stale(None, newer) is False
+
+
+def test_live_payload_drops_a_stale_error_snapshot(monkeypatch):
+    session = _session()
+    session["session_key"] = "sk"
+    session["inflight_turn"] = {
+        "assistant": "",
+        "user": "do it",
+        "error": "provider 429",
+        "status": "error",
+        "recoverable": True,
+        "streaming": False,
+        "started_at": 1000.0,
+        "updated_at": 1000.0,
+    }
+    later_rows = [
+        {"role": "user", "content": "do it", "timestamp": 999.0},
+        {"role": "user", "content": "A routed mission-complete callback…", "timestamp": 1500.0},
+        {"role": "assistant", "content": "PR #27 finished.", "timestamp": 1501.0},
+    ]
+    monkeypatch.setattr(server, "_live_visible_history", lambda _s, _db, _fallback: later_rows)
+
+    class _DB:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(server, "_session_db", lambda _s: _DB())
+    payload = server._live_session_payload("sid", session)
+    assert "inflight" not in payload
+    assert session["inflight_turn"] is None
+    # The rows themselves are typed for the client.
+    kinds = [m.get("display_kind") for m in payload["messages"]]
+    assert "mission_callback_wake" in kinds
+
+
+def test_legacy_mission_callback_rows_are_typed_on_read():
+    assert server._legacy_display_kind("user", "A routed mission-complete callback was just appended") == "mission_callback_wake"
+    assert server._legacy_display_kind("user", "A mission you started has finished. The result follows.") == "hidden"
+    assert server._legacy_display_kind("assistant", "[Mission callback: PR #27]\nstatus=completed") == "mission_callback"
+    assert server._legacy_display_kind("user", "please repair PR #27") is None

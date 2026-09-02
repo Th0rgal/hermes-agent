@@ -59,6 +59,8 @@ async def deliver_wake(
     text: str,
     session_id: str = "",
     source: Any = None,
+    display_kind: Optional[str] = None,
+    display_metadata: Optional[dict] = None,
 ) -> None:
     """Deliver a wake turn to the session behind ``adapter``.
 
@@ -91,11 +93,22 @@ async def deliver_wake(
             "deliver_wake: non-push adapter (supports_async_delivery=False) "
             "requires the raw session id to self-post the wake turn"
         )
-    await _self_post_chat_completion(adapter, text=text, session_id=session_id)
+    await _self_post_chat_completion(
+        adapter,
+        text=text,
+        session_id=session_id,
+        display_kind=display_kind,
+        display_metadata=display_metadata,
+    )
 
 
 async def _self_post_chat_completion(
-    adapter: Any, *, text: str, session_id: str
+    adapter: Any,
+    *,
+    text: str,
+    session_id: str,
+    display_kind: Optional[str] = None,
+    display_metadata: Optional[dict] = None,
 ) -> None:
     """POST the wake text to the in-pod API server as a normal session turn.
 
@@ -132,6 +145,14 @@ async def _self_post_chat_completion(
         "messages": [{"role": "user", "content": text}],
         "stream": False,
     }
+    if display_kind:
+        # Type the synthetic turn at persist time so no client ever paints the
+        # wake prompt as an operator bubble (api_server forwards this to
+        # run_conversation(persist_user_display_kind=...)). Accepted only on an
+        # authenticated session continuation, which this self-post is.
+        payload["hermes"] = {"display_kind": display_kind}
+        if isinstance(display_metadata, dict) and display_metadata:
+            payload["hermes"]["display_metadata"] = display_metadata
 
     last_err: Optional[BaseException] = None
     attempts = 1 + len(_RETRY_DELAYS_SECONDS)

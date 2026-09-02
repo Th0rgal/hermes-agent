@@ -979,7 +979,9 @@ class WebhookAdapter(BasePlatformAdapter):
         if appended and wake:
             try:
                 from gateway.platforms.mission_status_route import (
+                    MISSION_CALLBACK_WAKE_DISPLAY_KIND,
                     MISSION_CALLBACK_WAKE_PROMPT,
+                    mission_callback_display_metadata,
                 )
 
                 adapter, source = self._adapter_for_routed_session(
@@ -991,6 +993,8 @@ class WebhookAdapter(BasePlatformAdapter):
                     wake_kwargs = {
                         "text": MISSION_CALLBACK_WAKE_PROMPT,
                         "session_id": live,
+                        "display_kind": MISSION_CALLBACK_WAKE_DISPLAY_KIND,
+                        "display_metadata": mission_callback_display_metadata(payload),
                     }
                     if source is not None and adapter_supports_push(adapter):
                         wake_kwargs["source"] = source

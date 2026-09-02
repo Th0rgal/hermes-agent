@@ -7666,9 +7666,73 @@ def _legacy_display_kind(role: str, text: str) -> str | None:
     user bubble forever. Sniffing the one fixed synthetic prefix is the
     migration for those rows; it is not how new rows get typed.
     """
-    if role == "user" and text.lstrip().startswith(_AUTO_CONTINUE_NOTE_PREFIX):
-        return "auto_continue"
+    stripped = text.lstrip()
+    if role == "user":
+        if stripped.startswith(_AUTO_CONTINUE_NOTE_PREFIX):
+            return "auto_continue"
+        # Mission-callback rows written before the route typed them
+        # (mission_status_route: wake prompt + role-safety separator).
+        if stripped.startswith(_MISSION_CALLBACK_WAKE_PREFIX):
+            return "mission_callback_wake"
+        if stripped.startswith(_MISSION_CALLBACK_SEPARATOR_PREFIX):
+            return "hidden"
+    if role == "assistant" and stripped.startswith(_MISSION_CALLBACK_PREFIX):
+        return "mission_callback"
     return None
+
+
+_MISSION_CALLBACK_WAKE_PREFIX = "A routed mission-complete callback"
+_MISSION_CALLBACK_SEPARATOR_PREFIX = "A mission you started has finished"
+_MISSION_CALLBACK_PREFIX = "[Mission callback:"
+
+
+def _as_epoch(value: Any) -> float | None:
+    """Row/snapshot timestamps: epoch floats, or ISO / SQLite text."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        from datetime import datetime, timezone
+
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except ValueError:
+        return None
+
+
+def _error_snapshot_is_stale(turn: Any, history: list) -> bool:
+    """A retained failed turn is stale once the session moved on.
+
+    ``_fail_inflight_turn`` keeps the prompt so a lost terminal frame can be
+    replayed; it is cleared only when the next ``prompt.submit`` starts. Turns
+    that arrive by any other path — the mission-callback wake through the API
+    server, a cron delivery, another client — persist rows without touching
+    this process's snapshot, so every later resume replayed the dead prompt as
+    a pending bubble. Any row persisted after the failure proves the prompt is
+    no longer "the turn in progress".
+    """
+    if not isinstance(turn, dict) or turn.get("status") != "error":
+        return False
+    failed_at = _as_epoch(turn.get("updated_at") or turn.get("started_at"))
+    if failed_at is None:
+        return False
+    for row in reversed(history or []):
+        if not isinstance(row, dict):
+            continue
+        stamp = _as_epoch(row.get("timestamp"))
+        if stamp is None:
+            continue
+        # Rows are chronological: the newest stamped row decides.
+        return stamp > failed_at + 1.0
+    return False
 
 
 def _history_to_messages(history: list[dict]) -> list[dict]:
@@ -8981,6 +9045,14 @@ def _live_session_payload(
     else:
         with _session_db(session) as db:
             history = _live_visible_history(session, db, in_memory_history)
+    if inflight and _error_snapshot_is_stale(inflight_turn, history):
+        # The session moved on after the failure (see _error_snapshot_is_stale):
+        # drop the dead prompt instead of replaying it on every resume.
+        with session["history_lock"]:
+            if session.get("inflight_turn") is inflight_turn:
+                _clear_inflight_turn(session)
+        inflight = None
+        turn_started_at = None
     payload = {
         "info": _fallback_session_info(session),
         "message_count": len(history),

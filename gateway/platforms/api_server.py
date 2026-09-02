@@ -369,6 +369,34 @@ def _resolve_request_runtime_agent_kwargs(provider: str, target_model: Optional[
     }
 
 
+_SYNTHETIC_DISPLAY_KIND_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+def _synthetic_turn_display_typing(
+    body: Any, authenticated_continuation: bool
+) -> Optional[tuple]:
+    """``body["hermes"]`` -> ``(display_kind, display_metadata | None)``.
+
+    The in-pod mission wake self-posts ``/v1/chat/completions`` with
+    ``{"hermes": {"display_kind": "mission_callback_wake", ...}}`` so the
+    persisted user row is typed at turn start. Ignored unless the request is
+    an authenticated session continuation (an anonymous caller must not be
+    able to disguise a prompt as a system event).
+    """
+    if not authenticated_continuation or not isinstance(body, dict):
+        return None
+    block = body.get("hermes")
+    if not isinstance(block, dict):
+        return None
+    kind = str(block.get("display_kind") or "").strip()
+    if not kind or not _SYNTHETIC_DISPLAY_KIND_RE.match(kind):
+        return None
+    metadata = block.get("display_metadata")
+    if not isinstance(metadata, dict) or not metadata:
+        metadata = None
+    return kind, metadata
+
+
 def _request_agent_overrides(
     body: Any,
     *,
@@ -4300,6 +4328,14 @@ class APIServerAdapter(BasePlatformAdapter):
             virtual_model=self._model_name,
             allow_bare_model=self._direct_model_requests,
         )
+        # Display typing for synthetic turns (mission-callback wakes). Trusted
+        # only on an authenticated session continuation — the X-Hermes-Session-Id
+        # gate above already requires an API key for that path.
+        display_typing = _synthetic_turn_display_typing(body, bool(provided_session_id))
+        if display_typing is not None:
+            agent_overrides["persist_user_display_kind"] = display_typing[0]
+            if display_typing[1] is not None:
+                agent_overrides["persist_user_display_metadata"] = display_typing[1]
         selection_error = self._request_route_conflict_error(
             session_id=session_id,
             gateway_session_key=gateway_session_key,
@@ -6330,6 +6366,8 @@ class APIServerAdapter(BasePlatformAdapter):
         requested_runtime: Optional[Dict[str, Any]] = None,
         route_source: str = "global",
         confirmed_runtime_lock: bool = False,
+        persist_user_display_kind: Optional[str] = None,
+        persist_user_display_metadata: Optional[Dict[str, Any]] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -6414,6 +6452,8 @@ class APIServerAdapter(BasePlatformAdapter):
                         user_message=user_message,
                         conversation_history=conversation_history,
                         task_id=effective_task_id,
+                        persist_user_display_kind=persist_user_display_kind,
+                        persist_user_display_metadata=persist_user_display_metadata,
                     )
                     # Dashboard /api/sessions/:id/chat does not go through
                     # GatewayRunner's compression_exhausted auto-reset. Without
@@ -6440,6 +6480,8 @@ class APIServerAdapter(BasePlatformAdapter):
                                 user_message=user_message,
                                 conversation_history=[],
                                 task_id=effective_task_id,
+                                persist_user_display_kind=persist_user_display_kind,
+                                persist_user_display_metadata=persist_user_display_metadata,
                             )
                             if isinstance(result, dict):
                                 result["session_rotated_after_exhaustion"] = True

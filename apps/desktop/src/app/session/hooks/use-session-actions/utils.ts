@@ -487,6 +487,7 @@ const withAuthoritativeTurnState = (local: ChatMessage, authoritative: ChatMessa
 
   return merged
 }
+
 const isObservedCronDisplayMessage = (message: ChatMessage): boolean =>
   message.role === 'assistant' &&
   // Projection lifts the scheduler sentinel into ChatMessage.delivery; the
@@ -802,8 +803,33 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
       message => textWithoutReferenceLines(chatMessageText(message)) === textWithoutReferenceLines(text)
     )
 
+  // A retained *failed* turn (`inflight.error`) is the one case where the
+  // latest user run can legitimately be another turn: rows persisted after the
+  // failure by a mission-callback wake, a cron delivery or another client push
+  // the failed prompt out of the latest run. If that prompt exists anywhere in
+  // the transcript and a committed assistant reply follows it, the turn is
+  // history — do not paint it again as a pending bubble. Live turns keep the
+  // strict latest-run rule so a newly accepted repeat still shows.
+  const persistedWithCommittedReply = (text: string): boolean => {
+    const wanted = textWithoutReferenceLines(text)
+
+    const index = messages.findLastIndex(
+      message => message.role === 'user' && textWithoutReferenceLines(chatMessageText(message)) === wanted
+    )
+
+    if (index < 0) {
+      return false
+    }
+
+    return messages
+      .slice(index + 1)
+      .some(message => message.role === 'assistant' && !isLiveTailRow(message) && chatMessageText(message).trim().length > 0)
+  }
+
   const inflightUserAlreadyPersisted =
-    projection[safelyPersistedInflightUser] === true || (Boolean(inflightUser) && persistedInLatestRun(inflightUser))
+    projection[safelyPersistedInflightUser] === true ||
+    (Boolean(inflightUser) && persistedInLatestRun(inflightUser)) ||
+    (Boolean(inflightUser) && Boolean(inflightError) && !inflightStreaming && persistedWithCommittedReply(inflightUser))
 
   if (inflightUser && !inflightUserAlreadyPersisted) {
     projected.push({

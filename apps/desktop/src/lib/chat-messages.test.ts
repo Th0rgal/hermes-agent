@@ -11,7 +11,9 @@ import {
   completeOpenTimelineParts,
   dedupeRepeatedTextInParts,
   dedupeRepeatedToolCallsInParts,
+  legacyDisplayKind,
   mergeFinalAssistantText,
+  missionCallbackLabel,
   preserveLocalAssistantErrors,
   reasoningPart,
   renderMediaTags,
@@ -1490,6 +1492,7 @@ describe('dedupeRepeatedToolCallsInParts', () => {
       toolCallId: 'tc',
       toolName: 'terminal'
     } as ChatMessagePart
+
     const done = {
       type: 'tool-call',
       toolCallId: 'tc',
@@ -1500,5 +1503,80 @@ describe('dedupeRepeatedToolCallsInParts', () => {
     const next = dedupeRepeatedToolCallsInParts([spinning, done])
 
     expect(next).toEqual([done])
+  })
+})
+
+
+describe('mission callback rows', () => {
+  const WAKE = 'A routed mission-complete callback was just appended to this conversation. In one or two sentences…'
+  const SEPARATOR = 'A mission you started has finished. The result follows.'
+
+  const CALLBACK =
+    '[Mission callback: PR #27 exact-head two Codex]\nstatus=completed mission=da27b56c event=evt-1 workspace=verity\nThe check `prove` is SUCCESS and GitHub says CLEAN.\n[CTRL: verity-lido | mode=active | wait=0 | next=inspect da27b56c]\n[STATE_SIGNATURE: verity-lido|mission-callback|da27b56c|completed|inspect]'
+
+  it('types legacy rows by their fixed prefixes only', () => {
+    expect(legacyDisplayKind('user', WAKE)).toBe('mission_callback_wake')
+    expect(legacyDisplayKind('user', SEPARATOR)).toBe('hidden')
+    expect(legacyDisplayKind('assistant', CALLBACK)).toBe('mission_callback')
+    expect(legacyDisplayKind('user', 'please repair PR #27')).toBeUndefined()
+    expect(legacyDisplayKind('user', CALLBACK)).toBeUndefined()
+  })
+
+  it('renders the wake as a timeline line, hides the separator, and puts the callback under a divider', () => {
+    const rows: SessionMessage[] = [
+      { role: 'user', content: 'comment progresse la roadmap ?', timestamp: 1 },
+      { role: 'assistant', content: 'Voici l’état.', timestamp: 2 },
+      { role: 'user', content: SEPARATOR, timestamp: 3 },
+      { role: 'assistant', content: CALLBACK, timestamp: 4 },
+      { role: 'user', content: WAKE, timestamp: 5 },
+      { role: 'assistant', content: 'La mission #27 est terminée et propre.', timestamp: 6 }
+    ]
+
+    const chat = toChatMessages(rows)
+    const roles = chat.map(message => message.role)
+
+    // separator dropped; wake is a system line, not a user bubble
+    expect(roles).toEqual(['user', 'assistant', 'assistant', 'system', 'assistant'])
+
+    const callback = chat[2]
+    expect(callback.delivery?.label).toBe('mission finished · PR #27 exact-head two Codex · completed')
+    const body = callback.parts.map(part => ('text' in part ? part.text : '')).join('')
+    expect(body).toContain('The check `prove` is SUCCESS')
+    expect(body).not.toContain('[Mission callback:')
+    expect(body).not.toContain('status=completed mission=')
+    expect(body).not.toContain('[STATE_SIGNATURE')
+    expect(body).not.toContain('[CTRL:')
+
+    const wake = chat[3]
+    const wakeText = wake.parts.map(part => ('text' in part ? part.text : '')).join('')
+    expect(wakeText).toBe('mission finished')
+    expect(wakeText).not.toContain('routed mission-complete')
+  })
+
+  it('prefers typed metadata over prose for the divider label', () => {
+    const typed: SessionMessage[] = [
+      {
+        role: 'assistant',
+        content: CALLBACK,
+        display_kind: 'mission_callback',
+        display_metadata: { title: 'Repair PR 27', status: 'failed' } as never,
+        timestamp: 1
+      },
+      {
+        role: 'user',
+        content: WAKE,
+        display_kind: 'mission_callback_wake',
+        display_metadata: { title: 'Repair PR 27', status: 'failed' } as never,
+        timestamp: 2
+      }
+    ]
+
+    const chat = toChatMessages(typed)
+    expect(chat[0].delivery?.label).toBe('mission finished · Repair PR 27 · failed')
+    expect(chat[1].role).toBe('system')
+    expect(chat[1].parts.map(part => ('text' in part ? part.text : '')).join('')).toBe(
+      'mission finished · Repair PR 27 · failed'
+    )
+    expect(missionCallbackLabel(undefined, '')).toBe('mission finished')
   })
 })

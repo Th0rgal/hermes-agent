@@ -16,6 +16,7 @@ import {
   $goalsBySession,
   $projectBoundSessionIds,
   atom,
+  host,
   type PluginRestOptions,
   type PluginStorage,
   queryClient
@@ -246,14 +247,84 @@ const COLLAPSED_KEY = 'collapsedColumns'
 const NOTIFY_KEY = 'notifyAttention'
 const NOTIFIED_AT_KEY = 'attentionNotifiedAt'
 
-/** One `{invalidate, mission_id}` frame from the backend relay → refresh the
- *  roster. The poll stays as the fallback; the socket just makes a mission
- *  flipping to `awaiting_user` (or done) show up at once. */
+/** Prefix for every projects-board React Query key. Invalidating this root
+ *  refreshes the roster AND the open project's detail/roadmap/tasks — the
+ *  rail's checklist lives on `projectKey(slug)`, not on `PROJECTS_KEY`. */
+export const BOARD_QUERY_ROOT = ['projects-board'] as const
+
+/** Drop cached board data. A slug targets that project's detail/tasks/state
+ *  plus the roster; omitting it refreshes the whole plugin cache. */
+export function invalidateBoardQueries(slug?: null | string): void {
+  if (slug) {
+    void queryClient.invalidateQueries({ queryKey: PROJECTS_KEY })
+    void queryClient.invalidateQueries({ queryKey: projectKey(slug) })
+    void queryClient.invalidateQueries({ queryKey: tasksKey(slug) })
+    void queryClient.invalidateQueries({ queryKey: stateKey(slug) })
+    return
+  }
+
+  void queryClient.invalidateQueries({ queryKey: BOARD_QUERY_ROOT })
+}
+
+function slugForSession(sessionId?: null | string): null | string {
+  if (!sessionId) {
+    return null
+  }
+
+  return $projectBoundSessionIds.get()[sessionId] ?? null
+}
+
+const PROJECT_TOOL_RE =
+  /(?:^|_|:)(plan_project_tasks|get_project|list_project|patch_project|update_project|cancel_project|project_task|upsert_track)/i
+
+/** MCP / native tools that mutate or read the project item inventory. */
+export function projectToolRefreshesBoard(name: string): boolean {
+  return PROJECT_TOOL_RE.test(name)
+}
+
+/** Gateway events that mean the bound chat just changed project state.
+ *  Returns the slug to refresh, `true` for a full-board refresh, or null. */
+export function gatewayEventRefreshesBoard(event: {
+  payload?: { name?: string; running?: boolean } | null
+  session_id?: string
+  type?: string
+}): null | string | true {
+  const type = event.type
+  const slug = slugForSession(event.session_id)
+
+  if (type === 'message.complete' || (type === 'session.info' && event.payload?.running === false)) {
+    return slug
+  }
+
+  if (type === 'tool.complete' && projectToolRefreshesBoard(String(event.payload?.name ?? ''))) {
+    return slug ?? true
+  }
+
+  return null
+}
+
+function applyGatewayRefresh(event: {
+  payload?: { name?: string; running?: boolean } | null
+  session_id?: string
+  type?: string
+}): void {
+  const target = gatewayEventRefreshesBoard(event)
+
+  if (target === true) {
+    invalidateBoardQueries()
+  } else if (typeof target === 'string') {
+    invalidateBoardQueries(target)
+  }
+}
+
+/** One `{invalidate, slug?, mission_id}` frame from the backend relay. The
+ *  poll stays as the fallback; the socket makes a mission/item flip show up
+ *  in the open rail, not just the roster. */
 function onEventFrame(data: unknown): void {
-  const frame = data as { type?: string } | null
+  const frame = data as { slug?: string; type?: string } | null
 
   if (frame?.type === 'invalidate') {
-    void queryClient.invalidateQueries({ queryKey: PROJECTS_KEY })
+    invalidateBoardQueries(typeof frame.slug === 'string' && frame.slug.trim() ? frame.slug : null)
   }
 }
 
@@ -287,6 +358,10 @@ export function bindApi(restFn: Rest, storage?: PluginStorage, socket?: Socket):
   previousBuckets = null
 
   const unsubscribe = socket ? socket('/events', onEventFrame) : null
+
+  unsubs.push(host.onEvent('message.complete', applyGatewayRefresh))
+  unsubs.push(host.onEvent('session.info', applyGatewayRefresh))
+  unsubs.push(host.onEvent('tool.complete', applyGatewayRefresh))
 
   let lastGoalPost = ''
 
@@ -347,10 +422,7 @@ export const tasksKey = (slug: string) => ['projects-board', 'tasks', slug] as c
 /** Projects newly ENTERING attention relative to the previous roster snapshot.
  *  A null previous (startup / rebind) yields none — a standing alert the app
  *  boots into is not a transition. */
-export function attentionTransitions(
-  previous: null | Record<string, string>,
-  projects: ProjectRow[]
-): string[] {
+export function attentionTransitions(previous: null | Record<string, string>, projects: ProjectRow[]): string[] {
   if (!previous) {
     return []
   }
@@ -662,12 +734,9 @@ export function controllerStop(project: ProjectRow, now = Date.now()): Controlle
 
   // The freshest proof of life wins: a scheduler heartbeat (the job ran, even
   // if its [SILENT] tick delivered nothing) counts as much as a delivery.
-  const heartbeatAt = project.controller_heartbeat_at
-    ? Date.parse(project.controller_heartbeat_at)
-    : Number.NaN
+  const heartbeatAt = project.controller_heartbeat_at ? Date.parse(project.controller_heartbeat_at) : Number.NaN
 
-  const freshestAt =
-    Number.isNaN(lastAt) || (!Number.isNaN(heartbeatAt) && heartbeatAt > lastAt) ? heartbeatAt : lastAt
+  const freshestAt = Number.isNaN(lastAt) || (!Number.isNaN(heartbeatAt) && heartbeatAt > lastAt) ? heartbeatAt : lastAt
 
   // The server saw the controller link + heartbeat; when it says healthy, the
   // client's 2h delivery-age heuristic must not overrule it into "stale" — a
@@ -704,8 +773,7 @@ const chipRecency = (chip: MissionChip): number => {
 
 /** Headlines that only restate an auto-resume or a stale writer-lease claim.
  *  When a writer is live these are not the project's current state. */
-const STALE_CONTROLLER_HEADLINE =
-  /lease writer|bloqu[ée]e par le lease|campagne relanc/i
+const STALE_CONTROLLER_HEADLINE = /lease writer|bloqu[ée]e par le lease|campagne relanc/i
 
 const LIVE_ITEM_STATUS = new Set([
   'active',
@@ -719,10 +787,7 @@ const LIVE_ITEM_STATUS = new Set([
 
 const CONTROLLER_BEHIND_MS = 15 * 60 * 1000
 
-export function isStaleControllerHeadline(
-  headline: string | null | undefined,
-  liveCount: number
-): boolean {
+export function isStaleControllerHeadline(headline: string | null | undefined, liveCount: number): boolean {
   if (liveCount < 1 || !headline) {
     return false
   }
@@ -768,9 +833,7 @@ export function leadSignal(project: ProjectRow): LeadSignal {
   const lastWorkAt = latestLiveWorkAt(project)
   const pendingDecisions = project.pending_decisions ?? 0
 
-  const headline = isStaleControllerHeadline(rawHeadline, liveCount)
-    ? nextAction
-    : (nextAction ?? rawHeadline)
+  const headline = isStaleControllerHeadline(rawHeadline, liveCount) ? nextAction : (nextAction ?? rawHeadline)
 
   return {
     blocker: project.latest_update?.blocker?.trim() || null,
@@ -794,11 +857,7 @@ function latestLiveWorkAt(project: ProjectRow): string | null {
   )
 }
 
-function isControllerBehind(
-  lastSignalAt: string | null,
-  lastWorkAt: string | null,
-  liveCount: number
-): boolean {
+function isControllerBehind(lastSignalAt: string | null, lastWorkAt: string | null, liveCount: number): boolean {
   if (liveCount < 1 || !lastSignalAt || !lastWorkAt) {
     return false
   }
@@ -859,9 +918,7 @@ export function itemAsRoadmapTask(item: ProjectItem): ProjectTask {
           : 'pending'
 
   const title =
-    item.desired_state?.trim() ||
-    item.attempts.find(attempt => attempt.title?.trim())?.title?.trim() ||
-    item.key
+    item.desired_state?.trim() || item.attempts.find(attempt => attempt.title?.trim())?.title?.trim() || item.key
 
   return {
     attempts: item.attempts.length,
@@ -890,6 +947,10 @@ export function itemBelongsOnRoadmap(item: ProjectItem): boolean {
     return item.open
   }
 
+  if (waveNumber(item.key) != null) {
+    return item.status?.trim() !== 'cancelled' && item.status?.trim() !== 'closed'
+  }
+
   const status = item.status?.trim()
 
   if (!status) {
@@ -899,11 +960,98 @@ export function itemBelongsOnRoadmap(item: ProjectItem): boolean {
   return status !== 'cancelled' && status !== 'closed'
 }
 
+/** `wave-4-validation-receipt-certification` → 4. Used to collapse a night of
+ *  per-attempt tracks into the Wave N/10 checklist the controller actually
+ *  reports, instead of the leftover `pr-63`… campaign. */
+export function waveNumber(key: string): null | number {
+  const match = /^wave-(\d+)\b/i.exec(key.trim())
+
+  if (!match) {
+    return null
+  }
+
+  const n = Number(match[1])
+
+  return Number.isInteger(n) && n > 0 ? n : null
+}
+
+function isStalePrCampaignKey(key: string): boolean {
+  return /^pr-\d+$/.test(key.trim())
+}
+
+function collapseWaveProgram(items: ProjectItem[]): ProjectTask[] {
+  const byWave = new Map<number, ProjectItem[]>()
+
+  for (const item of items) {
+    const n = waveNumber(item.key)
+
+    if (n == null) {
+      continue
+    }
+
+    const members = byWave.get(n) ?? []
+    members.push(item)
+    byWave.set(n, members)
+  }
+
+  const max = Math.max(10, ...byWave.keys())
+  const tasks: ProjectTask[] = []
+
+  for (let n = 1; n <= max; n += 1) {
+    const members = byWave.get(n) ?? []
+
+    if (members.length === 0) {
+      if (n <= 10) {
+        tasks.push({
+          attempts: 0,
+          status: 'pending',
+          task_key: `wave-${n}`,
+          title: `Wave ${n}/10`,
+          updated_at: null,
+          worker_mission_id: null
+        })
+      }
+      continue
+    }
+
+    const live = members.some(item => item.attempts.some(attempt => LIVE_ITEM_STATUS.has(attempt.status)))
+    const declaredDone = members.some(
+      item => item.status?.trim() === 'done' || (!item.open && Boolean(item.status?.trim()))
+    )
+    const done = !live && (declaredDone || members.every(item => !item.open && members.length > 0))
+    const title =
+      members
+        .map(
+          item =>
+            item.desired_state?.trim() || item.attempts.find(attempt => attempt.title?.trim())?.title?.trim() || ''
+        )
+        .find(value => value.length > 0) || `Wave ${n}/10`
+
+    const newest = members
+      .flatMap(item => item.attempts.map(attempt => attempt.updated_at))
+      .sort()
+      .at(-1)
+
+    tasks.push({
+      attempts: members.reduce((n, item) => n + item.attempts.length, 0),
+      status: live ? 'running' : done ? 'accepted' : 'pending',
+      task_key: `wave-${n}`,
+      title,
+      updated_at: newest ?? null,
+      worker_mission_id: members[0]?.attempts[0]?.id ?? null
+    })
+  }
+
+  return tasks
+}
+
 export function roadmapFromItems(detail: ProjectDetail): {
   summary: { done: number; failed: number; running: number; total: number }
   tasks: ProjectTask[]
 } {
-  const tasks = (detail.items ?? []).filter(itemBelongsOnRoadmap).map(itemAsRoadmapTask)
+  const items = detail.items ?? []
+  const hasWaveProgram = items.some(item => waveNumber(item.key) != null)
+  const tasks = hasWaveProgram ? collapseWaveProgram(items) : items.filter(itemBelongsOnRoadmap).map(itemAsRoadmapTask)
 
   let done = 0
   let running = 0
@@ -946,10 +1094,7 @@ export function railOpenItems(detail: ProjectDetail, cap = 8): RailItem[] {
  *  and the rest folded into one "+N" count. A card with nothing live never
  *  renders a wall of dead chips: at most ONE most-recent chip + "+N". The
  *  drawer keeps the full list. */
-export function selectChips(
-  missions: MissionChip[],
-  cap = 3
-): { chips: MissionChip[]; overflow: number } {
+export function selectChips(missions: MissionChip[], cap = 3): { chips: MissionChip[]; overflow: number } {
   const live = missions
     .filter(m => m.status in LIVE_CHIP_ORDER)
     .sort((a, b) => LIVE_CHIP_ORDER[a.status] - LIVE_CHIP_ORDER[b.status] || chipRecency(b) - chipRecency(a))

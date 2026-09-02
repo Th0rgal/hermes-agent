@@ -25,9 +25,7 @@ const row = (partial: Partial<ProjectRow>): ProjectRow => ({
 
 describe('isInspectNextAction', () => {
   it('matches inspect <uuid> and ignores real next actions', () => {
-    expect(
-      isInspectNextAction('inspect 51f37d4b-7e27-466a-8c2f-fec0be2bebed')
-    ).toBe(true)
+    expect(isInspectNextAction('inspect 51f37d4b-7e27-466a-8c2f-fec0be2bebed')).toBe(true)
     expect(isInspectNextAction('watch #2367 CI then merge')).toBe(false)
   })
 })
@@ -156,9 +154,7 @@ describe('railOpenItems', () => {
           open: true
         },
         {
-          attempts: [
-            { id: 'live', status: 'active', title: 'Grok #2332', updated_at: '2026-08-14T21:08:22Z' }
-          ],
+          attempts: [{ id: 'live', status: 'active', title: 'Grok #2332', updated_at: '2026-08-14T21:08:22Z' }],
           key: 'c5-preflight-pr2332',
           open: true
         },
@@ -183,9 +179,7 @@ describe('railOpenItems', () => {
     const detail: ProjectDetail = {
       items: [
         {
-          attempts: [
-            { id: 'live', status: 'active', title: 're-pin Verity', updated_at: '2026-08-15T10:00:00Z' }
-          ],
+          attempts: [{ id: 'live', status: 'active', title: 're-pin Verity', updated_at: '2026-08-15T10:00:00Z' }],
           desired_state: 'proven Verity tx',
           key: 'lido-verity-closure-v2',
           open: true
@@ -208,10 +202,7 @@ describe('railOpenItems', () => {
 
     const roadmap = roadmapFromItems(detail)
     expect(roadmap.summary).toEqual({ done: 1, failed: 0, running: 1, total: 2 })
-    expect(roadmap.tasks.map(task => task.task_key)).toEqual([
-      'lido-verity-closure-v2',
-      'certify-pr46'
-    ])
+    expect(roadmap.tasks.map(task => task.task_key)).toEqual(['lido-verity-closure-v2', 'certify-pr46'])
   })
 
   it('drops unacknowledged failed attempts from the public roadmap', () => {
@@ -254,5 +245,52 @@ describe('railOpenItems', () => {
 
     expect(roadmap.tasks.map(task => task.task_key)).toEqual(['pr-69', 'pr-63'])
     expect(roadmap.summary).toEqual({ done: 1, failed: 0, running: 0, total: 2 })
+  })
+
+  it('collapses wave-* tracks into Wave N/10 and hides the leftover pr- campaign', () => {
+    const roadmap = roadmapFromItems({
+      items: [
+        {
+          attempts: [
+            {
+              id: 'w4',
+              status: 'active',
+              title: 'Lido Wave 4 prerequisite — certify PR #151 receipt refresh',
+              updated_at: '2026-08-20T06:29:38Z'
+            }
+          ],
+          key: 'wave-4-validation-receipt-certification',
+          open: true
+        },
+        {
+          attempts: [],
+          desired_state: 'Wave 1/10 — P-ACCOUNT-1 sequenced ticks (PR #148)',
+          key: 'wave-1',
+          open: false,
+          status: 'done'
+        },
+        {
+          attempts: [],
+          desired_state: 'Campaign merge to main — after pin train',
+          key: 'pr-63',
+          open: true,
+          status: 'open'
+        }
+      ],
+      project: { slug: 'verity-lido', status: 'active' }
+    })
+
+    expect(roadmap.tasks).toHaveLength(10)
+    expect(roadmap.tasks.map(task => task.task_key)).toEqual(Array.from({ length: 10 }, (_, i) => `wave-${i + 1}`))
+    expect(roadmap.tasks[0]).toMatchObject({
+      status: 'accepted',
+      title: 'Wave 1/10 — P-ACCOUNT-1 sequenced ticks (PR #148)'
+    })
+    expect(roadmap.tasks[3]).toMatchObject({
+      status: 'running',
+      task_key: 'wave-4'
+    })
+    expect(roadmap.tasks.some(task => task.task_key === 'pr-63')).toBe(false)
+    expect(roadmap.summary).toEqual({ done: 1, failed: 0, running: 1, total: 10 })
   })
 })

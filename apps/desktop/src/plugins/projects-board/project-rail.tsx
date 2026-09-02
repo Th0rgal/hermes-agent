@@ -74,7 +74,10 @@ function RailBody({ slug }: { slug: string }) {
   const { data: detail } = useQuery({
     queryFn: () => fetchProject(slug),
     queryKey: projectKey(slug),
-    refetchInterval: 60_000,
+    // Socket + turn-complete invalidation is the live path; this is the
+    // socketless fallback so a bound chat that rewrote the roadmap is never
+    // stuck on a 60s-old checklist.
+    refetchInterval: 15_000,
     retry: false
   })
 
@@ -82,13 +85,14 @@ function RailBody({ slug }: { slug: string }) {
     enabled: Boolean(detail) && !projectDetailHasItems(detail!),
     queryFn: () => fetchProjectTasks(slug),
     queryKey: tasksKey(slug),
+    refetchInterval: 15_000,
     retry: false
   })
 
   const { data: board } = useQuery({
     queryFn: fetchProjects,
     queryKey: PROJECTS_KEY,
-    refetchInterval: 60_000,
+    refetchInterval: 15_000,
     retry: false
   })
 

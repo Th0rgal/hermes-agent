@@ -3579,6 +3579,43 @@ def _deliver_result(
                 delivery_errors.append(bot_chat_error)
             continue
 
+        # [fork-delta] API-server sessions (WebUI/Desktop) have no live
+        # messaging adapter once the originating HTTP turn has ended. Their
+        # durable delivery surface is the persisted session transcript itself.
+        # The API adapter binds chat_id to the concrete session_id, so an
+        # origin-scoped cron appends its result to that exact conversation
+        # instead of falling back to a configured home platform (Telegram).
+        if str(platform_name).lower() == "api_server":
+            db = None
+            try:
+                from hermes_state import SessionDB
+
+                db = SessionDB()
+                resolved_chat_id = db.resolve_resume_session_id(str(chat_id))
+                session = db.get_session(resolved_chat_id)
+                if not session or str(session.get("source") or "") != "api_server":
+                    raise ValueError(
+                        f"API session '{chat_id}' does not exist or is not an api_server session"
+                    )
+                db.append_message(
+                    session_id=resolved_chat_id,
+                    role="assistant",
+                    content=content,
+                )
+                logger.info(
+                    "Job '%s': appended durable delivery to API session %s",
+                    job.get("id", "?"),
+                    resolved_chat_id,
+                )
+            except Exception as e:
+                msg = f"API session delivery failed for '{chat_id}': {e}"
+                logger.warning("Job '%s': %s", job.get("id", "?"), msg)
+                delivery_errors.append(msg)
+            finally:
+                if db is not None:
+                    db.close()
+            continue
+
         # Diagnostic: log thread_id for topic-aware delivery debugging
         origin = _resolve_origin(job) or {}
         origin_thread = origin.get("thread_id")

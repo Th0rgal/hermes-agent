@@ -2854,3 +2854,61 @@ class TestFailureStreakNudge:
         from cron.scheduler import _failure_streak_nudge
         with patch("cron.scheduler.load_config", side_effect=RuntimeError("boom")):
             assert "failed 3 runs" in _failure_streak_nudge(self._job(2))
+class TestDeliverApiServerOrigin:
+    def test_appends_result_to_origin_session(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        db.create_session("api-session-1", "api_server")
+        db.append_message("api-session-1", role="user", content="Watch the build")
+        db.append_message(
+            "api-session-1",
+            role="assistant",
+            content="I will report back when it finishes.",
+        )
+        db.close()
+
+        job = {
+            "id": "desktop-watch",
+            "name": "Desktop build watcher",
+            "deliver": "origin",
+            "origin": {
+                "platform": "api_server",
+                "chat_id": "api-session-1",
+            },
+        }
+
+        assert _deliver_result(job, "The build finished successfully.") is None
+
+        db = SessionDB()
+        messages = db.get_messages("api-session-1")
+        db.close()
+        assert messages[-1]["role"] == "assistant"
+        assert messages[-1]["content"] == "The build finished successfully."
+
+    def test_rejects_non_api_session_target(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        db.create_session("telegram-session", "telegram")
+        db.close()
+
+        job = {
+            "id": "bad-target",
+            "deliver": "origin",
+            "origin": {
+                "platform": "api_server",
+                "chat_id": "telegram-session",
+            },
+        }
+        result = _deliver_result(job, "Must not cross session types.")
+        assert result is not None
+        assert "not an api_server session" in result
+
+

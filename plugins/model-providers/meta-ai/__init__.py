@@ -38,10 +38,9 @@ from providers.base import ProviderProfile
 def _resolve_effort(reasoning_config: dict | None) -> str:
     """Map Hermes' reasoning_config to a Meta-safe ``reasoning_effort`` value.
 
-    - reasoning disabled / effort "none"  -> "minimal"  (Meta 400s on "none")
-    - low | medium | high                 -> passthrough
-    - max | xhigh | ultra                 -> "xhigh"
-    - unset / unknown                     -> "medium"
+    Meta's vocabulary (minimal..xhigh; rejects ``none``) is declared in
+    agent.reasoning_effort. Disabled/"none" maps to ``minimal`` (the closest
+    Meta has to off); unset/bespoke levels fall to ``medium``.
     """
     rc = reasoning_config or {}
     if rc.get("enabled") is False:
@@ -49,15 +48,36 @@ def _resolve_effort(reasoning_config: dict | None) -> str:
     effort = str(rc.get("effort") or "").strip().lower()
     if effort in {"", "none"}:
         return "minimal" if effort == "none" else "medium"
-    if effort in {"low", "medium", "high"}:
-        return effort
-    if effort in {"max", "xhigh", "ultra"}:
-        return "xhigh"
-    return "medium"
+
+    from agent.reasoning_effort import META_AI_EFFORTS, clamp_effort
+
+    clamped = clamp_effort(effort, META_AI_EFFORTS)
+    return clamped if clamped in META_AI_EFFORTS else "medium"
 
 
 class MetaAIProfile(ProviderProfile):
     """Meta Model API — top-level reasoning_effort, self-contained."""
+
+    # Non-chat model prefixes excluded from the agent picker.  The live
+    # /v1/models catalog includes image-generation and transcription models
+    # that are not suitable for agentic chat.
+    _NON_CHAT_PREFIXES = ("muse-image-", "muse-voice-")
+
+    def fetch_models(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout: float = 8.0,
+    ) -> list[str] | None:
+        """Fetch and filter the live catalog, excluding non-chat models."""
+        live = super().fetch_models(api_key=api_key, base_url=base_url, timeout=timeout)
+        if live is None:
+            return None
+        return [
+            m for m in live
+            if not any(m.startswith(p) for p in self._NON_CHAT_PREFIXES)
+        ]
 
     def build_api_kwargs_extras(
         self,
@@ -101,17 +121,20 @@ meta_ai = MetaAIProfile(
     api_mode="codex_responses",
     # Muse Spark is natively multimodal (image/video/pdf/audio in, text out).
     supports_vision=True,
+    # ...but only on user turns: an image envelope inside a role:tool message
+    # 400s "messages[N].content did not match any supported type" (#101668).
+    supports_vision_tool_messages=False,
     # Cheap contributor tier is a good default for auxiliary tasks
     # (compaction, title generation, vision) when this is the main provider.
     default_aux_model="muse-spark-1.2-contributor",
     # Muse spends completion budget on hidden reasoning tokens first; a low cap
     # can finish with empty content. 16k is a safe floor.
     default_max_tokens=16384,
-    # Curated safety net shown in the picker when the live /v1/models fetch
-    # fails or no credentials are configured yet.
+    # Minimal fallback shown when the live /v1/models fetch fails or no
+    # credentials are configured yet. Keep this list small — just enough so
+    # the picker isn't empty when the API is unreachable.
     fallback_models=(
         "muse-spark-1.2",
-        "muse-spark-1.2-contributor",
     ),
 )
 

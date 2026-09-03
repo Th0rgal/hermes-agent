@@ -395,12 +395,13 @@ export function gatewayEventRefreshesBoard(event: {
   return null
 }
 
-function applyGatewayRefresh(event: {
-  payload?: { name?: string; running?: boolean } | null
-  session_id?: string
-  type?: string
-}): void {
-  const target = gatewayEventRefreshesBoard(event)
+// `host.onEvent` hands over the raw RpcEvent (payload: unknown); narrow the
+// payload to the two fields the refresh rule reads before delegating.
+function applyGatewayRefresh(event: { payload?: unknown; session_id?: string; type?: string }): void {
+  const payload =
+    event.payload && typeof event.payload === 'object' ? (event.payload as { name?: string; running?: boolean }) : null
+
+  const target = gatewayEventRefreshesBoard({ payload, session_id: event.session_id, type: event.type })
 
   if (target === true) {
     invalidateBoardQueries()

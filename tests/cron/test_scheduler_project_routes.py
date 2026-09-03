@@ -108,7 +108,9 @@ class TestProjectTargetResolution:
         explicit = _resolve_delivery_target(
             {"id": "j", "deliver": "webhook:external-hook"}
         )
-        assert explicit == {
+        # Upstream stamps provenance on explicit targets; the routing
+        # contract is the platform/chat/thread triple.
+        assert {k: explicit[k] for k in ("platform", "chat_id", "thread_id")} == {
             "platform": "webhook",
             "chat_id": "external-hook",
             "thread_id": None,

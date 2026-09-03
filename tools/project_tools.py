@@ -216,3 +216,45 @@ def project_route_clear(project: str, task_id: Optional[str] = None) -> str:
             return json.dumps({"success": False, "error": f"no project matching '{project}'"})
         removed = routes.unbind_route(conn, proj.id)
     return json.dumps({"success": True, "project": proj.slug, "removed": removed})
+
+
+def _handle_project(args, **kw):
+    action = (args.get("action") or "").strip()
+    tid = kw.get("task_id")
+    if action == "list":
+        return project_list(task_id=tid)
+    if action == "create":
+        return project_create(name=args.get("name", ""), path=args.get("path"), task_id=tid)
+    if action == "switch":
+        return project_switch(project=args.get("name", ""), task_id=tid)
+    return json.dumps({"success": False, "error": "action must be one of: create, switch, list."})
+
+
+# Consolidated (#95681, maintainer-directed): project_list/create/switch each
+# re-taught "desktop Projects (named workspaces)"; one action enum says it
+# once (244 -> ~145 tok).
+registry.register(
+    name="desktop_project",
+    toolset="project",
+    schema={
+        "name": "desktop_project",
+        "description": (
+            "Create or switch desktop Projects (named workspaces). create: one and switch "
+            "this chat into it — pass path to anchor it to a repo/folder (the "
+            "chat's workspace moves there, the sidebar follows). switch: move "
+            "this chat into an existing project by name/slug/id — the "
+            "intentional way to move the session, not `cd`. list: all "
+            "projects + which is active."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["create", "switch", "list"]},
+                "name": {"type": "string", "description": "create: human name. switch: name, slug, or id."},
+                "path": {"type": "string", "description": "create: repo/folder to anchor to."},
+            },
+            "required": ["action"],
+        },
+    },
+    handler=_handle_project,
+)

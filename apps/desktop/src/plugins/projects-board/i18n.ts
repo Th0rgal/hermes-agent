@@ -139,6 +139,12 @@ type BoardMessages = {
   steerMissionTip: string
   attentionNotifTitle: string
   attentionNotifBody: (label: string) => string
+  attentionResolvedTitle: string
+  attentionResolvedBody: (label: string, message: string) => string
+  attentionAcknowledge: string
+  attentionResume: string
+  attentionAnswer: string
+  attentionPause: string
   openBoardAction: string
   notifyToggleOn: string
   notifyToggleOff: string
@@ -316,6 +322,12 @@ const en: BoardMessages = {
   steerMissionTip: 'Steer this mission',
   attentionNotifTitle: 'Project needs attention',
   attentionNotifBody: label => `${label} needs your attention`,
+  attentionResolvedTitle: 'Resolved',
+  attentionResolvedBody: (label, message) => `${label}: ${message}`,
+  attentionAcknowledge: 'Acknowledge',
+  attentionResume: 'Resume',
+  attentionAnswer: 'Answer',
+  attentionPause: 'Pause project',
   openBoardAction: 'Open board',
   notifyToggleOn: 'Attention notifications on — click to mute',
   notifyToggleOff: 'Attention notifications off — click to enable',

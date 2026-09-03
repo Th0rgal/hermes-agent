@@ -26,6 +26,7 @@ import { type ReactNode, useEffect, useState } from 'react'
 
 import {
   answerDecision,
+  attentionItems,
   type AutonomyLevel,
   fetchProject,
   fetchProjectState,
@@ -47,6 +48,7 @@ import {
   tasksKey,
   type TrackHealth
 } from './api'
+import { AttentionList } from './attention-list'
 import { ago, errText } from './board'
 import { SteerInput } from './color-swatches'
 import { useBoard } from './i18n'
@@ -708,6 +710,7 @@ export function ProjectDrawer({
   const tracks = detail?.tracks ?? row?.health?.tracks ?? []
   const errorMessage = error ? errText(error) : null
   const pending = detail?.open_decisions ?? []
+  const attention = row ? attentionItems(row) : []
   const activity = detail?.recent_decisions ?? []
   const tasks = roadmap?.tasks ?? []
   const summary = roadmap?.summary
@@ -786,10 +789,13 @@ export function ProjectDrawer({
                 </div>
               )}
 
-              {/* Needs you — first, because it is the reason to open the card. */}
-              {pending.length > 0 && (
+              {/* Needs you — first, because it is the reason to open the card.
+                  Attention items (with their clearing action) above the
+                  owner decisions. */}
+              {(pending.length > 0 || attention.length > 0) && (
                 <Section label={b.needsYouSection}>
                   <div className="flex flex-col gap-1.5">
+                    <AttentionList items={attention} slug={slug} />
                     {pending.map(decision => (
                       <PendingDecisionRow decision={decision} key={decision.at} slug={slug} />
                     ))}

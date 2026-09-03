@@ -66,7 +66,31 @@ export type ProjectBucket = 'active' | 'archived' | 'attention' | 'paused'
 
 export type AutonomyLevel = 'act_full' | 'act_reversible' | 'observe' | 'propose'
 
+/** The one HTTP call (on sandboxed.sh) that clears an attention item. The
+ *  desktop maps by `kind` to its own relays; `path` is informational. */
+export interface AttentionAction {
+  body?: null | Record<string, unknown>
+  label: string
+  method: string
+  path: string
+}
+
+/** One reason a project needs the operator, with its evidence. `kind` is
+ *  stable: blocker_reported | state_stalled | mission_awaiting_user |
+ *  decision_pending | mission_failed | tracker_stale | no_controller. */
+export interface AttentionItem {
+  action?: AttentionAction | null
+  evidence_headline?: null | string
+  kind: string
+  message: string
+  mission_id?: null | string
+  since?: null | string
+}
+
 export interface ProjectRow {
+  /** Structured attention (newer backends); `attention_reasons` is the same
+   *  list as plain text and stays the fallback. */
+  attention?: AttentionItem[]
   attention_reasons: string[]
   /** The grant's normalized autonomy level; absent on older backends. */
   autonomy_level?: AutonomyLevel | null
@@ -490,6 +514,66 @@ export const tasksKey = (slug: string) => ['projects-board', 'tasks', slug] as c
 /** Projects newly ENTERING attention relative to the previous roster snapshot.
  *  A null previous (startup / rebind) yields none — a standing alert the app
  *  boots into is not a transition. */
+/** Every attention item of a row, synthesized from the plain reasons on
+ *  backends that predate `attention`. */
+export function attentionItems(project: ProjectRow): AttentionItem[] {
+  if (Array.isArray(project.attention)) {
+    return project.attention
+  }
+
+  return (project.attention_reasons ?? []).map(message => ({ kind: 'legacy', message }))
+}
+
+/** Identity of an item across roster reads — same as the backend's key. */
+export function attentionKey(item: AttentionItem): string {
+  return `${item.kind}|${item.mission_id ?? ''}`
+}
+
+export interface AttentionResolution {
+  label: string
+  message: string
+  slug: string
+}
+
+/** Items present at the previous roster read and gone now: reasons that
+ *  resolved (a relay acknowledged, a decision answered, a controller back).
+ *  A null previous (startup) and projects first seen now never fire. */
+export function attentionResolutions(
+  previous: null | Record<string, Record<string, string>>,
+  projects: ProjectRow[]
+): AttentionResolution[] {
+  if (!previous) {
+    return []
+  }
+
+  const out: AttentionResolution[] = []
+
+  for (const project of projects) {
+    const before = previous[project.slug]
+
+    if (!before) {
+      continue
+    }
+
+    const now = new Set(attentionItems(project).map(attentionKey))
+    const label = project.title?.trim() || project.slug
+
+    for (const key of Object.keys(before).sort()) {
+      if (!now.has(key)) {
+        out.push({ label, message: before[key], slug: project.slug })
+      }
+    }
+  }
+
+  return out
+}
+
+export function attentionSnapshot(projects: ProjectRow[]): Record<string, Record<string, string>> {
+  return Object.fromEntries(
+    projects.map(p => [p.slug, Object.fromEntries(attentionItems(p).map(item => [attentionKey(item), item.message]))])
+  )
+}
+
 export function attentionTransitions(
   previous: null | Record<string, string>,
   projects: ProjectRow[]
@@ -520,10 +604,17 @@ export function debounceAttentionNotifications(slugs: string[], now = Date.now()
 // The plugin shell owns presentation (i18n'd copy, the notification door);
 // the data layer only detects transitions on each roster arrival.
 let notifyAttentionFn: ((label: string) => void) | null = null
+let notifyResolutionFn: ((label: string, message: string) => void) | null = null
 let previousBuckets: null | Record<string, string> = null
+let previousAttention: null | Record<string, Record<string, string>> = null
 
 export function setAttentionNotifier(fn: ((label: string) => void) | null): void {
   notifyAttentionFn = fn
+}
+
+/** Presentation hook for "a reason you were shown is now resolved". */
+export function setResolutionNotifier(fn: ((label: string, message: string) => void) | null): void {
+  notifyResolutionFn = fn
 }
 
 // ── binding canonicalization ────────────────────────────────────────────────
@@ -593,6 +684,20 @@ function observeRoster(projects: ProjectRow[]): void {
 
   const entered = attentionTransitions(previousBuckets, projects)
   previousBuckets = Object.fromEntries(projects.map(p => [p.slug, p.bucket]))
+
+  // Resolutions: the counterpart of "needs attention". Each one is toasted
+  // and written back into the bound control conversation, so the report the
+  // owner read earlier gets its answer where it was made.
+  const resolved = attentionResolutions(previousAttention, projects)
+  previousAttention = attentionSnapshot(projects)
+
+  for (const resolution of resolved) {
+    if ($notifyAttention.get() && notifyResolutionFn) {
+      notifyResolutionFn(resolution.label, resolution.message)
+    }
+
+    void noteResolution(resolution.slug, resolution.message).catch(() => undefined)
+  }
 
   if (entered.length === 0 || !$notifyAttention.get() || !notifyAttentionFn) {
     return
@@ -685,6 +790,22 @@ export const saveGrant = (slug: string, patch: Record<string, unknown>) =>
 export const answerDecision = (slug: string, at: string, answer: string, question?: string) =>
   call<{ injected: boolean; ok: boolean }>(`/projects/${encodeURIComponent(slug)}/decisions/answer`, {
     body: { answer, at, question },
+    method: 'POST'
+  })
+
+/** Acknowledge a terminal (failed / interrupted / awaiting-ack) mission so it
+ *  leaves the attention horizon. */
+export const acknowledgeMission = (missionId: string) =>
+  call(`/missions/${encodeURIComponent(missionId)}/acknowledge`, { body: {}, method: 'POST' })
+
+/** Resume a failed / interrupted mission on its current settings. */
+export const resumeMission = (missionId: string) =>
+  call(`/missions/${encodeURIComponent(missionId)}/resume`, { body: {}, method: 'POST' })
+
+/** Write a board note (an attention resolution) into the bound conversation. */
+export const noteResolution = (slug: string, message: string) =>
+  call<{ injected: boolean; ok: boolean }>(`/projects/${encodeURIComponent(slug)}/notes`, {
+    body: { kind: 'attention_resolved', message },
     method: 'POST'
   })
 

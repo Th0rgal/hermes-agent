@@ -331,7 +331,9 @@ export function useStatusbarItems({
       // their client is behind. Listed in the menu, but locked on.
       lockedVisible: true,
       onSelect: () => openUpdateOverlayFor('client'),
-      title: status.tooltip,
+      title: desktopVersion?.installCommit
+        ? [status.tooltip, `build ${desktopVersion.installCommit.slice(0, 7)}`].filter(Boolean).join(' · ')
+        : status.tooltip,
       toggleLabel: copy.toggleVersion,
       variant: 'action'
     }

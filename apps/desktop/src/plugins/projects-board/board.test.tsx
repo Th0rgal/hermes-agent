@@ -5,6 +5,10 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import {
   $attentionNotifiedAt,
+  type AttentionItem,
+  attentionItems,
+  attentionResolutions,
+  attentionSnapshot,
   attentionTransitions,
   bindApi,
   bucketAction,
@@ -155,6 +159,43 @@ describe('attentionTransitions', () => {
 
   it('a project first seen already in attention is not a transition', () => {
     expect(attentionTransitions({}, [row('new-proj', 'attention')])).toEqual([])
+  })
+})
+
+describe('attentionResolutions', () => {
+  const withItems = (slug: string, items: AttentionItem[]): ProjectRow => ({
+    ...row(slug, items.length > 0 ? 'attention' : 'active'),
+    attention: items,
+    attention_reasons: items.map(item => item.message)
+  })
+
+  it('reports items that were shown before and are gone now', () => {
+    const before = attentionSnapshot([
+      withItems('eip-8282', [
+        { kind: 'mission_failed', message: 'mission 1971a723 is Failed', mission_id: '1971a723' },
+        { kind: 'no_controller', message: 'active project has no controller' }
+      ])
+    ])
+
+    const resolved = attentionResolutions(before, [
+      withItems('eip-8282', [{ kind: 'no_controller', message: 'active project has no controller' }])
+    ])
+
+    expect(resolved).toEqual([{ label: 'eip-8282', message: 'mission 1971a723 is Failed', slug: 'eip-8282' }])
+  })
+
+  it('a null previous snapshot (startup) and unknown projects never fire', () => {
+    expect(attentionResolutions(null, [withItems('x', [])])).toEqual([])
+    expect(attentionResolutions({}, [withItems('x', [])])).toEqual([])
+  })
+
+  it('falls back to plain reasons on older backends', () => {
+    const legacy: ProjectRow = { ...row('lido', 'attention'), attention_reasons: ['blocker reported: lease'] }
+
+    expect(attentionItems(legacy)).toEqual([{ kind: 'legacy', message: 'blocker reported: lease' }])
+    expect(attentionResolutions(attentionSnapshot([legacy]), [row('lido', 'active')])).toEqual([
+      { label: 'lido', message: 'blocker reported: lease', slug: 'lido' }
+    ])
   })
 })
 

@@ -404,6 +404,59 @@ async def answer_decision(
     return {"ok": True, "slug": slug, "at": at, "injected": injected}
 
 
+@router.post("/missions/{mission_id}/acknowledge")
+async def acknowledge_mission(mission_id: str) -> Dict[str, Any]:
+    """Acknowledge a terminal mission (failed / interrupted / awaiting ack) so
+    it leaves the board's attention horizon. Mirrors the MCP tool."""
+    mission_id = (mission_id or "").strip()
+    if not mission_id:
+        raise HTTPException(status_code=400, detail="mission_id is required")
+    await _sandboxed_request(
+        "POST", f"/api/control/missions/{mission_id}/status", body={"status": "acknowledged"}
+    )
+    return {"ok": True, "mission_id": mission_id}
+
+
+@router.post("/missions/{mission_id}/resume")
+async def resume_mission(mission_id: str) -> Dict[str, Any]:
+    """Resume a failed / interrupted mission on its current settings."""
+    mission_id = (mission_id or "").strip()
+    if not mission_id:
+        raise HTTPException(status_code=400, detail="mission_id is required")
+    await _sandboxed_request("POST", f"/api/control/missions/{mission_id}/resume", body={})
+    return {"ok": True, "mission_id": mission_id}
+
+
+@router.post("/projects/{slug}/notes")
+async def project_note(
+    slug: str, payload: Dict[str, Any] = Body(default_factory=dict)
+) -> Dict[str, Any]:
+    """Write a board note into the bound control conversation — today the
+    "attention resolved" counterpart of an earlier report, so the owner sees
+    the answer where the problem was raised. Best-effort: no binding or a
+    cold session yields injected=false, never an error."""
+    slug = _clean_slug(slug)
+    message = str(payload.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+    kind = str(payload.get("kind") or "note").strip() or "note"
+    label = "attention resolved" if kind == "attention_resolved" else kind.replace("_", " ")
+    injected = False
+    try:
+        detail = await _sandboxed_request("GET", f"/api/projects/{slug}")
+    except Exception as error:
+        _log.warning("projects-board: note lookup failed for %s: %s", slug, error)
+        return {"ok": True, "slug": slug, "injected": False}
+    conversation = detail.get("conversation") if isinstance(detail, dict) else None
+    if isinstance(conversation, dict) and conversation.get("source") == "binding":
+        session_key = str(conversation.get("session_id") or "")
+        if session_key:
+            injected = await run_in_threadpool(
+                _inject_owner_answer, session_key, f"[Board] {label}: {message}"
+            )
+    return {"ok": True, "slug": slug, "injected": injected}
+
+
 @router.post("/missions/{mission_id}/message")
 async def steer_mission(
     mission_id: str, payload: Dict[str, Any] = Body(default_factory=dict)

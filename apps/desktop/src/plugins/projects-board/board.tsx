@@ -42,6 +42,7 @@ import {
   $introDismissed,
   $notifyAttention,
   $openProjectSlug,
+  attentionItems,
   BOARD_BUCKETS,
   bucketAction,
   fetchProjects,
@@ -59,6 +60,7 @@ import {
   type ProjectsResponse,
   tasksKey
 } from './api'
+import { AttentionList } from './attention-list'
 import { RenameProjectDialog, SessionColorSwatchesRow, UnreadBadge } from './color-swatches'
 import { ControllerStatusIcon } from './controller-status'
 import { AutonomyChip, ProjectDrawer } from './drawer'
@@ -288,10 +290,8 @@ function Card({
               )}
             </div>
           )}
-          {attention && project.attention_reasons.length > 0 && (
-            <div className="line-clamp-2 text-[0.625rem] leading-snug text-amber-500">
-              {project.attention_reasons[0]}
-            </div>
+          {attention && attentionItems(project).length > 0 && (
+            <AttentionList compact items={attentionItems(project)} onOpen={onOpen} slug={project.slug} />
           )}
           {lead.controllerBehind && (
             <div className="text-[0.5625rem] uppercase tracking-wide text-amber-500">{b.controllerBehind}</div>

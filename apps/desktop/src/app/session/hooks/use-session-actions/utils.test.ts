@@ -1,7 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { textWithoutReferenceLines, WIRE_REFERENCE_KINDS } from '@/components/assistant-ui/reference-kinds'
 import { type ChatMessage, type ChatMessagePart, chatMessageText } from '@/lib/chat-messages'
+import {
+  clearInFlightTurnJournal,
+  dropInFlightTurnJournalRow,
+  persistInFlightTurnState,
+  readInFlightTurnJournal,
+  recoverInFlightTurnJournal,
+  resetInFlightTurnJournalStateForTests
+} from '@/lib/inflight-turn-journal'
 import { $approvalModes, approvalModeForProfile } from '@/store/approval-mode'
 import { $desktopOnboarding, consumePendingCredentialWarning } from '@/store/onboarding'
 import { $activeGatewayProfile } from '@/store/profile'
@@ -1763,6 +1771,82 @@ describe('appendLiveSessionProjection — retained failed turn after a mission c
     } as never)
 
     expect(restored.some(message => message.id === 'user-inflight-sid')).toBe(true)
+  })
+})
+
+describe('retained failed turn: journal replay follows the server resume snapshot', () => {
+  const prompt = 'do the thing'
+  const transcript = () => [msg('u0', 'user', 'older question'), msg('a0', 'assistant', 'older answer')]
+
+  function journalFailedTurn() {
+    persistInFlightTurnState({
+      awaitingResponse: false,
+      busy: true,
+      messages: [
+        msg('user-inflight-sid', 'user', prompt),
+        msg('assistant-err', 'assistant', '', { error: "agent init failed: name 'registry' is not defined" })
+      ],
+      storedSessionId: 'stored-sid',
+      streamId: null,
+      turnStartedAt: 1000
+    })
+    vi.advanceTimersByTime(400)
+  }
+
+  /** The resume-path rule from use-session-actions: the server snapshot is the
+   *  authority on a retained failure — no `inflight.error`, no local replay. */
+  function resumeWith(inflight: SessionResumeResponse['inflight']) {
+    const base = appendLiveSessionProjection(transcript(), { inflight, session_id: 'sid' } as never)
+
+    return recoverInFlightTurnJournal('stored-sid', base, {
+      dropRetainedErrors: !inflight?.error?.trim(),
+      keepPending: false
+    })
+  }
+
+  beforeEach(() => {
+    resetInFlightTurnJournalStateForTests()
+    vi.useFakeTimers()
+    window.localStorage.clear()
+  })
+
+  afterEach(() => {
+    clearInFlightTurnJournal('stored-sid')
+    vi.useRealTimers()
+  })
+
+  it('drops the retained error when the gateway (restarted) no longer reports it', () => {
+    journalFailedTurn()
+
+    const result = resumeWith(null)
+
+    expect(result.applied).toBe(false)
+    expect(result.messages.some(message => Boolean(message.error))).toBe(false)
+    expect(result.messages.some(message => message.id === 'user-inflight-sid')).toBe(false)
+    expect(readInFlightTurnJournal('stored-sid')).toBeNull()
+  })
+
+  it('keeps the retained error while the gateway still replays it', () => {
+    journalFailedTurn()
+
+    const result = resumeWith({ assistant: '', error: 'agent init failed', status: 'error', streaming: false, user: prompt } as never)
+
+    const failedRow = result.messages.find(message => Boolean(message.error))
+    expect(failedRow?.error).toContain('agent init failed')
+    expect(result.messages.some(message => message.id === 'user-inflight-sid')).toBe(true)
+    expect(readInFlightTurnJournal('stored-sid')).not.toBeNull()
+  })
+
+  it('dismissing the error card clears the journal row so a later resume stays clean', () => {
+    journalFailedTurn()
+
+    dropInFlightTurnJournalRow('stored-sid', 'assistant-err')
+
+    expect(readInFlightTurnJournal('stored-sid')).toBeNull()
+    expect(
+      resumeWith({ assistant: '', error: 'agent init failed', status: 'error', streaming: false, user: prompt } as never)
+        .applied
+    ).toBe(false)
   })
 })
 

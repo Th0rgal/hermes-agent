@@ -174,10 +174,15 @@ const DeliveryCollapsedNotice: FC<{ label: string }> = ({ label }) => {
       <summary className="flex cursor-pointer select-none items-center gap-1.5 text-[0.75rem] leading-5 text-muted-foreground/70 hover:text-muted-foreground">
         <Clock aria-hidden className="size-3 shrink-0" />
         <span className="truncate">
-          {[label, arrival === null ? '' : formatArrivalTime(arrival), preview].filter(Boolean).join(' · ')}
+          {/* The divider pill above already carries label · time; the summary
+              only adds the preview so the two lines never repeat each other. */}
+          {preview || [label, arrival === null ? '' : formatArrivalTime(arrival)].filter(Boolean).join(' · ')}
         </span>
       </summary>
-      <div className="wrap-anywhere mt-1 min-w-0 max-w-full overflow-hidden text-pretty text-[length:var(--conversation-text-font-size)] leading-(--dt-line-height) text-foreground">
+      <div
+        className="wrap-anywhere mt-1 min-w-0 max-w-full overflow-hidden text-pretty text-[length:var(--conversation-text-font-size)] leading-(--dt-line-height) text-foreground"
+        data-slot="aui_assistant-message-content"
+      >
         {MESSAGE_PARTS}
       </div>
     </details>

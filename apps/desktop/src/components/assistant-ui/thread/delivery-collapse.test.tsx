@@ -11,8 +11,6 @@ import { $deliveryCollapse } from '@/store/delivery-collapse'
 
 import { createdAt, stubThreadEnvironment } from '../test-utils'
 
-import { formatArrivalTime } from './timestamp'
-
 import { Thread } from '.'
 
 stubThreadEnvironment()
@@ -75,11 +73,10 @@ describe('delivery collapse gate', () => {
   it('collapses a settled delivery by default, keeping the divider above it', async () => {
     const { container } = render(<Harness messages={[user('u1', 'tick'), delivery(BODY)]} />)
 
-    const notice = await screen.findByText(
-      `verity controller · ${formatArrivalTime(arrival)} · PR #2332 still repairing.`
-    )
+    await screen.findAllByText('PR #2332 still repairing.')
+    const summary = container.querySelector('[data-slot="aui_assistant-delivery-collapsed"] summary')
 
-    expect(notice.closest('details')).toBeTruthy()
+    expect(summary?.textContent).toContain('PR #2332 still repairing.')
     expect(container.querySelector('[data-slot="aui_assistant-delivery-divider"]')).toBeTruthy()
   })
 

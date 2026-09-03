@@ -108,10 +108,9 @@ export function useMessageStream({
           const prev = state.messages
           const seeded = seed()
           // After message.interim the stream id is cleared so a later *different*
-          // sentence can open its own bubble. Tools (and a re-emit of the same
-          // sentence) still belong to that sealed turn — opening a twin bubble
-          // reprints the narration (Coldcard: Umbrel line above the tools, then
-          // the same line again inside the tool bubble).
+          // sentence (or a tool call) opens its own bubble. A re-emit of the
+          // same sentence still belongs to that sealed turn — opening a twin
+          // bubble would reprint the narration, so drop it.
           const lastAssistant = [...prev].reverse().find(message => message.role === 'assistant' && !message.hidden)
           const lastText = lastAssistant ? chatMessageText(lastAssistant).trim() : ''
           const seedText = seeded
@@ -119,19 +118,14 @@ export function useMessageStream({
             .map(part => part.text)
             .join('')
             .trim()
-          const seedIsToolOnly = seeded.length > 0 && seeded.every(part => part.type === 'tool-call')
           const sameNarration = (left: string, right: string) =>
             Boolean(left && right && (left === right || right.startsWith(left) || left.startsWith(right)))
 
-          let streamId = state.streamId
-
-          if (!streamId && lastAssistant?.interim && seedIsToolOnly) {
-            streamId = lastAssistant.id
-          } else if (!streamId && lastAssistant?.interim && sameNarration(lastText, seedText)) {
+          if (!state.streamId && lastAssistant?.interim && sameNarration(lastText, seedText)) {
             return state
-          } else {
-            streamId = streamId ?? nextStreamMessageId('assistant-stream')
           }
+
+          const streamId = state.streamId ?? nextStreamMessageId('assistant-stream')
 
           const groupId = state.pendingBranchGroup ?? undefined
           let nextMessages: ChatMessage[]
@@ -680,8 +674,13 @@ export function useMessageStream({
         if (streamId && prev.some(m => m.id === streamId)) {
           nextMessages = prev.map(m => (m.id === streamId ? completeMessage(m) : m))
 
-          // Tools that started after the interim opened a second bubble; if
-          // that bubble only restates the sealed narration, fold it back.
+          // [fork-delta] Tools that started after the interim opened a second
+          // bubble (upstream contract: a tool-only seed after a sealed interim
+          // is a new bubble). If the final text only restates the sealed
+          // narration, the turn would end with the same line printed twice
+          // (Coldcard: Umbrel line above the tools, then again inside the tool
+          // bubble), so fold the stream bubble back onto the interim at turn
+          // end — non-text parts first, narration text last.
           const streamIndex = nextMessages.findIndex(message => message.id === streamId)
           const previous = streamIndex > 0
             ? [...nextMessages.slice(0, streamIndex)].reverse().find(message => message.role === 'assistant' && !message.hidden)

@@ -21,6 +21,7 @@ import { usePaneLifecycle, usePaneVisible } from '@/components/pane-shell/pane-v
 import { useI18n } from '@/i18n'
 import { messagePaintWeight } from '@/lib/render-weight'
 import { cn } from '@/lib/utils'
+import { $chatViewFilter, type ChatViewFilter } from '@/store/chat-view-filter'
 import {
   onScrollToBottomRequest,
   onThreadEditClose,
@@ -32,13 +33,79 @@ import { isSecondaryWindow } from '@/store/windows'
 
 import { MessageRenderBoundary } from '../message-render-boundary'
 
+import { formatArrivalRange } from './timestamp'
 import { resolveShowEarlierAction, useTranscriptWindow } from './transcript-window'
 
 type ThreadMessageComponents = ComponentProps<typeof ThreadPrimitive.MessageByIndex>['components']
 
 export type MessageGroup = { id: string; weight: number } & (
-  { index: number; kind: 'standalone' } | { indices: number[]; kind: 'turn' }
+  | { index: number; kind: 'standalone' }
+  | { indices: number[]; kind: 'turn' }
+  // A digest of consecutive scheduled deliveries (cron / mission callbacks)
+  // that need no answer — collapsed to one summary line, see DeliveryRunRow.
+  | { indices: number[]; kind: 'delivery_run' }
 )
+
+/** Delivery provenance as forwarded to assistant-ui (`metadata.custom.delivery`). */
+export interface MessageDeliveryMeta {
+  kind?: string
+  label: string
+  needsOwner?: boolean
+}
+
+/** Minimal runtime-message shape the grouping/filter logic reads. */
+export interface FilterableMessage {
+  metadata?: { custom?: unknown }
+  role: string
+}
+
+export const messageDelivery = (message: FilterableMessage): MessageDeliveryMeta | undefined => {
+  const delivery = (message.metadata?.custom as { delivery?: unknown } | undefined)?.delivery
+
+  return delivery && typeof delivery === 'object' && typeof (delivery as { label?: unknown }).label === 'string'
+    ? (delivery as MessageDeliveryMeta)
+    : undefined
+}
+
+/** Fewest consecutive owner-less deliveries that fold into one digest row. */
+export const DELIVERY_RUN_MIN = 3
+
+/**
+ * Indexes the view filter removes from the transcript. Pure over the runtime
+ * messages, never mutates hydrated data — the row builder simply skips them.
+ *  - `mine`: hides deliveries unless they need the owner or directly answer a
+ *    user message (the row right after a user message, same turn).
+ *  - `reports`: keeps only deliveries and user messages.
+ */
+export function hiddenIndexesForFilter(messages: readonly FilterableMessage[], filter: ChatViewFilter): Set<number> {
+  const hidden = new Set<number>()
+
+  if (filter === 'all') {
+    return hidden
+  }
+
+  messages.forEach((message, index) => {
+    const delivery = messageDelivery(message)
+
+    if (filter === 'reports') {
+      if (message.role !== 'user' && !delivery) {
+        hidden.add(index)
+      }
+
+      return
+    }
+
+    if (!delivery || delivery.needsOwner) {
+      return
+    }
+
+    if (messages[index - 1]?.role !== 'user') {
+      hidden.add(index)
+    }
+  })
+
+  return hidden
+}
 
 // DOM is bounded by a render-cost budget, not a message/turn count. The
 // currency is `messagePaintWeight`: what a turn actually MOUNTS, which is what
@@ -214,11 +281,24 @@ export function buildGroups(signature: string): MessageGroup[] {
     return []
   }
 
+  // Rows are `index:id:role[:weight[:delivery]]`; the 5th field is 'd' for a
+  // delivery that needs no owner, 'o' for one that does (see the selector).
   const messages = signature.split('\n').map(row => {
-    const [index, id, role, weight] = row.split(':')
+    const [index, id, role, weight, delivery] = row.split(':')
 
-    return { id, index: Number(index), role, weight: Number(weight) || 1 }
+    return { delivery: delivery === 'd', id, index: Number(index), role, weight: Number(weight) || 1 }
   })
+
+  // Length of the owner-less delivery streak starting at `start`.
+  const deliveryRunLength = (start: number): number => {
+    let end = start
+
+    while (end < messages.length && messages[end].delivery) {
+      end++
+    }
+
+    return end - start
+  }
 
   const groups: MessageGroup[] = []
 
@@ -226,6 +306,22 @@ export function buildGroups(signature: string): MessageGroup[] {
     const message = messages[i]
 
     if (message.role !== 'user') {
+      const runLength = deliveryRunLength(i)
+
+      if (runLength >= DELIVERY_RUN_MIN) {
+        const run = messages.slice(i, i + runLength)
+
+        groups.push({
+          id: message.id,
+          indices: run.map(row => row.index),
+          kind: 'delivery_run',
+          weight: run.reduce((sum, row) => sum + row.weight, 0)
+        })
+        i += runLength - 1
+
+        continue
+      }
+
       groups.push({ id: message.id, index: message.index, kind: 'standalone', weight: message.weight })
 
       continue
@@ -234,7 +330,8 @@ export function buildGroups(signature: string): MessageGroup[] {
     const indices = [message.index]
     let weight = message.weight
 
-    while (i + 1 < messages.length && messages[i + 1].role !== 'user') {
+    // A digest-sized delivery run closes the turn: it renders as its own row.
+    while (i + 1 < messages.length && messages[i + 1].role !== 'user' && deliveryRunLength(i + 1) < DELIVERY_RUN_MIN) {
       weight += messages[++i].weight
       indices.push(messages[i].index)
     }
@@ -334,7 +431,7 @@ export function liveTailStart(
 
 interface TurnRowProps {
   components: ThreadMessageComponents
-  group: MessageGroup
+  group: Exclude<MessageGroup, { kind: 'delivery_run' }>
   resetKey: string
   virtualized: boolean
 }
@@ -387,6 +484,81 @@ const TurnRow = memo(function TurnRow({ components, group, resetKey, virtualized
   )
 })
 
+interface DeliveryRunRowProps {
+  components: ThreadMessageComponents
+  indices: readonly number[]
+  resetKey: string
+  virtualized: boolean
+}
+
+// A run of scheduled deliveries that need nothing from the owner. Collapsed
+// by default to one grey line ("N reports · labels · HH:MM → HH:MM"); opening
+// the disclosure mounts the messages, whose own per-message collapse is
+// handled by the assistant message component.
+const DeliveryRunRow = memo(function DeliveryRunRow({ components, indices, resetKey, virtualized }: DeliveryRunRowProps) {
+  const { t } = useI18n()
+  const first = indices[0]
+  const last = indices[indices.length - 1]
+
+  // One string, not an object: useAuiState compares by identity per render.
+  const summary = useAuiState(s => {
+    const labels: string[] = []
+
+    for (const index of indices) {
+      const label = messageDelivery(s.thread.messages[index] ?? { role: 'assistant' })?.label
+
+      if (label && !labels.includes(label)) {
+        labels.push(label)
+      }
+    }
+
+    const timestampAt = (index: number) =>
+      (s.thread.messages[index]?.metadata?.custom as { timelineTimestamp?: unknown } | undefined)?.timelineTimestamp
+
+    const startAt = timestampAt(first)
+    const endAt = timestampAt(last)
+
+    return [
+      t.assistant.thread.deliveryRunCount(indices.length),
+      labels.join(', '),
+      formatArrivalRange(
+        typeof startAt === 'number' ? startAt : undefined,
+        typeof endAt === 'number' ? endAt : undefined
+      )
+    ]
+      .filter(Boolean)
+      .join(' · ')
+  })
+
+  return (
+    <div
+      className={cn(
+        'flex min-w-0 flex-col gap-(--conversation-turn-gap) pb-(--conversation-turn-gap)',
+        virtualized && '[contain-intrinsic-size:auto_2.5rem] [content-visibility:auto]'
+      )}
+    >
+      <MessageRenderBoundary resetKey={resetKey}>
+        <details className="group/delivery-run min-w-0" data-slot="aui_delivery-run">
+          <summary
+            className="cursor-pointer list-none truncate rounded-[3px] px-1 py-0.5 text-xs text-muted-foreground tabular-nums select-none marker:hidden hover:text-foreground [&::-webkit-details-marker]:hidden"
+            title={summary}
+          >
+            <span aria-hidden="true" className="mr-1 inline-block transition-transform group-open/delivery-run:rotate-90">
+              ▸
+            </span>
+            {summary}
+          </summary>
+          <div className="flex min-w-0 flex-col gap-(--conversation-turn-gap) pt-(--conversation-turn-gap)">
+            {indices.map(index => (
+              <ThreadPrimitive.MessageByIndex components={components} index={index} key={index} />
+            ))}
+          </div>
+        </details>
+      </MessageRenderBoundary>
+    </div>
+  )
+})
+
 const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   clampToComposer,
   components,
@@ -403,9 +575,30 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   // new resetKey per appended part, which reconciled every turn's subtree on
   // every tick (measured: 540 wasted Block renders per explain() sample with
   // two threads streaming).
-  const structuralSignature = useAuiState(s =>
-    s.thread.messages.map((message, index) => `${index}:${message.id}:${message.role}`).join('\n')
-  )
+  //
+  // Delivery rows carry a 5th field ('d' owner-less, 'o' needs owner) so the
+  // grouping can fold digest runs; other rows keep the bare `index:id:role`.
+  // Rows the view filter hides are dropped from the signature outright — the
+  // row builder never sees them, and the hydrated data is untouched.
+  const viewFilter = useStore($chatViewFilter)
+
+  const structuralSignature = useAuiState(s => {
+    const hidden = hiddenIndexesForFilter(s.thread.messages, viewFilter)
+    const rows: string[] = []
+
+    s.thread.messages.forEach((message, index) => {
+      if (hidden.has(index)) {
+        return
+      }
+
+      const delivery = messageDelivery(message)
+      const flag = delivery ? (delivery.needsOwner ? '::o' : '::d') : ''
+
+      rows.push(`${index}:${message.id}:${message.role}${flag}`)
+    })
+
+    return rows.join('\n')
+  })
 
   const weightSignature = useAuiState(s =>
     s.thread.messages.map(message => messagePaintWeight(message.content)).join(',')
@@ -551,7 +744,7 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
     return groups.map(group => ({
       ...group,
       weight:
-        group.kind === 'turn'
+        'indices' in group
           ? group.indices.reduce((sum, index) => sum + (weights[index] ?? 1), 0)
           : (weights[group.index] ?? 1)
     }))
@@ -779,15 +972,25 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   // bails out on element identity and a scroll flip re-renders nothing below.
   const rows = useMemo(
     () =>
-      visibleGroups.map((group, indexInVisible) => (
-        <TurnRow
-          components={components}
-          group={group}
-          key={group.id}
-          resetKey={structuralSignature}
-          virtualized={indexInVisible < tailStart}
-        />
-      )),
+      visibleGroups.map((group, indexInVisible) =>
+        group.kind === 'delivery_run' ? (
+          <DeliveryRunRow
+            components={components}
+            indices={group.indices}
+            key={group.id}
+            resetKey={structuralSignature}
+            virtualized={indexInVisible < tailStart}
+          />
+        ) : (
+          <TurnRow
+            components={components}
+            group={group}
+            key={group.id}
+            resetKey={structuralSignature}
+            virtualized={indexInVisible < tailStart}
+          />
+        )
+      ),
     [visibleGroups, components, structuralSignature, tailStart]
   )
 

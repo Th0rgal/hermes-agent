@@ -11,6 +11,7 @@ import {
   completeOpenTimelineParts,
   dedupeRepeatedTextInParts,
   dedupeRepeatedToolCallsInParts,
+  deliveryNeedsOwner,
   legacyDisplayKind,
   mergeFinalAssistantText,
   missionCallbackLabel,
@@ -415,7 +416,7 @@ describe('toChatMessages', () => {
     ])
 
     expect(message.role).toBe('assistant')
-    expect(message.delivery).toEqual({ label: 'asset callback' })
+    expect(message.delivery).toEqual({ kind: 'cron', label: 'asset callback', needsOwner: false })
     expect(chatMessageText(message)).toBe('Done.\n\n[Image: proof.png](#media:%2Ftmp%2Fproof.png)')
   })
 
@@ -430,7 +431,7 @@ describe('toChatMessages', () => {
     ])
 
     expect(message.role).toBe('assistant')
-    expect(message.delivery).toEqual({ label: 'callback' })
+    expect(message.delivery).toEqual({ kind: 'cron', label: 'callback', needsOwner: false })
   })
 
   it('lifts the sentinel of an assistant-role delivery into delivery metadata', () => {
@@ -444,7 +445,7 @@ describe('toChatMessages', () => {
     ])
 
     expect(message.role).toBe('assistant')
-    expect(message.delivery).toEqual({ label: 'Beal roadmap progression' })
+    expect(message.delivery).toEqual({ kind: 'cron', label: 'Beal roadmap progression', needsOwner: false })
     expect(chatMessageText(message)).toBe('Head advanced to fbfde973.')
   })
 
@@ -465,7 +466,7 @@ describe('toChatMessages', () => {
     ])
 
     expect(messages).toHaveLength(2)
-    expect(messages[1].delivery).toEqual({ label: 'watcher' })
+    expect(messages[1].delivery).toEqual({ kind: 'cron', label: 'watcher', needsOwner: false })
     expect(chatMessageText(messages[1])).toBe('Build finished.')
   })
 
@@ -1682,10 +1683,55 @@ describe('mission callback rows', () => {
 
     const chat = toChatMessages(typed)
     expect(chat[0].delivery?.label).toBe('mission finished · Repair PR 27 · failed')
+    expect(chat[0].delivery?.kind).toBe('mission_callback')
     expect(chat[1].role).toBe('system')
     expect(chat[1].parts.map(part => ('text' in part ? part.text : '')).join('')).toBe(
       'mission finished · Repair PR 27 · failed'
     )
     expect(missionCallbackLabel(undefined, '')).toBe('mission finished')
+  })
+})
+
+describe('deliveryNeedsOwner', () => {
+  const cronDelivery = (body: string): SessionMessage => ({
+    content: `[Cron delivery: verity controller]\n${body}`,
+    observed: true,
+    role: 'assistant',
+    timestamp: 1
+  })
+
+  it('flags a [DECISION:] trailer', () => {
+    expect(deliveryNeedsOwner('Stuck.\n[DECISION: merge or drop #2332?]', '')).toBe(true)
+    expect(toChatMessages([cronDelivery('Stuck.\n[DECISION: merge or drop?]')])[0].delivery?.needsOwner).toBe(true)
+  })
+
+  it('treats "Action Thomas : aucune" as nothing to do', () => {
+    expect(deliveryNeedsOwner('OK.\nAction Thomas : aucune pour l’instant.', '')).toBe(false)
+    expect(deliveryNeedsOwner('OK.\nAction Thomas : none', '')).toBe(false)
+    expect(deliveryNeedsOwner('OK.\nAction Thomas :', '')).toBe(false)
+
+    const [message] = toChatMessages([
+      cronDelivery('OK.\n\nAction Thomas : aucune.\n[CTRL: verity | mode=active | wait=1]')
+    ])
+
+    expect(message.delivery).toEqual({ kind: 'cron', label: 'verity controller', needsOwner: false })
+  })
+
+  it('flags a real "Action Thomas :" ask', () => {
+    expect(deliveryNeedsOwner('OK.\nAction Thomas : relancer le worker', '')).toBe(true)
+    expect(toChatMessages([cronDelivery('OK.\nAction Thomas : relancer')])[0].delivery?.needsOwner).toBe(true)
+  })
+
+  it('flags a blocker in the [CTRL: …] trailer, stripped from the body', () => {
+    expect(deliveryNeedsOwner('Waiting.', '[CTRL: verity | mode=blocked | blocker=missing gh auth]')).toBe(true)
+    expect(deliveryNeedsOwner('Waiting.', '[CTRL: verity | mode=blocked | blocker=none]')).toBe(false)
+    expect(deliveryNeedsOwner('Waiting.', '[CTRL: verity | mode=blocked]')).toBe(false)
+
+    const [message] = toChatMessages([
+      cronDelivery('Waiting on auth.\n[CTRL: verity | mode=blocked | blocker=missing gh auth | wait=1]')
+    ])
+
+    expect(message.delivery?.needsOwner).toBe(true)
+    expect(chatMessageText(message)).toBe('Waiting on auth.')
   })
 })

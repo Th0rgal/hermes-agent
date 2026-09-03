@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { assistantTextPart, type ChatMessage } from '@/lib/chat-messages'
+import { $chatViewFilter } from '@/store/chat-view-filter'
 import {
   $activeSessionId,
   $awaitingResponse,
@@ -165,5 +166,53 @@ describe('ChatView render isolation', () => {
     // memo(ChatView) with stable props must absorb the parent's idle tick —
     // the transcript (Thread) must not re-render. This is PR #38470's contract.
     expect(threadRenderCount.current).toBe(1)
+  })
+
+  it('renders the All / Mine / Reports view filter in the header and binds it to the store', () => {
+    $chatViewFilter.set('all')
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/stored-1']}>
+          <ChatView
+            gateway={null}
+            onAddContextRef={vi.fn()}
+            onAddUrl={vi.fn()}
+            onAttachDroppedItems={vi.fn()}
+            onAttachImageBlob={vi.fn()}
+            onCancel={vi.fn()}
+            onDeleteSelectedSession={vi.fn()}
+            onEdit={vi.fn()}
+            onPasteClipboardImage={vi.fn()}
+            onPickFiles={vi.fn()}
+            onPickFolders={vi.fn()}
+            onPickImages={vi.fn()}
+            onReload={vi.fn()}
+            onRemoveAttachment={vi.fn()}
+            onRetryResume={vi.fn()}
+            onSteer={vi.fn()}
+            onSubmit={vi.fn()}
+            onThreadMessagesChange={vi.fn()}
+            onToggleSelectedPin={vi.fn()}
+          />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+
+    const all = screen.getByRole('button', { name: 'All' })
+    const reports = screen.getByRole('button', { name: 'Reports' })
+
+    expect(all.getAttribute('aria-pressed')).toBe('true')
+    expect(screen.queryByTestId("chat-view-filter-badge")).toBeNull()
+
+    fireEvent.click(reports)
+
+    expect($chatViewFilter.get()).toBe('reports')
+    expect(reports.getAttribute('aria-pressed')).toBe('true')
+    expect(screen.queryByTestId("chat-view-filter-badge")).not.toBeNull()
+
+    $chatViewFilter.set('all')
   })
 })

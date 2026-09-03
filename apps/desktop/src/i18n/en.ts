@@ -3361,6 +3361,8 @@ export const en: Translations = {
     thread: {
       loadingSession: 'Loading session',
       showEarlier: 'Show earlier messages',
+      deliveryRunCount: count => (count === 1 ? '1 report' : `${count} reports`),
+      viewFilter: { all: 'All', mine: 'Mine', reports: 'Reports' },
       loadingResponse: 'Hermes is loading a response',
       loadingLocalModel: model => `Loading ${model} into memory`,
       processingPrompt: 'Processing prompt',

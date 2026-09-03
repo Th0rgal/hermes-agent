@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   buildGroups,
+  DELIVERY_RUN_MIN,
   firstVisibleGroupIndex,
   HIDDEN_TRANSCRIPT_RENDER_BUDGET,
+  hiddenIndexesForFilter,
   LIVE_TAIL_MIN_GROUPS,
   LIVE_TAIL_PARTS,
   liveTailStart,
@@ -158,6 +160,113 @@ describe('buildGroups', () => {
     const groups = buildGroups('0:a:assistant:0')
 
     expect(groups).toEqual([{ id: 'a', index: 0, kind: 'standalone', weight: 1 }])
+  })
+})
+
+// Delivery rows carry a 5th field: 'd' (needs no owner) or 'o' (needs owner).
+const deliverySignature = (rows: [string, string, number, ('d' | 'o')?][]) =>
+  rows
+    .map(([id, role, weight, flag], index) => `${index}:${id}:${role}:${weight}${flag ? `:${flag}` : ''}`)
+    .join('\n')
+
+describe('buildGroups delivery runs', () => {
+  it('folds a run of at least DELIVERY_RUN_MIN owner-less deliveries into one digest group', () => {
+    expect(DELIVERY_RUN_MIN).toBe(3)
+
+    const groups = buildGroups(
+      deliverySignature([
+        ['u1', 'user', 1],
+        ['a1', 'assistant', 2],
+        ['d1', 'assistant', 3, 'd'],
+        ['d2', 'assistant', 3, 'd'],
+        ['d3', 'assistant', 3, 'd'],
+        ['a2', 'assistant', 2]
+      ])
+    )
+
+    expect(groups).toEqual([
+      { id: 'u1', indices: [0, 1], kind: 'turn', weight: 3 },
+      { id: 'd1', indices: [2, 3, 4], kind: 'delivery_run', weight: 9 },
+      { id: 'a2', index: 5, kind: 'standalone', weight: 2 }
+    ])
+  })
+
+  it('keeps fewer than DELIVERY_RUN_MIN deliveries as ordinary rows', () => {
+    const groups = buildGroups(
+      deliverySignature([
+        ['u1', 'user', 1],
+        ['d1', 'assistant', 1, 'd'],
+        ['d2', 'assistant', 1, 'd']
+      ])
+    )
+
+    expect(groups).toEqual([{ id: 'u1', indices: [0, 1, 2], kind: 'turn', weight: 3 }])
+  })
+
+  it('is cut by a user message', () => {
+    const groups = buildGroups(
+      deliverySignature([
+        ['d1', 'assistant', 1, 'd'],
+        ['d2', 'assistant', 1, 'd'],
+        ['u1', 'user', 1],
+        ['d3', 'assistant', 1, 'd'],
+        ['d4', 'assistant', 1, 'd']
+      ])
+    )
+
+    expect(groups.map(group => group.kind)).toEqual(['standalone', 'standalone', 'turn'])
+  })
+
+  it('is cut by a delivery that needs the owner, which stays a normal row', () => {
+    const groups = buildGroups(
+      deliverySignature([
+        ['d1', 'assistant', 1, 'd'],
+        ['d2', 'assistant', 1, 'd'],
+        ['o1', 'assistant', 1, 'o'],
+        ['d3', 'assistant', 1, 'd'],
+        ['d4', 'assistant', 1, 'd'],
+        ['d5', 'assistant', 1, 'd']
+      ])
+    )
+
+    expect(groups).toEqual([
+      { id: 'd1', index: 0, kind: 'standalone', weight: 1 },
+      { id: 'd2', index: 1, kind: 'standalone', weight: 1 },
+      { id: 'o1', index: 2, kind: 'standalone', weight: 1 },
+      { id: 'd3', indices: [3, 4, 5], kind: 'delivery_run', weight: 3 }
+    ])
+  })
+})
+
+describe('hiddenIndexesForFilter', () => {
+  const user = { role: 'user' }
+  const assistant = { role: 'assistant' }
+
+  const delivery = (needsOwner = false) => ({
+    metadata: { custom: { delivery: { kind: 'cron', label: 'digest', needsOwner } } },
+    role: 'assistant'
+  })
+
+  //           0     1          2          3               4      5          6
+  const messages = [user, assistant, delivery(), delivery(true), user, delivery(), delivery()]
+
+  it('hides nothing for all', () => {
+    expect(hiddenIndexesForFilter(messages, 'all').size).toBe(0)
+  })
+
+  it('mine hides owner-less deliveries unless they directly follow a user message', () => {
+    expect([...hiddenIndexesForFilter(messages, 'mine')]).toEqual([2, 6])
+  })
+
+  it('reports keeps only deliveries and user messages', () => {
+    expect([...hiddenIndexesForFilter(messages, 'reports')]).toEqual([1])
+  })
+
+  it('ignores malformed delivery metadata', () => {
+    const odd = [{ metadata: { custom: { delivery: 'yes' } }, role: 'assistant' }]
+
+    expect(hiddenIndexesForFilter(odd, 'mine').size).toBe(0)
+    expect([...hiddenIndexesForFilter(odd, 'reports')]).toEqual([0])
   })
 })
 

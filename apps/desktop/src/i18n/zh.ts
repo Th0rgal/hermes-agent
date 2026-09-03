@@ -3507,6 +3507,8 @@ export const zh: Translations = {
     thread: {
       loadingSession: '正在加载会话',
       showEarlier: '显示更早的消息',
+      deliveryRunCount: count => `${count} 份报告`,
+      viewFilter: { all: '全部', mine: '我的', reports: '报告' },
       loadingResponse: 'Hermes 正在加载回复',
       loadingLocalModel: model => `正在将 ${model} 载入内存`,
       processingPrompt: '正在处理提示词',

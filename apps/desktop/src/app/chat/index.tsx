@@ -17,6 +17,7 @@ import { $sessionTileDragging, $sessionTileEdgeHover } from '@/components/pane-s
 import { PromptOverlays } from '@/components/prompt-overlays'
 import { Button } from '@/components/ui/button'
 import { ErrorState } from '@/components/ui/error-state'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import { TitleMenuTrigger } from '@/components/ui/title-menu-trigger'
 import { Slot } from '@/contrib/react/slot'
 import { type HermesGateway } from '@/hermes'
@@ -27,6 +28,7 @@ import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-s
 import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
+import { $chatViewFilter, CHAT_VIEW_FILTERS, type ChatViewFilter, setChatViewFilter } from '@/store/chat-view-filter'
 import { migrateSessionDraft } from '@/store/composer'
 import { migrateQueuedPrompts, parkQueuedPrompts } from '@/store/composer-queue'
 import { $introSplash } from '@/store/intro-splash'
@@ -122,6 +124,41 @@ interface ChatHeaderProps {
   selectedSessionId: null | string
 }
 
+/** All / Mine / Reports transcript filter (see `$chatViewFilter`). Tinted
+ *  whenever a filter is active so a hidden delivery is never a mystery. */
+function ChatViewFilterControl({ className }: { className?: string }) {
+  const { t } = useI18n()
+  const filter = useStore($chatViewFilter)
+
+  const options = useMemo(
+    () => CHAT_VIEW_FILTERS.map(id => ({ id, label: t.assistant.thread.viewFilter[id] })),
+    [t]
+  )
+
+  return (
+    <div
+      className={cn('flex items-center gap-1', className)}
+      data-active={filter !== 'all' ? 'true' : undefined}
+      data-slot="chat-view-filter"
+    >
+      <SegmentedControl<ChatViewFilter>
+        className={cn(filter !== 'all' && 'ring-1 ring-primary/40')}
+        onChange={setChatViewFilter}
+        options={options}
+        value={filter}
+      />
+      {filter !== 'all' && (
+        <span
+          aria-hidden="true"
+          className="size-1.5 shrink-0 rounded-full bg-primary"
+          data-slot="chat-view-filter-badge"
+          data-testid="chat-view-filter-badge"
+        />
+      )}
+    </div>
+  )
+}
+
 function ChatHeader({
   activeSessionId,
   isRoutedSessionView,
@@ -169,7 +206,7 @@ function ChatHeader({
   return (
     <header className={cn(titlebarHeaderBaseClass, isRoutedSessionView && titlebarHeaderShadowClass)}>
       <div
-        className={cn(titlebarHeaderTitleClass, showProfileTag && 'flex items-center')}
+        className={cn(titlebarHeaderTitleClass, 'flex items-center')}
         style={{
           maxWidth:
             'calc(100vw - var(--titlebar-content-inset,0px) - var(--titlebar-tools-right) - var(--titlebar-tools-width) - 1.5rem)'
@@ -188,6 +225,7 @@ function ChatHeader({
         >
           <TitleMenuTrigger>{title}</TitleMenuTrigger>
         </SessionActionsMenu>
+        <ChatViewFilterControl className="pointer-events-auto ml-2 shrink-0" />
       </div>
     </header>
   )

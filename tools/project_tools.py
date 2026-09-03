@@ -16,6 +16,8 @@ import json
 import os
 from typing import Callable, Optional
 
+from tools.registry import registry
+
 
 # Set by the GUI gateway (tui_gateway) at session wiring. Receives
 # ``(task_id, primary_path, project_name)`` and re-anchors that session's

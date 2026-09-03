@@ -17,6 +17,31 @@ const timelineDate = (seconds: number | undefined): Date | null => {
   return Number.isNaN(date.getTime()) ? null : date
 }
 
+/** Arrival time of a delivery (controller report, mission callback): the
+ *  clock for today, day + clock otherwise. Human-scale, never milliseconds. */
+export function formatArrivalTime(seconds: number | undefined): string {
+  const date = timelineDate(seconds)
+
+  if (!date) {
+    return ''
+  }
+
+  return startOfDay(date) === startOfDay(new Date()) ? fmtClock.format(date) : fmtDayTime.format(date)
+}
+
+/** `HH:MM → HH:MM` for a run of deliveries (same rules as formatArrivalTime). */
+export function formatArrivalRange(start: number | undefined, end: number | undefined): string {
+  const from = formatArrivalTime(start)
+
+  if (!from) {
+    return ''
+  }
+
+  const to = formatArrivalTime(end)
+
+  return to && to !== from ? `${from} → ${to}` : from
+}
+
 /** Millisecond-precise local clock for transcript activity boundaries. */
 export function formatTimelineTimestamp(seconds: number | undefined): string {
   const date = timelineDate(seconds)

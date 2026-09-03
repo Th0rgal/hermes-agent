@@ -12,7 +12,7 @@ import { $displayTimestamps } from '@/store/display-timestamps'
 
 import { stubThreadEnvironment } from '../test-utils'
 
-import { formatTimelineRange, formatTimelineTimestamp } from './timestamp'
+import { formatArrivalTime, formatTimelineRange, formatTimelineTimestamp } from './timestamp'
 
 import { Thread } from '.'
 
@@ -104,6 +104,32 @@ describe('AssistantMessage branch button visibility (bug #2 fix)', () => {
     await screen.findByText('done')
 
     expect(screen.queryByRole('button', { name: 'Branch in new chat' })).toBeNull()
+  })
+})
+
+describe('delivery divider', () => {
+  it('shows the arrival time on the divider, independent of display.timestamps', async () => {
+    $displayTimestamps.set(false)
+    const base = assistantMessage()
+
+    const delivery = {
+      ...base,
+      metadata: {
+        ...base.metadata,
+        custom: { ...base.metadata.custom, delivery: { kind: 'cron', label: 'nightly build', needsOwner: true } }
+      }
+    } as ThreadMessage
+
+    try {
+      const { container } = render(<Harness assistant={delivery} />)
+
+      const pill = await screen.findByText(`nightly build · ${formatArrivalTime(createdAt.getTime() / 1000)}`)
+      const divider = container.querySelector('[data-slot="aui_assistant-delivery-divider"]')
+      expect(divider?.contains(pill)).toBe(true)
+      expect(pill.closest('[title]')?.getAttribute('title')).toContain('2026')
+    } finally {
+      $displayTimestamps.set(true)
+    }
   })
 })
 

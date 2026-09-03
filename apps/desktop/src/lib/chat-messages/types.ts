@@ -45,8 +45,11 @@ export type ChatMessage = {
   /** Durable cron/callback delivery provenance, lifted from the scheduler
    *  sentinel ("[Cron delivery: <label>]"). Presence renders the message
    *  under a delivery divider; the sentinel itself is stripped from the
-   *  visible text. */
-  delivery?: { label: string }
+   *  visible text. `kind` names the scheduler door; `needsOwner` is true when
+   *  the body asks Thomas for something (a [DECISION:] trailer, a non-empty
+   *  "Action Thomas :" line or a blocker in the controller trailer) so the
+   *  thread never auto-collapses a delivery that is waiting on him. */
+  delivery?: { label: string; kind: 'cron' | 'mission_callback'; needsOwner: boolean }
 }
 
 export type GatewayEventPayload = {

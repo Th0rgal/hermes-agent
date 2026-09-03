@@ -1728,7 +1728,9 @@ describe('appendLiveSessionProjection — retained failed turn after a mission c
       msg('a1', 'assistant', 'Voici l’état de la roadmap.'),
       // Rows the mission-callback route appended after the operator's turn;
       // the wake is a system-typed row on read, the callback an assistant drop.
-      msg('a2', 'assistant', 'La mission #27 est terminée et propre.', { delivery: { label: 'mission finished' } }),
+      msg('a2', 'assistant', 'La mission #27 est terminée et propre.', {
+        delivery: { kind: 'mission_callback', label: 'mission finished', needsOwner: false }
+      }),
       msg('s1', 'system', 'mission finished · PR #27 · completed'),
       msg('a3', 'assistant', 'Rien à faire de ton côté.')
     ]

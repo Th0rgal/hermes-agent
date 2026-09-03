@@ -2902,6 +2902,8 @@ export interface Translations {
     thread: {
       loadingSession: string
       showEarlier: string
+      deliveryRunCount: (count: number) => string
+      viewFilter: { all: string; mine: string; reports: string }
       loadingResponse: string
       loadingLocalModel: (model: string) => string
       processingPrompt: string

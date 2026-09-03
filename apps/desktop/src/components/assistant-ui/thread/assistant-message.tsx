@@ -22,6 +22,7 @@ import { MESSAGE_PARTS_COMPONENTS } from '@/components/assistant-ui/thread/messa
 import { ReactionPicker } from '@/components/assistant-ui/thread/message-reactions'
 import { ResponseLoadingIndicator, TurnActivityIndicator } from '@/components/assistant-ui/thread/status'
 import { MessageTimelineTimestamp } from '@/components/assistant-ui/thread/timeline-timestamp'
+import { formatArrivalTime } from '@/components/assistant-ui/thread/timestamp'
 import { useMessageReactions, useTapbackDoubleClick } from '@/components/assistant-ui/thread/use-message-reactions'
 import { AGENT_MESSAGE_RE } from '@/components/assistant-ui/thread/user-message'
 import { TooltipIconButton } from '@/components/assistant-ui/tooltip-icon-button'
@@ -48,6 +49,7 @@ import { markAssistantIdSpoken } from '@/lib/spoken-reply'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
 import { playSpeechText, stopVoicePlayback } from '@/lib/voice-playback'
+import { $deliveryCollapse } from '@/store/delivery-collapse'
 import { notifyError } from '@/store/notifications'
 import { requestSendDiagnostics } from '@/store/send-diagnostics'
 import { $connection, $currentModel } from '@/store/session'
@@ -119,11 +121,90 @@ export const AssistantMessage: FC<AssistantMessageProps> = props => {
   // inter-agent reply can ever be collapsed. Dispatching on that first keeps
   // the status subscription out of the standard path entirely — the standard
   // message root now re-renders for content, never for a pending flip.
+  // Controller deliveries (ChatMessage.delivery) get their own gate for the
+  // same reason: they collapse once settled unless the body needs the owner.
+  const isDelivery = useAuiState(s => s.message.metadata?.custom?.delivery !== undefined)
+
   return interAgentSender ? (
     <InterAgentAssistantMessage {...props} sender={interAgentSender} />
+  ) : isDelivery ? (
+    <DeliveryAssistantMessage {...props} />
   ) : (
     <AssistantMessageBody {...props} />
   )
+}
+
+/** Full local date-time for the divider's hover title. */
+const fullDateTime = new Intl.DateTimeFormat(undefined, { dateStyle: 'full', timeStyle: 'medium' })
+
+const validUnixSeconds = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0
+
+/** The arrival clock of a delivery message: `metadata.custom.timelineTimestamp`
+ *  (unix seconds, see chat-runtime's timelineMeta). Not gated by
+ *  `display.timestamps` — for an out-of-band drop the time IS the context. */
+function useDeliveryArrival(): null | number {
+  return useAuiState(s => {
+    const value = (s.message.metadata?.custom as { timelineTimestamp?: unknown } | undefined)?.timelineTimestamp
+
+    return validUnixSeconds(value) ? value : null
+  })
+}
+
+const DELIVERY_PREVIEW_MAX = 120
+
+/** The compact stand-in a settled controller delivery collapses to: one line of
+ *  provenance + preview, the full body one click away. The divider pill stays
+ *  above it (AssistantMessageBody renders it in both states). */
+const DeliveryCollapsedNotice: FC<{ label: string }> = ({ label }) => {
+  const arrival = useDeliveryArrival()
+
+  // Settled deliveries never stream, so this text subscription is inert.
+  const preview = useAuiState(s => {
+    const first = messageContentText(s.message.content)
+      .split("\n")
+      .map(line => line.trim())
+      .find(line => line.length > 0)
+
+    return first ? (first.length > DELIVERY_PREVIEW_MAX ? `${first.slice(0, DELIVERY_PREVIEW_MAX - 1)}…` : first) : ''
+  })
+
+  return (
+    <details className="max-w-full self-start px-(--message-text-indent)" data-slot="aui_assistant-delivery-collapsed">
+      <summary className="flex cursor-pointer select-none items-center gap-1.5 text-[0.75rem] leading-5 text-muted-foreground/70 hover:text-muted-foreground">
+        <Clock aria-hidden className="size-3 shrink-0" />
+        <span className="truncate">
+          {[label, arrival === null ? '' : formatArrivalTime(arrival), preview].filter(Boolean).join(' · ')}
+        </span>
+      </summary>
+      <div className="wrap-anywhere mt-1 min-w-0 max-w-full overflow-hidden text-pretty text-[length:var(--conversation-text-font-size)] leading-(--dt-line-height) text-foreground">
+        {MESSAGE_PARTS}
+      </div>
+    </details>
+  )
+}
+
+/** A cron delivery or mission callback. Collapsed once settled when the user
+ *  prefers it ($deliveryCollapse) and nothing in it is waiting on the owner
+ *  (delivery.needsOwner). Same one-root shape as the inter-agent variant so
+ *  settling is a prop change, not a remount. */
+const DeliveryAssistantMessage: FC<AssistantMessageProps> = props => {
+  const isRunning = useAuiState(s => s.message.status?.type === 'running')
+
+  const label = useAuiState(s => {
+    const delivery = s.message.metadata?.custom?.delivery as { label?: unknown } | undefined
+
+    return typeof delivery?.label === 'string' ? delivery.label : ''
+  })
+
+  const needsOwner = useAuiState(
+    s => (s.message.metadata?.custom?.delivery as { needsOwner?: unknown } | undefined)?.needsOwner === true
+  )
+
+  const preference = useStore($deliveryCollapse)
+  const collapsed = !isRunning && !needsOwner && preference === 'collapsed'
+
+  return <AssistantMessageBody {...props} collapsedNotice={collapsed ? <DeliveryCollapsedNotice label={label} /> : null} />
 }
 
 /** The compact stand-in a settled inter-agent reply collapses to (Grok-bots
@@ -208,6 +289,8 @@ const AssistantMessageBody: FC<AssistantMessageProps & { collapsedNotice?: null 
     return typeof delivery?.label === 'string' ? delivery.label : null
   })
 
+  const deliveryArrival = useDeliveryArrival()
+
   // useEnterAnimation consults `enabled` ONLY when its callback ref fires,
   // i.e. at mount: the hook parks the value in a ref and returns a
   // useCallback([]) identity, and its own contract is "`enabled` is captured
@@ -237,18 +320,23 @@ const AssistantMessageBody: FC<AssistantMessageProps & { collapsedNotice?: null 
       onDoubleClick={collapsedNotice ? undefined : onDoubleClick}
       ref={enterRef}
     >
+      {deliveryLabel !== null && (
+        <div className="mb-1.5 mt-1 flex w-full items-center gap-3" data-slot="aui_assistant-delivery-divider">
+          <div className="h-px flex-1 bg-(--ui-stroke-tertiary)" />
+          <span
+            className="flex min-w-0 max-w-[75%] items-center gap-1.5 rounded-full border border-(--ui-stroke-tertiary) px-2.5 py-0.5 text-[0.72rem] leading-5 text-(--ui-text-secondary)"
+            title={deliveryArrival === null ? undefined : fullDateTime.format(new Date(deliveryArrival * 1000))}
+          >
+            <Clock aria-hidden className="size-3 shrink-0" />
+            <span className="truncate">
+              {deliveryArrival === null ? deliveryLabel : `${deliveryLabel} · ${formatArrivalTime(deliveryArrival)}`}
+            </span>
+          </span>
+          <div className="h-px flex-1 bg-(--ui-stroke-tertiary)" />
+        </div>
+      )}
       {collapsedNotice ?? (
         <>
-          {deliveryLabel !== null && (
-            <div className="mb-1.5 mt-1 flex w-full items-center gap-3" data-slot="aui_assistant-delivery-divider">
-              <div className="h-px flex-1 bg-(--ui-stroke-tertiary)" />
-              <span className="flex min-w-0 max-w-[75%] items-center gap-1.5 rounded-full border border-(--ui-stroke-tertiary) px-2.5 py-0.5 text-[0.72rem] leading-5 text-(--ui-text-secondary)">
-                <Clock aria-hidden className="size-3 shrink-0" />
-                <span className="truncate">{deliveryLabel}</span>
-              </span>
-              <div className="h-px flex-1 bg-(--ui-stroke-tertiary)" />
-            </div>
-          )}
           <div
             className="wrap-anywhere min-w-0 max-w-full overflow-hidden text-pretty text-[length:var(--conversation-text-font-size)] leading-(--dt-line-height) text-foreground"
             data-slot="aui_assistant-message-content"

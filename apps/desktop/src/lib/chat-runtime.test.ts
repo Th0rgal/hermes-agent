@@ -251,10 +251,12 @@ describe('toRuntimeMessage', () => {
       role: 'assistant',
       parts: [assistantTextPart('Build finished.')],
       timestamp: 1,
-      delivery: { label: 'watcher' }
+      delivery: { kind: 'cron', label: 'watcher', needsOwner: true }
     })
 
-    expect(runtimeMessage.metadata?.custom).toMatchObject({ delivery: { label: 'watcher' } })
+    expect(runtimeMessage.metadata?.custom).toMatchObject({
+      delivery: { kind: 'cron', label: 'watcher', needsOwner: true }
+    })
   })
 
   it('leaves ordinary assistant turns without delivery metadata', () => {

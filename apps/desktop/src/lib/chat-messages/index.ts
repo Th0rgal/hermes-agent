@@ -1,4 +1,4 @@
-export { legacyDisplayKind, missionCallbackLabel, SYSTEM_TYPED_USER_KINDS, toChatMessages } from './hydration'
+export { deliveryNeedsOwner, legacyDisplayKind, missionCallbackLabel, SYSTEM_TYPED_USER_KINDS, toChatMessages } from './hydration'
 export {
   appendAssistantTextPart,
   appendReasoningPart,

@@ -33,6 +33,41 @@ const CONTEXT_REF_RE = /@(file|folder|url|image|tool|terminal):(?:"[^"\n]+"|'[^'
  * and shows only the payload. */
 const CRON_DELIVERY_SENTINEL_RE = /^\s*\[Cron delivery:\s*([^\]]*)\]\s*/
 
+/** The controller/routing trailer tokens a delivery carries (the same shapes
+ *  `stripStateSignature` removes from the visible text). Collected verbatim
+ *  so `deliveryNeedsOwner` can read their fields. */
+const DELIVERY_TRAILER_RE = /\[(?:STATE_SIGNATURE|CTRL):[^\n]{1,4096}\]/gi
+const DECISION_TRAILER_RE = /\[DECISION:/i
+/** "Action Thomas : <value>" — the controller's owner-facing ask line. */
+const ACTION_OWNER_LINE_RE = /^[ \t]*(?:\*\*)?Action Thomas\s*(?:\*\*)?\s*:\s*(.*)$/im
+/** Values that mean "nothing to do" ("aucune pour l’instant." included). */
+const NO_ACTION_VALUE_RE = /^(?:\*\*)?\s*(?:aucune|none|rien)\b/i
+const BLOCKER_FIELD_RE = /\bblocker\s*=\s*([^|\]]*)/i
+const NO_BLOCKER_VALUE_RE = /^(?:none|null|no|-|n\/a)?$/i
+
+/** Whether a delivery is waiting on the owner and must not auto-collapse.
+ *  `text` is the visible body (trailers already stripped); `trailer` is the
+ *  raw `[CTRL: …]` / `[STATE_SIGNATURE: …]` token text. Pure. */
+export function deliveryNeedsOwner(text: string, trailer: string): boolean {
+  if (DECISION_TRAILER_RE.test(text)) {
+    return true
+  }
+
+  const action = ACTION_OWNER_LINE_RE.exec(text)?.[1]?.trim() ?? ''
+
+  if (action && !NO_ACTION_VALUE_RE.test(action)) {
+    return true
+  }
+
+  const blocker = BLOCKER_FIELD_RE.exec(trailer)?.[1]?.trim() ?? ''
+
+  return !NO_BLOCKER_VALUE_RE.test(blocker)
+}
+
+function deliveryTrailer(content: null | string | undefined): string {
+  return content ? (content.match(DELIVERY_TRAILER_RE) ?? []).join(' ') : ''
+}
+
 function displayContentForMessage(role: SessionMessage['role'], content: unknown): string {
   const textContent = textFromUnknown(content)
 
@@ -327,10 +362,10 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
 
     const isMissionCallback = displayKind === 'mission_callback' && message.role === 'assistant'
 
-    const delivery = isMissionCallback
-      ? { label: missionCallbackLabel(message.display_metadata, contentText) }
+    const deliveryBase: Pick<NonNullable<ChatMessage['delivery']>, 'kind' | 'label'> | undefined = isMissionCallback
+      ? { kind: 'mission_callback', label: missionCallbackLabel(message.display_metadata, contentText) }
       : deliveryMatch && displayRole === 'assistant'
-        ? { label: deliveryMatch[1].trim() || 'cron' }
+        ? { kind: 'cron', label: deliveryMatch[1].trim() || 'cron' }
         : undefined
 
     const rawDisplayContent = transcriptContent(
@@ -340,12 +375,19 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
 
     // The sentinel is provenance, not prose — the divider carries the label.
     const sentinelStrippedContent = stripStateSignature(
-      delivery && rawDisplayContent
+      deliveryBase && rawDisplayContent
         ? isMissionCallback
           ? missionCallbackBody(rawDisplayContent)
           : rawDisplayContent.replace(CRON_DELIVERY_SENTINEL_RE, '')
         : rawDisplayContent
     )
+
+    const delivery: ChatMessage['delivery'] = deliveryBase
+      ? {
+          ...deliveryBase,
+          needsOwner: deliveryNeedsOwner(sentinelStrippedContent ?? '', deliveryTrailer(rawDisplayContent))
+        }
+      : undefined
 
     // Persisted user turns carry `@image:<path>` directive lines inline in
     // the text (see tui_gateway/server.py's persist-time rewrite). The

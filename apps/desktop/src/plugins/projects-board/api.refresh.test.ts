@@ -4,8 +4,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   gatewayEventRefreshesBoard,
   invalidateBoardQueries,
-  PROJECTS_KEY,
   projectKey,
+  PROJECTS_KEY,
   projectToolRefreshesBoard,
   stateKey,
   tasksKey

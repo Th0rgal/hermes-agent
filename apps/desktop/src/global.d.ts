@@ -490,6 +490,9 @@ export interface HermesTerminalExit {
 
 export interface DesktopVersionInfo {
   appVersion: string
+  /** Commit the installed app bundle was built from (install-stamp.json). */
+  installCommit?: null | string
+  installBranch?: null | string
   electronVersion: string
   nodeVersion: string
   platform: string

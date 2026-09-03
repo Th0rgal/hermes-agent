@@ -43,7 +43,8 @@ import {
   projectPaletteRows,
   PROJECTS_KEY,
   type ProjectsResponse,
-  setAttentionNotifier
+  setAttentionNotifier,
+  setResolutionNotifier
 } from './api'
 import { ProjectsBoardPage } from './board'
 import { BOARD_LOCALES, useBoard } from './i18n'
@@ -152,6 +153,16 @@ const plugin: HermesPlugin = {
       })
     )
     ctx.onDispose(() => setAttentionNotifier(null))
+
+    // The counterpart: a reason the owner was shown has gone away.
+    setResolutionNotifier((label, message) =>
+      host.notify({
+        kind: 'success',
+        message: ctx.i18n.t('attentionResolvedBody', label, message),
+        title: ctx.i18n.t('attentionResolvedTitle')
+      })
+    )
+    ctx.onDispose(() => setResolutionNotifier(null))
 
     // ⌘K rows per project, regenerated whenever the roster query lands with a
     // different shape (slug/binding signature) — registerMany's disposer drops

@@ -49,6 +49,8 @@ jobs:
         if: steps.node-modules-cache.outputs.cache-hit != 'true'
         with:
           command: npm ci --ignore-scripts
+      - name: Desktop version matches pyproject
+        run: node apps/desktop/scripts/assert-version-lockstep.mjs
       - id: set-matrix
         run: |
           node -e '

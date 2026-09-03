@@ -1702,7 +1702,14 @@ export function useSessionActions({
         // backend's own inflight projection is already inside
         // `preferredWithRuntimeChanges`, so this merge only adds the locally
         // recorded structure that the backend's text-only snapshot cannot carry.
+        //
+        // The gateway is the authority on a retained failed turn: it replays
+        // the failure via `inflight.error` while it still holds it and forgets
+        // it on restart. A journaled error row without that echo is stale
+        // (the turn was fixed / the gateway restarted) and would otherwise
+        // resurface as a fresh "Turn failed" card on every resume.
         const inFlightRecovery = recoverInFlightTurnJournal(storedSessionId, preferredWithRuntimeChanges, {
+          dropRetainedErrors: !resumed.inflight?.error?.trim(),
           keepPending: resumedRunning
         })
 

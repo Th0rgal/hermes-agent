@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatMessage } from '@/lib/chat-messages'
 import {
   clearInFlightTurnJournal,
+  dropInFlightTurnJournalRow,
   type JournalableSessionState,
   mergeInFlightMessages,
   persistInFlightTurnState,
@@ -731,6 +732,102 @@ describe('recoverInFlightTurnJournal', () => {
 
     expect(result.applied).toBe(true)
     expect(result.streamId).toBeNull()
+  })
+})
+
+describe('retained failed turn vs. server resume snapshot', () => {
+  function journalEntry(messages: ChatMessage[], streamId: null | string = null) {
+    persistInFlightTurnState(journalState({ messages, streamId }))
+    vi.advanceTimersByTime(400)
+  }
+
+  const failed = () => [
+    user('user-inflight-sid', 'do the thing'),
+    assistant('assistant-err', '', { error: "agent init failed: name 'registry' is not defined" })
+  ]
+
+  it('drops the journaled error row when the server snapshot carries no inflight error', () => {
+    journalEntry(failed())
+
+    const base = [user('db-u0', 'earlier turn'), assistant('db-a0', 'earlier reply')]
+    const result = recoverInFlightTurnJournal('stored-1', base, { dropRetainedErrors: true, keepPending: false })
+
+    expect(result.applied).toBe(false)
+    expect(result.messages).toBe(base)
+    // The orphaned projected prompt goes with it, and the pruned journal is
+    // persisted (here: cleared, nothing recoverable remains).
+    expect(readInFlightTurnJournal('stored-1')).toBeNull()
+  })
+
+  it('keeps the journaled error row when the server snapshot still reports the inflight error', () => {
+    journalEntry(failed())
+
+    const base = [user('db-u0', 'earlier turn'), assistant('db-a0', 'earlier reply')]
+    const result = recoverInFlightTurnJournal('stored-1', base, { dropRetainedErrors: false, keepPending: false })
+
+    expect(result.applied).toBe(true)
+    expect(result.messages.map(m => m.id)).toEqual(['db-u0', 'db-a0', 'user-inflight-sid', 'assistant-err'])
+    expect(result.messages.at(-1)?.error).toContain('registry')
+    expect(readInFlightTurnJournal('stored-1')?.messages.map(m => m.id)).toEqual(['user-inflight-sid', 'assistant-err'])
+  })
+
+  it('keeps a non-error in-flight turn exactly as before while pruning only error rows', () => {
+    journalEntry(
+      [
+        user('u1', 'do the thing'),
+        assistant('a-old-err', '', { error: 'provider exploded' }),
+        assistantWithTool('assistant-stream-1', 'working on it', { pending: true })
+      ],
+      'assistant-stream-1'
+    )
+
+    const base = [user('db-u1', 'do the thing')]
+    const result = recoverInFlightTurnJournal('stored-1', base, { dropRetainedErrors: true, keepPending: true })
+
+    expect(result.applied).toBe(true)
+    expect(result.messages.map(m => m.id)).toEqual(['db-u1', 'assistant-stream-1'])
+    expect(result.streamId).toBe('assistant-stream-1')
+    // Persisted journal lost only the error row; the running turn is intact.
+    expect(readInFlightTurnJournal('stored-1')?.messages.map(m => m.id)).toEqual(['u1', 'assistant-stream-1'])
+    expect(readInFlightTurnJournal('stored-1')?.streamId).toBe('assistant-stream-1')
+  })
+
+  it('mergeInFlightMessages prunes error rows on demand without touching storage', () => {
+    const tail = failed()
+
+    expect(mergeInFlightMessages([user('db-u1', 'do the thing')], tail, { dropRetainedErrors: true }).applied).toBe(
+      false
+    )
+    expect(mergeInFlightMessages([user('db-u1', 'do the thing')], tail).applied).toBe(true)
+  })
+
+  it('dismissing the failed row removes it from the journal', () => {
+    journalEntry(failed())
+    expect(readInFlightTurnJournal('stored-1')).not.toBeNull()
+
+    dropInFlightTurnJournalRow('stored-1', 'assistant-err')
+
+    expect(readInFlightTurnJournal('stored-1')).toBeNull()
+    expect(recoverInFlightTurnJournal('stored-1', [user('db-u0', 'earlier')]).applied).toBe(false)
+  })
+
+  it('dismissing one row keeps the rest of a journaled turn', () => {
+    journalEntry(
+      [
+        user('u1', 'do the thing'),
+        assistant('a-err', '', { error: 'provider exploded' }),
+        assistantWithTool('assistant-stream-1', 'working on it', { pending: true })
+      ],
+      'assistant-stream-1'
+    )
+
+    dropInFlightTurnJournalRow('stored-1', 'a-err')
+
+    expect(readInFlightTurnJournal('stored-1')?.messages.map(m => m.id)).toEqual(['u1', 'assistant-stream-1'])
+    // Unknown ids and unknown sessions are no-ops.
+    dropInFlightTurnJournalRow('stored-1', 'nope')
+    dropInFlightTurnJournalRow(null, 'a-err')
+    expect(readInFlightTurnJournal('stored-1')?.messages).toHaveLength(2)
   })
 })
 

@@ -399,6 +399,9 @@ def _run_one_file_once(
     # One root for each subprocess removes the shared directory that the race
     # needs. The parent deletes the root after the attempt.
     env = os.environ.copy()
+    # Slicing selects this runner's input files. Nested runner invocations
+    # inside tests must select their own inputs, not inherit the CI slice.
+    env.pop("HERMES_TEST_SLICE", None)
     temproot = tempfile.mkdtemp(prefix="hermes-pytest-tmproot-")
     env["PYTEST_DEBUG_TEMPROOT"] = temproot
 

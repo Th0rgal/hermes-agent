@@ -289,3 +289,24 @@ async def test_telegram_origin_wakes_telegram_adapter_not_api_server(monkeypatch
     assert wakes[0][0] is telegram
     assert wakes[0][1].get("source") is not None
     assert wakes[0][1]["source"].platform == Platform.TELEGRAM
+
+
+def test_session_db_for_profile_unwraps_the_async_door(monkeypatch):
+    """The runner's AsyncSessionDB must be unwrapped for the thread-side
+    routing helpers (they call SessionDB methods synchronously)."""
+    from types import SimpleNamespace
+
+    from gateway.platforms.webhook import WebhookAdapter
+    from hermes_state import AsyncSessionDB
+
+    class _Db:
+        pass
+
+    inner = _Db()
+    runner = SimpleNamespace(_session_db=AsyncSessionDB(inner))
+    monkeypatch.setattr(WebhookAdapter, "gateway_runner", property(lambda self: runner))
+    adapter = WebhookAdapter.__new__(WebhookAdapter)
+    db, owned = adapter._session_db_for_profile(None)
+    assert db is inner
+    assert owned is False
+

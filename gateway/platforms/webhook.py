@@ -778,6 +778,15 @@ class WebhookAdapter(BasePlatformAdapter):
                 return None, False
         session_db = getattr(runner, "_session_db", None) if runner is not None else None
         if session_db is not None:
+            # [fork-delta] Upstream now hands the runner an AsyncSessionDB
+            # (every attribute is an awaitable forwarder). The routing helpers
+            # run synchronously inside asyncio.to_thread and expect the plain
+            # SessionDB; calling the async door there returned coroutines that
+            # were never awaited, so mission callbacks silently fell through to
+            # a throwaway webhook session (prod, 2026-09-06/07).
+            inner = getattr(session_db, "_db", None)
+            if inner is not None and type(session_db).__name__ == "AsyncSessionDB":
+                session_db = inner
             return session_db, False
         try:
             from hermes_state import SessionDB

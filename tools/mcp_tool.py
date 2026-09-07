@@ -6907,15 +6907,23 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                     return json.dumps({"result": text_result}, ensure_ascii=False)
             return json.dumps({"result": text_result}, ensure_ascii=False)
 
-        def _call_once():
+        async def _call_with_domain_reply():
             try:
-                return _run_on_mcp_loop(_call, timeout=tool_timeout)
+                return await _call()
             except Exception as exc:
                 if not _is_application_reply(exc):
                     raise
                 # Also applies to the retry closures below. Preserve the
                 # rejection for the caller while recording a healthy RPC.
+                # Run on the MCP loop, like the normal reply path, before
+                # reconnect accounting can treat this session as unproven.
+                _mark_proven = getattr(server, "_mark_session_proven", None)
+                if _mark_proven is not None:
+                    _mark_proven()
                 return tool_error(_sanitize_error(str(exc)))
+
+        def _call_once():
+            return _run_on_mcp_loop(_call_with_domain_reply, timeout=tool_timeout)
 
         try:
             result = _call_once()

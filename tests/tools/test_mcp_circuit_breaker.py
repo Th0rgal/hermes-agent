@@ -667,7 +667,10 @@ def test_recovered_transport_preserves_domain_rejection(monkeypatch, recovery, r
             raise _rpc_error(code=-32000, message=rejection)
         return SimpleNamespace(is_error=True, content=[SimpleNamespace(text=rejection)])
 
-    _install_stub_server(mcp_tool, "recover-domain", call_tool)
+    server = _install_stub_server(mcp_tool, "recover-domain", call_tool)
+    health = mcp_tool.MCPServerTask("recover-domain")
+    health._reconnect_retries = mcp_tool._MAX_RECONNECT_RETRIES
+    server._mark_session_proven = health._mark_session_proven
     mcp_tool._ensure_mcp_loop()
     monkeypatch.setattr(mcp_tool, "_signal_reconnect_and_wait", lambda *a, **kw: True)
     monkeypatch.setattr(mcp_oauth_manager, "get_manager",
@@ -680,5 +683,38 @@ def test_recovered_transport_preserves_domain_rejection(monkeypatch, recovery, r
         assert "needs_reauth" not in result
         assert len(calls) == 2
         assert mcp_tool._server_error_counts["recover-domain"] == 0
+        assert health._session_proven is True
+        assert health._reconnect_retries == 0
     finally:
         _cleanup(mcp_tool, "recover-domain")
+
+
+@pytest.mark.parametrize("reply_kind", ["rpc_error", "result", "connection", "sdk_timeout"])
+def test_tool_reply_proves_session_and_clears_rapid_drop_budget(reply_kind):
+    """A protocol rejection proves health; a failed transport never does."""
+    from types import SimpleNamespace
+    from tools import mcp_tool
+
+    async def call_tool(name, arguments):
+        if reply_kind == "rpc_error":
+            raise _rpc_error(-32000, "mission transition denied")
+        if reply_kind == "connection":
+            raise ConnectionError("connection refused")
+        if reply_kind == "sdk_timeout":
+            raise _rpc_error(408, "Timed out while waiting for response")
+        return SimpleNamespace(is_error=True, content=[SimpleNamespace(text="denied")])
+
+    server = _install_stub_server(mcp_tool, "proof-of-health", call_tool)
+    # Exercise the real health/reconnect accounting rather than a mock hook.
+    health = mcp_tool.MCPServerTask("proof-of-health")
+    health._reconnect_retries = mcp_tool._MAX_RECONNECT_RETRIES
+    server._mark_session_proven = health._mark_session_proven
+    mcp_tool._ensure_mcp_loop()
+    try:
+        handler = mcp_tool._make_tool_handler("proof-of-health", "tool", 10)
+        assert "error" in json.loads(handler({}))
+        proven = reply_kind in {"rpc_error", "result"}
+        assert health._session_proven is proven
+        assert health._reconnect_retries == (0 if proven else mcp_tool._MAX_RECONNECT_RETRIES)
+    finally:
+        _cleanup(mcp_tool, "proof-of-health")

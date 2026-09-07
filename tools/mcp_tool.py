@@ -6569,8 +6569,10 @@ def _is_application_reply(exc: Exception) -> bool:
     if not isinstance(exc, error_types):
         return False
     code = getattr(getattr(exc, "error", None), "code", None)
-    if not isinstance(code, int) or not -32700 <= code <= -32000:
-        # In particular, the SDK manufactures a 408 error on read timeout.
+    if not isinstance(code, int) or code == 408:
+        # SDK 1.x manufactures HTTP 408 on local read timeout. Otherwise
+        # JSON-RPC allows integer application codes outside its reserved
+        # negative interval; the code range alone cannot imply a drop.
         return False
     # A retry rejection can inherit the original transport exception as
     # __context__. Classify this reply itself, not that already-recovered

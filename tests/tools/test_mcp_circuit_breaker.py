@@ -582,7 +582,7 @@ def test_initial_connect_budget_parks_instead_of_exiting_then_revives(monkeypatc
     asyncio.run(_scenario())
 
 
-@pytest.mark.parametrize("reply_kind", ["result", "rpc_error"])
+@pytest.mark.parametrize("reply_kind", ["result", -32700, -32000, -32701, -1, 0, 1001, 32767])
 def test_domain_rejections_leave_other_tools_available(monkeypatch, reply_kind):
     """Repeated invalid transitions must not disable every tool on the server."""
     from types import SimpleNamespace
@@ -594,8 +594,8 @@ def test_domain_rejections_leave_other_tools_available(monkeypatch, reply_kind):
     async def call_tool(name, arguments):
         calls.append(name)
         if name == "acknowledge_mission":
-            if reply_kind == "rpc_error":
-                raise _rpc_error(code=-32000, message=rejection)
+            if isinstance(reply_kind, int):
+                raise _rpc_error(code=reply_kind, message=rejection)
             return SimpleNamespace(is_error=True, content=[SimpleNamespace(text=rejection)])
         return SimpleNamespace(is_error=False, content=[SimpleNamespace(text="available")],
                                structured_content=None)
@@ -664,7 +664,7 @@ def test_recovered_transport_preserves_domain_rejection(monkeypatch, recovery, r
         if len(calls) == 1:
             raise first_error
         if reply_kind == "rpc_error":
-            raise _rpc_error(code=-32000, message=rejection)
+            raise _rpc_error(code=1001, message=rejection)
         return SimpleNamespace(is_error=True, content=[SimpleNamespace(text=rejection)])
 
     server = _install_stub_server(mcp_tool, "recover-domain", call_tool)
@@ -718,3 +718,26 @@ def test_tool_reply_proves_session_and_clears_rapid_drop_budget(reply_kind):
         assert health._reconnect_retries == (0 if proven else mcp_tool._MAX_RECONNECT_RETRIES)
     finally:
         _cleanup(mcp_tool, "proof-of-health")
+
+
+@pytest.mark.parametrize("code,message", [
+    (408, "request deadline exceeded"),
+    (-32001, "Request 'tools/call' timed out"),
+    (-32000, "Connection closed"),
+    (-1, "Invalid or expired session"),
+    (0, "rate limit exceeded"),
+    (1001, "service unavailable"),
+    (-1, "server overloaded"),
+    (1001, "internal server error"),
+])
+def test_structured_transport_failures_are_not_domain_replies(code, message):
+    from tools import mcp_tool
+
+    assert not mcp_tool._is_application_reply(_rpc_error(code, message))
+
+
+def test_sdk_auth_failure_is_not_a_domain_reply():
+    from mcp.client.auth import OAuthFlowError
+    from tools import mcp_tool
+
+    assert not mcp_tool._is_application_reply(OAuthFlowError("token expired"))

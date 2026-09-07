@@ -8504,8 +8504,31 @@ def _launch_external_cron_worker(job: dict) -> bool:
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
         if ack_path.exists():
+            # [fork-delta] The worker creates the ack file before its JSON is
+            # fully written; reading it in that window yields "" or a prefix.
+            # Retry until the deadline instead of declaring the handoff
+            # uncertain on the first partial read (prod, 2026-09-07).
             try:
-                acknowledgement = json.loads(ack_path.read_text(encoding="utf-8"))
+                raw = ack_path.read_text(encoding="utf-8")
+                if not raw.strip():
+                    time.sleep(0.05)
+                    continue
+                acknowledgement = json.loads(raw)
+            except json.JSONDecodeError:
+                if time.monotonic() + 0.25 < deadline:
+                    time.sleep(0.05)
+                    continue
+                logger.exception(
+                    "Cron external worker %s published an unreadable acknowledgement; "
+                    "treating handoff as ownership-uncertain",
+                    execution_id,
+                )
+                return _wait_for_external_cron_worker(
+                    process,
+                    execution_id=execution_id,
+                    job_id=job_id,
+                    handoff_files=(payload_path,),
+                )
             except Exception:
                 logger.exception(
                     "Cron external worker %s published an unreadable acknowledgement; "

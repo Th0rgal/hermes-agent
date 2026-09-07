@@ -5309,9 +5309,9 @@ def _handle_auth_error_and_retry(
       2. If yes, set the server's ``_reconnect_event`` so the server task
          tears down the current MCP session and rebuilds it with fresh
          credentials. Wait briefly for ``_ready`` to re-fire.
-      3. Retry the operation once. Return the retry result if it produced
-         a non-error JSON payload. Otherwise return the ``needs_reauth``
-         error dict so the model stops hallucinating manual refresh.
+      3. Retry the operation once. A completed RPC (including a domain
+         rejection) proves authentication worked; return its result.
+         If the retry raises, return the ``needs_reauth`` error dict.
       4. Return None if ``exc`` is not an auth error, signalling the
          caller to use the generic error path.
 
@@ -5368,14 +5368,8 @@ def _handle_auth_error_and_retry(
 
         try:
             result = retry_call()
-            try:
-                parsed = json.loads(result)
-                if "error" not in parsed:
-                    _reset_server_error(server_name)
-                    return result
-            except (json.JSONDecodeError, TypeError):
-                _reset_server_error(server_name)
-                return result
+            _reset_server_error(server_name)
+            return result
         except Exception as retry_exc:
             logger.warning(
                 "MCP %s/%s retry after auth recovery failed: %s",
@@ -5562,14 +5556,8 @@ def _handle_session_expired_and_retry(
 
     try:
         result = retry_call()
-        try:
-            parsed = json.loads(result)
-            if "error" not in parsed:
-                _reset_server_error(server_name)
-                return result
-        except (json.JSONDecodeError, TypeError):
-            _reset_server_error(server_name)
-            return result
+        _reset_server_error(server_name)
+        return result
     except Exception as retry_exc:
         logger.warning(
             "MCP %s/%s retry after session reconnect failed: %s",
@@ -5675,14 +5663,7 @@ def _handle_stdio_child_exited_and_retry(
                 f"'{server_name}': {type(retry_exc).__name__}: "
                 f"{_exc_str(retry_exc)}"
             ))
-        try:
-            parsed = json.loads(result)
-            if "error" not in parsed:
-                _reset_server_error(server_name)
-            else:
-                _bump_server_error(server_name)
-        except (json.JSONDecodeError, TypeError):
-            _reset_server_error(server_name)
+        _reset_server_error(server_name)
         return result
 
     _bump_server_error(server_name)
@@ -6573,6 +6554,37 @@ def _ensure_healthy_or_recycle(server: Any, server_name: str) -> None:
         _signal_reconnect(server)
 
 
+def _is_application_reply(exc: Exception) -> bool:
+    """Recognize JSON-RPC errors without hiding SDK timeouts or session loss.
+
+    SDK 1.x/2.x rename McpError to MCPError. Restrict this to their structured
+    error codes: an arbitrary local exception is not evidence of a reply.
+    """
+    from mcp.shared import exceptions as mcp_exceptions
+
+    error_types = tuple(
+        cls for name in ("McpError", "MCPError")
+        if isinstance(cls := getattr(mcp_exceptions, name, None), type)
+    )
+    if not isinstance(exc, error_types):
+        return False
+    code = getattr(getattr(exc, "error", None), "code", None)
+    if not isinstance(code, int) or not -32700 <= code <= -32000:
+        # In particular, the SDK manufactures a 408 error on read timeout.
+        return False
+    # A retry rejection can inherit the original transport exception as
+    # __context__. Classify this reply itself, not that already-recovered
+    # failure (the transport classifier intentionally walks the whole chain).
+    reply_error = RuntimeError(str(exc))
+    if _is_auth_error(reply_error) or _is_session_expired_error(reply_error):
+        return False
+    text = str(exc).lower()
+    return not any(marker in text for marker in (
+        "timed out", "timeout", "too many requests", "rate limit",
+        "overloaded", "service unavailable", "internal server error",
+    ))
+
+
 def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """Return a sync handler that calls an MCP tool via the background loop.
 
@@ -6896,19 +6908,20 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             return json.dumps({"result": text_result}, ensure_ascii=False)
 
         def _call_once():
-            return _run_on_mcp_loop(_call, timeout=tool_timeout)
+            try:
+                return _run_on_mcp_loop(_call, timeout=tool_timeout)
+            except Exception as exc:
+                if not _is_application_reply(exc):
+                    raise
+                # Also applies to the retry closures below. Preserve the
+                # rejection for the caller while recording a healthy RPC.
+                return tool_error(_sanitize_error(str(exc)))
 
         try:
             result = _call_once()
-            # Check if the MCP tool itself returned an error
-            try:
-                parsed = json.loads(result)
-                if "error" in parsed:
-                    _bump_server_error(server_name)
-                else:
-                    _reset_server_error(server_name)  # success — reset
-            except (json.JSONDecodeError, TypeError):
-                _reset_server_error(server_name)  # non-JSON = success
+            # A completed RPC proves reachability, including is_error replies.
+            # Domain failures must not disable unrelated tools on this server.
+            _reset_server_error(server_name)
             return result
         except InterruptedError:
             return _interrupted_call_result()

@@ -651,6 +651,7 @@ class CLIAgentSetupMixin:
         """
         if not self._session_db:
             return None
+        from cli import logger
         from hermes_state import (
             SessionResumeTooLargeError,
         )
@@ -669,7 +670,7 @@ class CLIAgentSetupMixin:
                 try:
                     compact(self.session_id)
                     if tip_only:
-                        tip_check(self.session_id, max_messages=limit)
+                        safety_check(self.session_id, tip_only=True)
                     else:
                         safety_check(self.session_id)
                     return None

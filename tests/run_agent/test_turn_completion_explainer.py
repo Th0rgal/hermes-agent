@@ -124,7 +124,8 @@ def test_explanation_persistence_compression_cause_is_specific():
         "session_persistence_failed", "compression"
     )
     lower = out.lower()
-    assert "compression" in lower
+    assert "compact" in lower
+    assert "send your message again" in lower
     assert "database" not in lower
     assert "disk" not in lower
 

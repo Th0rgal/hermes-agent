@@ -188,7 +188,7 @@ class TestSchemaPathAdmission:
         self, tmp_path, fast_timeout
     ):
         """_recover_stale_fts defers under contention and completes once the
-        authority is free (next open)."""
+        authority is free (explicit offline recovery, never on open)."""
         db_path = tmp_path / "state.db"
         d = SessionDB(db_path=db_path)
         if not d._fts_enabled:
@@ -213,6 +213,7 @@ class TestSchemaPathAdmission:
             d2 = SessionDB(db_path=db_path)
             try:
                 assert d2._fts_enabled is False
+                assert d2.retry_deferred_fts_recovery() is False
             finally:
                 d2.close()
         # Deferred: breadcrumb still present, recovery not performed.
@@ -220,6 +221,9 @@ class TestSchemaPathAdmission:
 
         d3 = SessionDB(db_path=db_path)
         try:
+            assert d3._fts_enabled is False
+            assert d3._fts_stale is True
+            assert d3.retry_deferred_fts_recovery() is True
             assert d3._fts_enabled is True
         finally:
             d3.close()

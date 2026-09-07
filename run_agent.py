@@ -4379,7 +4379,7 @@ class AIAgent:
             )
         if reason == "session_persistence_failed":
             cause = persistence_cause or "unknown"
-            if cause == "compression":
+            if cause in {"compression", "compressing"}:
                 return (
                     prefix
                     + "the turn was stopped because this chat is being "

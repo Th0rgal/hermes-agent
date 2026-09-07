@@ -6420,7 +6420,7 @@ def run_conversation(
                         from agent.context_compressor import elide_until_fit
 
                         _elided_msgs, _elided_saved = elide_until_fit(
-                            messages, max(int(original_tokens * 0.7), 1)
+                            messages, max(int(new_tokens * 0.7), 1)
                         )
                         if _elided_saved > 0:
                             messages = _elided_msgs

@@ -25,6 +25,17 @@ pytest.importorskip("mcp.client.auth.oauth2")
 # ---------------------------------------------------------------------------
 
 
+def _rpc_error(code, message):
+    """Construct a real protocol error with the installed SDK's signature."""
+    from mcp.shared import exceptions
+
+    if hasattr(exceptions, "MCPError"):
+        return exceptions.MCPError(code=code, message=message)
+    from mcp.types import ErrorData
+
+    return exceptions.McpError(ErrorData(code=code, message=message))
+
+
 def _install_stub_server(mcp_tool_module, name: str, call_tool_impl):
     """Install a fake MCP server in the module's registry.
 
@@ -575,11 +586,8 @@ def test_initial_connect_budget_parks_instead_of_exiting_then_revives(monkeypatc
 def test_domain_rejections_leave_other_tools_available(monkeypatch, reply_kind):
     """Repeated invalid transitions must not disable every tool on the server."""
     from types import SimpleNamespace
-    from mcp.shared import exceptions
-    from mcp.types import ErrorData
     from tools import mcp_tool
 
-    error_type = getattr(exceptions, "McpError", None) or exceptions.MCPError
     calls = []
     rejection = "acknowledge_mission denied: status paused, awaiting_kind none"
 
@@ -587,7 +595,7 @@ def test_domain_rejections_leave_other_tools_available(monkeypatch, reply_kind):
         calls.append(name)
         if name == "acknowledge_mission":
             if reply_kind == "rpc_error":
-                raise error_type(ErrorData(code=-32000, message=rejection))
+                raise _rpc_error(code=-32000, message=rejection)
             return SimpleNamespace(is_error=True, content=[SimpleNamespace(text=rejection)])
         return SimpleNamespace(is_error=False, content=[SimpleNamespace(text="available")],
                                structured_content=None)
@@ -610,17 +618,14 @@ def test_domain_rejections_leave_other_tools_available(monkeypatch, reply_kind):
 
 @pytest.mark.parametrize("failure", ["timeout", "connection", "sdk_timeout"])
 def test_transport_failures_still_block_other_tools(failure):
-    from mcp.shared import exceptions
-    from mcp.types import ErrorData
     from tools import mcp_tool
 
-    error_type = getattr(exceptions, "McpError", None) or exceptions.MCPError
     calls = []
 
     async def call_tool(name, arguments):
         calls.append(name)
         if failure == "sdk_timeout":
-            raise error_type(ErrorData(code=408, message="Timed out while waiting for response"))
+            raise _rpc_error(code=408, message="Timed out while waiting for response")
         if failure == "connection":
             raise ConnectionError("connection refused")
         raise TimeoutError("read timeout")
@@ -644,11 +649,8 @@ def test_recovered_transport_preserves_domain_rejection(monkeypatch, recovery, r
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     from mcp.client.auth import OAuthFlowError
-    from mcp.shared import exceptions
-    from mcp.types import ErrorData
     from tools import mcp_tool, mcp_oauth_manager
 
-    error_type = getattr(exceptions, "McpError", None) or exceptions.MCPError
     first_error = {
         "auth": OAuthFlowError("expired"),
         "session": RuntimeError("Session expired"),
@@ -662,7 +664,7 @@ def test_recovered_transport_preserves_domain_rejection(monkeypatch, recovery, r
         if len(calls) == 1:
             raise first_error
         if reply_kind == "rpc_error":
-            raise error_type(ErrorData(code=-32000, message=rejection))
+            raise _rpc_error(code=-32000, message=rejection)
         return SimpleNamespace(is_error=True, content=[SimpleNamespace(text=rejection)])
 
     _install_stub_server(mcp_tool, "recover-domain", call_tool)

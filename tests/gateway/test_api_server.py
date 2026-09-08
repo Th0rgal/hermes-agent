@@ -390,6 +390,8 @@ class TestAgentExecution:
             user_message="hello",
             conversation_history=[],
             task_id="session-123",
+            persist_user_display_kind=None,
+            persist_user_display_metadata=None,
         )
 
     @pytest.mark.asyncio

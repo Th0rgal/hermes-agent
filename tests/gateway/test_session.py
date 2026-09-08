@@ -1392,7 +1392,12 @@ class TestGatewaySessionDbRecovery:
             "parent", {"role": "assistant", "content": "routed to child"}
         )
 
-        assert store._entries["route"].session_id == "child"
+        # The database adopts the continuation before the gateway needs
+        # its exception-based reroute fallback. Reads must follow it too.
+        assert store._entries["route"].session_id == "parent"
+        assert [m["content"] for m in store.load_transcript("parent")] == [
+            "summary", "routed to child",
+        ]
         assert "parent" not in store._dirty_transcripts
         assert [m["content"] for m in db.get_messages_as_conversation("parent")] == []
         assert [m["content"] for m in db.get_messages_as_conversation("child")] == [
@@ -1431,7 +1436,10 @@ class TestGatewaySessionDbRecovery:
             "root", {"role": "assistant", "content": "routed to tip"}
         )
 
-        assert store._entries["route"].session_id == "tip"
+        assert store._entries["route"].session_id == "root"
+        assert [m["content"] for m in store.load_transcript("root")] == [
+            "summary", "routed to tip",
+        ]
         assert "root" not in store._dirty_transcripts
         assert [m["content"] for m in db.get_messages_as_conversation("root")] == []
         assert [m["content"] for m in db.get_messages_as_conversation("tip")] == [

@@ -590,6 +590,8 @@ class TestPrologueMoaAndInPlaceBackfill:
         agent = _FakeAgent()
         agent.compression_enabled = True
         agent._session_db = MagicMock()
+        # No sibling compactor owns the session in this scenario.
+        agent._session_db.get_compression_lock_holder.return_value = None
 
         calls = {"n": 0}
 

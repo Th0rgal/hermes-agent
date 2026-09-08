@@ -214,6 +214,31 @@ class TestResolveEffectiveMaxOutputTokens:
         assert runtime["model"] == "chosen"
         assert runtime["max_output_tokens"] == 8192
 
+    def test_configured_model_overrides_stale_provider_default(self, monkeypatch):
+        config = {
+            "model": {"provider": "dgx", "default": "chosen"},
+            "providers": {
+                "dgx": {
+                    "api": "http://127.0.0.1:8000/v1",
+                    "default_model": "stale",
+                    "models": {
+                        "stale": {"max_tokens": 65_536},
+                        "chosen": {"max_tokens": 8192},
+                    },
+                }
+            },
+        }
+        monkeypatch.setattr("hermes_cli.runtime_provider.load_config", lambda: config)
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider._try_resolve_from_custom_pool",
+            lambda *args, **kwargs: None,
+        )
+
+        runtime = resolve_runtime_provider(requested="dgx")
+
+        assert runtime["model"] == "chosen"
+        assert runtime["max_output_tokens"] == 8192
+
     def test_default_model_cap_does_not_leak_to_sibling_model(self, monkeypatch):
         config = {
             "model": {"provider": "dgx", "default": "model-a"},

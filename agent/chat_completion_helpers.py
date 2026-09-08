@@ -2910,7 +2910,9 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # Resolve the fallback route's output cap before mutating the live
         # agent. A lower-cap fallback must not inherit the primary model's
         # request budget.
-        fb_max_tokens = None
+        # Keep an explicit caller cap unless the fallback route supplies a
+        # destination-specific or global replacement.
+        fb_max_tokens = getattr(agent, "max_tokens", None)
         try:
             from hermes_cli.runtime_provider import (
                 _get_named_custom_provider,
@@ -2923,7 +2925,8 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 _resolve_effective_max_output_tokens(
                     cap_provider, fb_model, cap_runtime
                 )
-            fb_max_tokens = cap_runtime.get("max_output_tokens")
+            if "max_output_tokens" in cap_runtime:
+                fb_max_tokens = cap_runtime["max_output_tokens"]
         except Exception:
             pass
         for cap_key in ("max_output_tokens", "max_tokens"):
@@ -3083,7 +3086,10 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 config_context_length=getattr(agent, "_config_context_length", None),
                 custom_providers=getattr(agent, "_custom_providers", None),
             )
-            agent.context_compressor.update_model(
+            from agent.context_engine import update_context_engine_model
+
+            update_context_engine_model(
+                agent.context_compressor,
                 model=agent.model,
                 context_length=fb_context_length,
                 base_url=agent.base_url,

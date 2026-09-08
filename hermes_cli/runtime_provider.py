@@ -1391,7 +1391,7 @@ def _resolve_named_custom_runtime(
     # this is the configured provider so a one-off provider override cannot
     # inherit an unrelated model's cap.
     effective_target_model = target_model
-    if not effective_target_model and not custom_provider.get("model"):
+    if not effective_target_model:
         model_cfg = _get_model_config()
         configured_provider = str(model_cfg.get("provider") or "").strip()
         configured_norm = _normalize_custom_provider_name(configured_provider)

@@ -1809,7 +1809,10 @@ def restore_primary_runtime(agent) -> bool:
 
         # ── Restore context engine state ──
         cc = agent.context_compressor
-        cc.update_model(
+        from agent.context_engine import update_context_engine_model
+
+        update_context_engine_model(
+            cc,
             model=rt["compressor_model"],
             context_length=rt["compressor_context_length"],
             base_url=rt["compressor_base_url"],
@@ -3383,7 +3386,10 @@ def switch_model(
                 config_context_length=_effective_context_length,
                 custom_providers=_sm_custom_providers,
             )
-            agent.context_compressor.update_model(
+            from agent.context_engine import update_context_engine_model
+
+            update_context_engine_model(
+                agent.context_compressor,
                 model=agent.model,
                 context_length=new_context_length,
                 base_url=agent.base_url,

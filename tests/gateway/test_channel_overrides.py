@@ -187,3 +187,16 @@ class TestResolveSessionAgentRuntimePriority:
         assert model == "lower-cap-model"
         assert runtime["max_tokens"] == 8192
 
+    def test_provider_runtime_resolver_preserves_environment_cap(self, monkeypatch):
+        from gateway.run import _resolve_runtime_agent_kwargs_for_provider
+
+        monkeypatch.setenv("HERMES_MAX_TOKENS", "2048")
+        with patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            return_value={"provider": "custom", "max_output_tokens": 8192},
+        ), patch(
+            "hermes_cli.runtime_provider._get_model_config", return_value={}
+        ):
+            runtime = _resolve_runtime_agent_kwargs_for_provider("custom", "model")
+
+        assert runtime["max_tokens"] == 2048

@@ -3516,17 +3516,15 @@ def _resolve_runtime_agent_kwargs_for_provider(
         runtime = resolve_runtime_provider(**resolve_kwargs)
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
-    max_tokens = runtime.get("max_output_tokens")
     model_cfg = _get_model_config()
-    configured_cap = (
-        model_cfg.get("max_tokens") if isinstance(model_cfg, dict) else None
+    from hermes_cli.max_tokens import resolve_global_max_tokens
+
+    configured_cap = resolve_global_max_tokens(model_cfg)
+    max_tokens = (
+        configured_cap
+        if configured_cap is not None
+        else runtime.get("max_output_tokens")
     )
-    if (
-        isinstance(configured_cap, int)
-        and not isinstance(configured_cap, bool)
-        and configured_cap > 0
-    ):
-        max_tokens = configured_cap
     return {
         "api_key": runtime.get("api_key"),
         "base_url": runtime.get("base_url"),

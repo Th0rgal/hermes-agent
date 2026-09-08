@@ -153,4 +153,37 @@ class TestResolveSessionAgentRuntimePriority:
         assert model == "channel/model"
         assert runtime["provider"] == "openrouter"
 
+    def test_model_only_override_re_resolves_same_provider_cap(self):
+        runner = object.__new__(GatewayRunner)
+        runner._session_model_overrides = {}
+        runner.config = GatewayConfig(
+            platforms={
+                Platform.DISCORD: PlatformConfig(
+                    enabled=True,
+                    channel_overrides={
+                        "chan_1": ChannelOverride(model="lower-cap-model")
+                    },
+                )
+            }
+        )
+        source = SessionSource(
+            platform=Platform.DISCORD, chat_id="chan_1", user_id="u1"
+        )
+        with patch(
+            "gateway.run._resolve_gateway_model", return_value="default-model"
+        ), patch(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            return_value={"provider": "custom", "max_tokens": 65_536},
+        ), patch(
+            "gateway.run._resolve_runtime_agent_kwargs_for_provider",
+            return_value={"provider": "custom", "max_tokens": 8192},
+        ) as resolve_provider:
+            model, runtime = runner._resolve_session_agent_runtime(
+                source=source,
+                user_config={"model": {"default": "default-model"}},
+            )
+
+        resolve_provider.assert_called_once_with("custom", "lower-cap-model")
+        assert model == "lower-cap-model"
+        assert runtime["max_tokens"] == 8192
 

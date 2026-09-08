@@ -6541,11 +6541,20 @@ def run_conversation(
                                 "failed": True,
                                 "compression_exhausted": True,
                             }
-                        # Also compress the message history so the output-cap
-                        # retry does not just spin on max_tokens alone.  The
-                        # compressor drops the middle window, freeing enough
-                        # tokens for the total to fit inside context_length.
-                        # (#55546)
+                        # Skip compression when the reduced output cap fits
+                        # comfortably inside the context window.  The original
+                        # motivation for always compressing (#55546) was to
+                        # prevent spinning — but when the reduced cap + input
+                        # estimate is well within context_length, compression
+                        # adds latency (sometimes minutes) with no benefit.
+                        _total_after_cap_reduction = safe_out + request_input_estimate
+                        _fits_without_compression = (
+                            _total_after_cap_reduction > 0
+                            and _total_after_cap_reduction < old_ctx * 0.90
+                        )
+                        if _fits_without_compression:
+                            _retry.restart_with_compressed_messages = True
+                            break
                         try:
                             original_len = len(messages)
                             original_tokens = estimate_messages_tokens_rough(messages)

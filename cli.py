@@ -5406,7 +5406,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # model (#56828). A ``moa:`` prefix wins over an explicit ``--provider``.
         _moa_provider_override, self.model = _normalize_moa_model(self.model)
         # Read max_tokens from config (env var override: HERMES_MAX_TOKENS)
-        from hermes_cli.config import resolve_global_max_tokens
+        from hermes_cli.max_tokens import resolve_global_max_tokens
 
         self.max_tokens = resolve_global_max_tokens(_model_config)
         # Auto-detect model from local server if still on default

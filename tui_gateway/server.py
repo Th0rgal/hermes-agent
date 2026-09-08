@@ -9417,7 +9417,7 @@ def _make_agent(
                 raise RuntimeError("Auth fallback resolved without a model")
             model = resolution.selected_model
     model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
-    from hermes_cli.config import resolve_global_max_tokens
+    from hermes_cli.max_tokens import resolve_global_max_tokens
 
     configured_max_tokens = resolve_global_max_tokens(model_cfg)
     if configured_max_tokens is None:

@@ -2578,7 +2578,8 @@ def switch_model(
 
     # The documented global cap has higher precedence, matching construction.
     try:
-        from hermes_cli.config import load_config, resolve_global_max_tokens
+        from hermes_cli.config import load_config
+        from hermes_cli.max_tokens import resolve_global_max_tokens
 
         model_cfg = (load_config() or {}).get("model", {})
         configured_cap = resolve_global_max_tokens(model_cfg)

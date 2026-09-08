@@ -3341,7 +3341,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
 
     model_cfg = _get_model_config()
-    from hermes_cli.config import resolve_global_max_tokens
+    from hermes_cli.max_tokens import resolve_global_max_tokens
 
     max_tokens = resolve_global_max_tokens(model_cfg)
     # Fall back to a per-provider output cap (custom_providers max_output_tokens)

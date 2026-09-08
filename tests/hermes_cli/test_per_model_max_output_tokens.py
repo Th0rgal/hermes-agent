@@ -22,8 +22,8 @@ from hermes_cli.runtime_provider import (
 )
 from hermes_cli.config import (
     _normalize_custom_provider_entry,
-    resolve_global_max_tokens,
 )
+from hermes_cli.max_tokens import resolve_global_max_tokens
 
 
 class TestLiftMaxOutputTokens:

@@ -36,24 +36,9 @@ from typing import Dict, Any, Optional, List, Tuple, Set
 
 from hermes_cli.route_identity import normalize_route_base_url
 from hermes_cli.secret_prompt import masked_secret_prompt
+from hermes_cli.max_tokens import resolve_global_max_tokens
 
 logger = logging.getLogger(__name__)
-
-
-def resolve_global_max_tokens(model_config: Any = None) -> Optional[int]:
-    """Return the effective global output cap, including its env override."""
-    env_value = os.environ.get("HERMES_MAX_TOKENS")
-    if env_value:
-        try:
-            value = int(env_value)
-        except (TypeError, ValueError):
-            return None
-        return value if value > 0 else None
-    if isinstance(model_config, dict):
-        value = model_config.get("max_tokens")
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-            return value
-    return None
 
 # Track which (config_path, mtime_ns, size) tuples we've already warned about
 # so concurrent CLI/gateway loads of a broken config.yaml don't spam stderr

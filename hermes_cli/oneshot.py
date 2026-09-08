@@ -489,7 +489,7 @@ def _run_agent(
         # gateway sessions.
         _fb = get_fallback_chain(cfg)
 
-        from hermes_cli.config import resolve_global_max_tokens
+        from hermes_cli.max_tokens import resolve_global_max_tokens
 
         configured_max_tokens = resolve_global_max_tokens(model_cfg)
         effective_max_tokens = configured_max_tokens

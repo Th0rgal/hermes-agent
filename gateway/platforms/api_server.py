@@ -465,7 +465,7 @@ def _resolve_request_runtime_agent_kwargs(provider: str, target_model: Optional[
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
 
     model_cfg = _get_model_config()
-    from hermes_cli.config import resolve_global_max_tokens
+    from hermes_cli.max_tokens import resolve_global_max_tokens
 
     max_tokens = resolve_global_max_tokens(model_cfg)
     if max_tokens is None:

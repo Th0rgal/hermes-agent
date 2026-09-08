@@ -442,7 +442,9 @@ def _apply_runtime_agent_overrides(
         if key not in overrides:
             continue
         value = overrides.get(key)
-        if value is None:
+        # An explicit None output cap clears a cap inherited from the default
+        # route when the request/session switches to an uncapped model.
+        if value is None and key != "max_tokens":
             continue
         runtime_kwargs[key] = list(value) if key == "args" and isinstance(value, (list, tuple)) else value
     return runtime_kwargs

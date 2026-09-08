@@ -20,7 +20,10 @@ from hermes_cli.runtime_provider import (
     _resolve_effective_max_output_tokens,
     resolve_runtime_provider,
 )
-from hermes_cli.config import _normalize_custom_provider_entry
+from hermes_cli.config import (
+    _normalize_custom_provider_entry,
+    resolve_global_max_tokens,
+)
 
 
 class TestLiftMaxOutputTokens:
@@ -37,6 +40,12 @@ class TestLiftMaxOutputTokens:
         result = {}
         _lift_max_output_tokens(entry, result)
         assert result["max_output_tokens"] == 4096
+
+    @pytest.mark.parametrize("key", ["max_tokens", "max_output_tokens"])
+    def test_boolean_provider_caps_are_rejected(self, key):
+        result = {}
+        _lift_max_output_tokens({key: True}, result, model="m")
+        assert "max_output_tokens" not in result
 
     def test_max_output_tokens_preferred_over_max_tokens(self):
         entry = {"max_output_tokens": 4096, "max_tokens": 8192}
@@ -144,6 +153,15 @@ class TestResolveEffectiveMaxOutputTokens:
 
     def test_no_max_tokens_anywhere(self):
         custom_provider = {"_provider_models_config": {"m": {"context_length": 131072}}}
+        result = {}
+        _resolve_effective_max_output_tokens(custom_provider, "m", result)
+        assert "max_output_tokens" not in result
+
+    def test_boolean_per_model_and_provider_caps_are_rejected(self):
+        custom_provider = {
+            "max_output_tokens": True,
+            "_provider_models_config": {"m": {"max_tokens": True}},
+        }
         result = {}
         _resolve_effective_max_output_tokens(custom_provider, "m", result)
         assert "max_output_tokens" not in result
@@ -315,6 +333,15 @@ class TestNormalizerPreservesMaxTokens:
         assert normalized is not None
         assert "max_tokens" not in normalized
 
+    @pytest.mark.parametrize("key", ["max_tokens", "max_output_tokens"])
+    def test_boolean_caps_not_preserved(self, key):
+        normalized = _normalize_custom_provider_entry(
+            {"name": "dgx-spark", "base_url": "http://localhost/v1", key: True},
+            provider_key="dgx-spark",
+        )
+        assert normalized is not None
+        assert key not in normalized
+
     def test_no_unknown_key_warning_for_max_tokens(self):
         """max_tokens must be in _KNOWN_KEYS — no 'unknown config keys' warning."""
         import hermes_cli.config as cfg_mod
@@ -327,3 +354,13 @@ class TestNormalizerPreservesMaxTokens:
         normalized = _normalize_custom_provider_entry(entry, provider_key="test-no-warn")
         assert normalized is not None
         assert ("test-no-warn", "unknown:max_tokens") not in cfg_mod._PROVIDER_NORMALIZE_WARNED
+
+
+def test_global_cap_env_precedes_config(monkeypatch):
+    monkeypatch.setenv("HERMES_MAX_TOKENS", "2048")
+    assert resolve_global_max_tokens({"max_tokens": 8192}) == 2048
+
+
+def test_global_cap_rejects_boolean_config(monkeypatch):
+    monkeypatch.delenv("HERMES_MAX_TOKENS", raising=False)
+    assert resolve_global_max_tokens({"max_tokens": True}) is None

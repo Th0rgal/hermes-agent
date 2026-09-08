@@ -39,6 +39,22 @@ from hermes_cli.secret_prompt import masked_secret_prompt
 
 logger = logging.getLogger(__name__)
 
+
+def resolve_global_max_tokens(model_config: Any = None) -> Optional[int]:
+    """Return the effective global output cap, including its env override."""
+    env_value = os.environ.get("HERMES_MAX_TOKENS")
+    if env_value:
+        try:
+            value = int(env_value)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+    if isinstance(model_config, dict):
+        value = model_config.get("max_tokens")
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
+
 # Track which (config_path, mtime_ns, size) tuples we've already warned about
 # so concurrent CLI/gateway loads of a broken config.yaml don't spam stderr
 # every time. Cleared automatically when the file changes (different mtime).
@@ -1854,11 +1870,15 @@ def _normalize_custom_provider_entry(
         normalized["context_length"] = context_length
 
     max_tokens = entry.get("max_tokens")
-    if isinstance(max_tokens, int) and max_tokens > 0:
+    if isinstance(max_tokens, int) and not isinstance(max_tokens, bool) and max_tokens > 0:
         normalized["max_tokens"] = max_tokens
 
     max_output_tokens = entry.get("max_output_tokens")
-    if isinstance(max_output_tokens, int) and max_output_tokens > 0:
+    if (
+        isinstance(max_output_tokens, int)
+        and not isinstance(max_output_tokens, bool)
+        and max_output_tokens > 0
+    ):
         normalized["max_output_tokens"] = max_output_tokens
 
     rate_limit_delay = entry.get("rate_limit_delay")

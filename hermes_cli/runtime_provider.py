@@ -770,12 +770,12 @@ def _lift_max_output_tokens(
         if isinstance(model_config, dict):
             for _k in ("max_output_tokens", "max_tokens"):
                 _v = model_config.get(_k)
-                if isinstance(_v, int) and _v > 0:
+                if isinstance(_v, int) and not isinstance(_v, bool) and _v > 0:
                     result["max_output_tokens"] = _v
                     return
     for _k in ("max_output_tokens", "max_tokens"):
         _v = entry.get(_k)
-        if isinstance(_v, int) and _v > 0:
+        if isinstance(_v, int) and not isinstance(_v, bool) and _v > 0:
             result["max_output_tokens"] = _v
             return
 
@@ -799,11 +799,15 @@ def _resolve_effective_max_output_tokens(
         if isinstance(model_cfg, dict):
             for _k in ("max_output_tokens", "max_tokens"):
                 _v = model_cfg.get(_k)
-                if isinstance(_v, int) and _v > 0:
+                if isinstance(_v, int) and not isinstance(_v, bool) and _v > 0:
                     result["max_output_tokens"] = _v
                     return
     provider_mot = custom_provider.get("max_output_tokens")
-    if isinstance(provider_mot, int) and provider_mot > 0:
+    if (
+        isinstance(provider_mot, int)
+        and not isinstance(provider_mot, bool)
+        and provider_mot > 0
+    ):
         result["max_output_tokens"] = provider_mot
 
 

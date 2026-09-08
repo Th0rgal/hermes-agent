@@ -2578,17 +2578,11 @@ def switch_model(
 
     # The documented global cap has higher precedence, matching construction.
     try:
-        from hermes_cli.config import load_config
+        from hermes_cli.config import load_config, resolve_global_max_tokens
 
         model_cfg = (load_config() or {}).get("model", {})
-        configured_cap = (
-            model_cfg.get("max_tokens") if isinstance(model_cfg, dict) else None
-        )
-        if (
-            isinstance(configured_cap, int)
-            and not isinstance(configured_cap, bool)
-            and configured_cap > 0
-        ):
+        configured_cap = resolve_global_max_tokens(model_cfg)
+        if configured_cap is not None:
             max_output_tokens = configured_cap
     except Exception:
         pass

@@ -1692,6 +1692,8 @@ def _normalize_custom_provider_entry(
         "apiKeyEnv": "key_env",  # alias — OpenClaw-compatible + docs variant
         "defaultModel": "default_model",
         "contextLength": "context_length",
+        "maxTokens": "max_tokens",
+        "maxOutputTokens": "max_output_tokens",
         "rateLimitDelay": "rate_limit_delay",
     }
     # api_key_env is a documented snake_case alias for key_env (see
@@ -1709,7 +1711,8 @@ def _normalize_custom_provider_entry(
         "key_cmd",
         "api_mode", "transport", "model", "default_model", "models",
         "models_discovered",
-        "context_length", "rate_limit_delay",
+        "context_length", "max_tokens", "max_output_tokens",
+        "rate_limit_delay",
         "request_timeout_seconds", "stale_timeout_seconds",
         "discover_models", "extra_body", "extra_headers", "capabilities",
         "ssl_ca_cert", "ssl_verify",
@@ -1849,6 +1852,14 @@ def _normalize_custom_provider_entry(
     context_length = entry.get("context_length")
     if isinstance(context_length, int) and context_length > 0:
         normalized["context_length"] = context_length
+
+    max_tokens = entry.get("max_tokens")
+    if isinstance(max_tokens, int) and max_tokens > 0:
+        normalized["max_tokens"] = max_tokens
+
+    max_output_tokens = entry.get("max_output_tokens")
+    if isinstance(max_output_tokens, int) and max_output_tokens > 0:
+        normalized["max_output_tokens"] = max_output_tokens
 
     rate_limit_delay = entry.get("rate_limit_delay")
     if isinstance(rate_limit_delay, (int, float)) and rate_limit_delay >= 0:

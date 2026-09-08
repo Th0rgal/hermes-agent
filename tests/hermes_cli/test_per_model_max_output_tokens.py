@@ -19,6 +19,7 @@ from hermes_cli.runtime_provider import (
     _lift_max_output_tokens,
     _resolve_effective_max_output_tokens,
 )
+from hermes_cli.config import _normalize_custom_provider_entry
 
 
 class TestLiftMaxOutputTokens:
@@ -202,3 +203,78 @@ class TestOutputCapRecoverySkipsCompression:
         request_input_estimate = 95000
         total = safe_out + request_input_estimate
         assert total >= context_length * 0.90
+
+
+class TestNormalizerPreservesMaxTokens:
+    """The config normalizer must preserve max_tokens/max_output_tokens
+    so the legacy custom_providers compatibility path can read them."""
+
+    def test_provider_level_max_tokens_survives_normalization(self):
+        entry = {
+            "name": "dgx-spark",
+            "base_url": "http://100.77.4.93:8000/v1",
+            "max_tokens": 8192,
+        }
+        normalized = _normalize_custom_provider_entry(entry, provider_key="dgx-spark")
+        assert normalized is not None
+        assert normalized["max_tokens"] == 8192
+
+    def test_provider_level_max_output_tokens_survives_normalization(self):
+        entry = {
+            "name": "dgx-spark",
+            "base_url": "http://100.77.4.93:8000/v1",
+            "max_output_tokens": 4096,
+        }
+        normalized = _normalize_custom_provider_entry(entry, provider_key="dgx-spark")
+        assert normalized is not None
+        assert normalized["max_output_tokens"] == 4096
+
+    def test_per_model_max_tokens_in_models_dict_survives(self):
+        entry = {
+            "name": "dgx-spark",
+            "base_url": "http://100.77.4.93:8000/v1",
+            "max_tokens": 8192,
+            "models": {
+                "qwen3.8-orca-nvfp4": {
+                    "max_tokens": 8192,
+                    "context_length": 131072,
+                },
+            },
+        }
+        normalized = _normalize_custom_provider_entry(entry, provider_key="dgx-spark")
+        assert normalized is not None
+        assert normalized["max_tokens"] == 8192
+        assert normalized["models"]["qwen3.8-orca-nvfp4"]["max_tokens"] == 8192
+
+    def test_camel_case_maxTokens_normalized(self):
+        entry = {
+            "name": "dgx-spark",
+            "base_url": "http://100.77.4.93:8000/v1",
+            "maxTokens": 8192,
+        }
+        normalized = _normalize_custom_provider_entry(entry, provider_key="dgx-spark")
+        assert normalized is not None
+        assert normalized["max_tokens"] == 8192
+
+    def test_invalid_max_tokens_not_preserved(self):
+        entry = {
+            "name": "dgx-spark",
+            "base_url": "http://100.77.4.93:8000/v1",
+            "max_tokens": -1,
+        }
+        normalized = _normalize_custom_provider_entry(entry, provider_key="dgx-spark")
+        assert normalized is not None
+        assert "max_tokens" not in normalized
+
+    def test_no_unknown_key_warning_for_max_tokens(self):
+        """max_tokens must be in _KNOWN_KEYS — no 'unknown config keys' warning."""
+        import hermes_cli.config as cfg_mod
+        cfg_mod._PROVIDER_NORMALIZE_WARNED.clear()
+        entry = {
+            "name": "dgx-spark",
+            "base_url": "http://100.77.4.93:8000/v1",
+            "max_tokens": 8192,
+        }
+        normalized = _normalize_custom_provider_entry(entry, provider_key="test-no-warn")
+        assert normalized is not None
+        assert ("test-no-warn", "unknown:max_tokens") not in cfg_mod._PROVIDER_NORMALIZE_WARNED

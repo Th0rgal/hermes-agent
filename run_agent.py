@@ -981,10 +981,11 @@ class AIAgent:
         base_url='',
         api_mode='',
         capabilities=None,
+        max_tokens=...,
     ):
         """Forwarder — see ``agent.agent_runtime_helpers.switch_model``."""
         from agent.agent_runtime_helpers import switch_model
-        return switch_model(
+        args = (
             self,
             new_model,
             new_provider,
@@ -993,6 +994,9 @@ class AIAgent:
             api_mode,
             capabilities,
         )
+        if max_tokens is ...:
+            return switch_model(*args)
+        return switch_model(*args, max_tokens=max_tokens)
 
     def _safe_print(self, *args, **kwargs):
         """Print that silently handles broken pipes / closed stdout.

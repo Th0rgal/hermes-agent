@@ -338,6 +338,9 @@ class CLIAgentSetupMixin:
             "command": self.acp_command,
             "args": list(self.acp_args or []),
             "credential_pool": getattr(self, "_credential_pool", None),
+            "max_output_tokens": getattr(
+                self, "_runtime_max_output_tokens", None
+            ),
         }
         route = {
             "model": self.model,

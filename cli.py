@@ -10509,6 +10509,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                             capabilities=getattr(
                                 _reset_result, "runtime_capabilities", None
                             ),
+                            max_tokens=_reset_result.max_output_tokens,
                         )
                     self.model = _reset_result.new_model
                     self.provider = _reset_result.target_provider
@@ -11638,6 +11639,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             "api_key": self.api_key,
             "base_url": self.base_url,
             "api_mode": self.api_mode,
+            "_runtime_max_output_tokens": getattr(
+                self, "_runtime_max_output_tokens", None
+            ),
             "agent_primary_runtime": copy.deepcopy(
                 getattr(agent, "_primary_runtime", None)
             ) if agent is not None else None,
@@ -11653,6 +11657,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             "requested_provider",
             "_explicit_api_key",
             "_explicit_base_url",
+            "_runtime_max_output_tokens",
             "api_key",
             "base_url",
             "api_mode",
@@ -11684,6 +11689,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     base_url=snapshot.get("base_url", ""),
                     api_mode=snapshot.get("api_mode", ""),
                     capabilities=snapshot.get("capabilities"),
+                    max_tokens=snapshot.get("_runtime_max_output_tokens"),
                 )
             except Exception as exc:
                 logger.warning("CLI one-turn model restore failed: %s", exc)
@@ -11804,6 +11810,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             "api_key": self.api_key,
             "base_url": self.base_url,
             "api_mode": self.api_mode,
+            "_runtime_max_output_tokens": getattr(
+                self, "_runtime_max_output_tokens", None
+            ),
         }
         self.model = result.new_model
         self.provider = result.target_provider
@@ -11819,6 +11828,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             self.base_url = result.base_url
         if result.api_mode:
             self.api_mode = result.api_mode
+        self._runtime_max_output_tokens = result.max_output_tokens
 
         if self.agent is not None:
             try:
@@ -11829,6 +11839,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     base_url=result.base_url,
                     api_mode=result.api_mode,
                     capabilities=getattr(result, "runtime_capabilities", None),
+                    max_tokens=result.max_output_tokens,
                 )
             except Exception as exc:
                 # The agent rolled itself back to the old working model/client.
@@ -12195,6 +12206,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             "api_key": self.api_key,
             "base_url": self.base_url,
             "api_mode": self.api_mode,
+            "_runtime_max_output_tokens": getattr(
+                self, "_runtime_max_output_tokens", None
+            ),
         }
         self.model = result.new_model
         self.provider = result.target_provider
@@ -12210,6 +12224,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             self.base_url = result.base_url
         if result.api_mode:
             self.api_mode = result.api_mode
+        self._runtime_max_output_tokens = result.max_output_tokens
 
         # Apply to running agent (in-place swap)
         if self.agent is not None:
@@ -12221,6 +12236,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     base_url=result.base_url,
                     api_mode=result.api_mode,
                     capabilities=getattr(result, "runtime_capabilities", None),
+                    max_tokens=result.max_output_tokens,
                 )
             except Exception as exc:
                 # Agent rolled itself back; roll the CLI back too and abort so a

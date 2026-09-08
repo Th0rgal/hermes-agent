@@ -1915,6 +1915,8 @@ def _custom_provider_entry_to_provider_config(
         "models",
         "models_discovered",
         "context_length",
+        "max_tokens",
+        "max_output_tokens",
         "rate_limit_delay",
         "discover_models",
         "extra_body",

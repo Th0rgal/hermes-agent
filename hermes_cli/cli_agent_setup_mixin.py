@@ -171,6 +171,7 @@ class CLIAgentSetupMixin:
         self.acp_args = resolved_acp_args
         self._credential_pool = resolved_credential_pool
         self._provider_source = runtime.get("source")
+        self._runtime_max_output_tokens = runtime.get("max_output_tokens")
         self.api_key = api_key
         self.base_url = base_url
 
@@ -520,6 +521,9 @@ class CLIAgentSetupMixin:
                 "command": self.acp_command,
                 "args": list(self.acp_args or []),
                 "credential_pool": getattr(self, "_credential_pool", None),
+                "max_output_tokens": getattr(
+                    self, "_runtime_max_output_tokens", None
+                ),
             }
             effective_model = model_override or self.model
             self.agent = AIAgent(
@@ -532,7 +536,11 @@ class CLIAgentSetupMixin:
                 acp_command=runtime.get("command"),
                 acp_args=runtime.get("args"),
                 credential_pool=runtime.get("credential_pool"),
-                max_tokens=self.max_tokens,
+                max_tokens=(
+                    self.max_tokens
+                    if self.max_tokens is not None
+                    else runtime.get("max_output_tokens")
+                ),
                 max_iterations=self.max_turns,
                 run_budget_seconds=getattr(self, "run_budget_seconds", None),
                 enabled_toolsets=self.enabled_toolsets,

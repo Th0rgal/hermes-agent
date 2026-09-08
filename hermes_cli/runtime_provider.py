@@ -1379,6 +1379,21 @@ def _resolve_named_custom_runtime(
     if not custom_provider:
         return None
 
+    # Gateway startup resolves the configured provider without passing a
+    # target_model.  In that path the model lives in model.default, not
+    # necessarily in providers.<name>.default_model.  Recover it only when
+    # this is the configured provider so a one-off provider override cannot
+    # inherit an unrelated model's cap.
+    effective_target_model = target_model
+    if not effective_target_model and not custom_provider.get("model"):
+        model_cfg = _get_model_config()
+        configured_provider = str(model_cfg.get("provider") or "").strip()
+        configured_norm = _normalize_custom_provider_name(configured_provider)
+        if configured_norm == requested_norm:
+            configured_model = str(model_cfg.get("default") or "").strip()
+            if configured_model:
+                effective_target_model = configured_model
+
     base_url = (
         (explicit_base_url or "").strip()
         or custom_provider.get("base_url", "")
@@ -1397,7 +1412,7 @@ def _resolve_named_custom_runtime(
         # Propagate the model name even when using pooled credentials —
         # the pool doesn't know about the custom_providers model field.
         # An explicit ``target_model`` wins (same rule as the non-pool path).
-        model_name = target_model or custom_provider.get("model")
+        model_name = effective_target_model or custom_provider.get("model")
         if model_name:
             pool_result["model"] = model_name
         _lift_model_capabilities(custom_provider, model_name, pool_result)
@@ -1463,8 +1478,8 @@ def _resolve_named_custom_runtime(
     # default (regression: auxiliary slots / background-review resolve a
     # concrete model for a custom provider and must not silently fall back
     # to ``default_model``).
-    if target_model:
-        result["model"] = target_model
+    if effective_target_model:
+        result["model"] = effective_target_model
     elif custom_provider.get("model"):
         result["model"] = custom_provider["model"]
     _lift_model_capabilities(

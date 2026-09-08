@@ -18,6 +18,7 @@ import pytest
 from hermes_cli.runtime_provider import (
     _lift_max_output_tokens,
     _resolve_effective_max_output_tokens,
+    resolve_runtime_provider,
 )
 from hermes_cli.config import _normalize_custom_provider_entry
 
@@ -169,6 +170,31 @@ class TestResolveEffectiveMaxOutputTokens:
             custom_provider, "qwen3.8-orca-nvfp4", result
         )
         assert result["max_output_tokens"] == 8192
+
+    def test_gateway_style_resolution_uses_configured_model(self, monkeypatch):
+        """Gateway omits target_model; model.default must still select its cap."""
+        config = {
+            "model": {"provider": "dgx", "default": "chosen"},
+            "providers": {
+                "dgx": {
+                    "api": "http://127.0.0.1:8000/v1",
+                    "max_tokens": 16_000,
+                    "models": {"chosen": {"max_tokens": 8192}},
+                }
+            },
+        }
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.load_config", lambda: config
+        )
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider._try_resolve_from_custom_pool",
+            lambda *args, **kwargs: None,
+        )
+
+        runtime = resolve_runtime_provider(requested="dgx")
+
+        assert runtime["model"] == "chosen"
+        assert runtime["max_output_tokens"] == 8192
 
 
 class TestOutputCapRecoverySkipsCompression:

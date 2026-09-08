@@ -1056,6 +1056,8 @@ class TestCustomProviderCompatibility:
                             "model": "kimi-k2.6",
                             "models": model_map,
                             "context_length": 262144,
+                            "max_tokens": 8192,
+                            "max_output_tokens": 4096,
                             "rate_limit_delay": 0.25,
                             "discover_models": False,
                             "extra_body": {
@@ -1086,6 +1088,8 @@ class TestCustomProviderCompatibility:
         assert provider["default_model"] == "kimi-k2.6"
         assert provider["models"] == model_map
         assert provider["context_length"] == 262144
+        assert provider["max_tokens"] == 8192
+        assert provider["max_output_tokens"] == 4096
         assert provider["rate_limit_delay"] == 0.25
         assert provider["discover_models"] is False
         assert provider["extra_body"] == {

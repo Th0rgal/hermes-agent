@@ -645,7 +645,20 @@ class SessionManager:
         }
 
         try:
-            runtime = resolve_runtime_provider(requested=requested_provider or config_provider)
+            effective_model = model or default_model
+            runtime = resolve_runtime_provider(
+                requested=requested_provider or config_provider,
+                target_model=effective_model or None,
+            )
+            configured_max_tokens = (
+                model_cfg.get("max_tokens") if isinstance(model_cfg, dict) else None
+            )
+            if not (
+                isinstance(configured_max_tokens, int)
+                and not isinstance(configured_max_tokens, bool)
+                and configured_max_tokens > 0
+            ):
+                configured_max_tokens = runtime.get("max_output_tokens")
             kwargs.update(
                 {
                     "provider": runtime.get("provider"),
@@ -654,6 +667,7 @@ class SessionManager:
                     "api_key": runtime.get("api_key"),
                     "command": runtime.get("command"),
                     "args": list(runtime.get("args") or []),
+                    "max_tokens": configured_max_tokens,
                 }
             )
         except Exception:

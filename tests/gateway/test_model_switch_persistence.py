@@ -120,6 +120,21 @@ class TestApplySessionModelOverride:
         assert model == orig_model
         assert rt == orig_rt
 
+    def test_uncapped_override_clears_default_route_cap(self):
+        runner = _make_runner()
+        sk = build_session_key(_make_source())
+        runner._session_model_overrides[sk] = {
+            "model": "uncapped-model",
+            "max_tokens": None,
+        }
+
+        model, rt = runner._apply_session_model_override(
+            sk, "capped-model", {"max_tokens": 65_536}
+        )
+
+        assert model == "uncapped-model"
+        assert rt["max_tokens"] is None
+
 
 # ---------------------------------------------------------------------------
 # Tests: _is_intentional_model_switch
@@ -208,6 +223,7 @@ class TestOneTurnNeverPersisted:
                 api_key="sk-test",
                 base_url="https://openrouter.ai/api/v1",
                 api_mode="chat_completions",
+                max_output_tokens=8192,
                 runtime_capabilities={"openai_native_compaction": True},
                 provider_label="OpenRouter",
             ),
@@ -257,7 +273,7 @@ class TestOneTurnNeverPersisted:
         assert runner._session_model_overrides[sk]["capabilities"] == {
             "openai_native_compaction": True
         }
+        assert runner._session_model_overrides[sk]["max_tokens"] == 8192
         assert sk in runner._pending_one_turn_model_restores
         # ...but NEVER written through to the persistent session store.
         runner.async_session_store.set_model_override.assert_not_awaited()
-

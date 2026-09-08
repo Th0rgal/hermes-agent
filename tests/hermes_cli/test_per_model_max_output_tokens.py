@@ -196,6 +196,29 @@ class TestResolveEffectiveMaxOutputTokens:
         assert runtime["model"] == "chosen"
         assert runtime["max_output_tokens"] == 8192
 
+    def test_default_model_cap_does_not_leak_to_sibling_model(self, monkeypatch):
+        config = {
+            "model": {"provider": "dgx", "default": "model-a"},
+            "providers": {
+                "dgx": {
+                    "api": "http://127.0.0.1:8000/v1",
+                    "default_model": "model-a",
+                    "models": {"model-a": {"max_tokens": 65_536}, "model-b": {}},
+                }
+            },
+        }
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.load_config", lambda: config
+        )
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider._try_resolve_from_custom_pool",
+            lambda *args, **kwargs: None,
+        )
+
+        runtime = resolve_runtime_provider(requested="dgx", target_model="model-b")
+
+        assert "max_output_tokens" not in runtime
+
 
 class TestOutputCapRecoverySkipsCompression:
     """The output-cap recovery should skip compression when the reduced cap

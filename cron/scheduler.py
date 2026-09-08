@@ -7030,8 +7030,20 @@ def run_job(
         except Exception as e:
             logger.debug("Job '%s': SQLite session store not available: %s", job.get("id", "?"), e)
 
+        model_cfg = _cfg.get("model", {}) if isinstance(_cfg, dict) else {}
+        configured_max_tokens = (
+            model_cfg.get("max_tokens") if isinstance(model_cfg, dict) else None
+        )
+        if not (
+            isinstance(configured_max_tokens, int)
+            and not isinstance(configured_max_tokens, bool)
+            and configured_max_tokens > 0
+        ):
+            configured_max_tokens = runtime.get("max_output_tokens")
+
         agent = AIAgent(
             model=model,
+            max_tokens=configured_max_tokens,
             api_key=runtime.get("api_key"),
             base_url=runtime.get("base_url"),
             provider=runtime.get("provider"),

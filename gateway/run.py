@@ -3508,14 +3508,19 @@ def _resolve_gateway_model_context(model: Optional[str] = None) -> _GatewayModel
     )
 
 
-def _resolve_runtime_agent_kwargs_for_provider(provider: str) -> dict:
+def _resolve_runtime_agent_kwargs_for_provider(
+    provider: str, model: str | None = None
+) -> dict:
     """Resolve runtime credentials for a specific provider (e.g. from channel override)."""
     from hermes_cli.runtime_provider import (
         resolve_runtime_provider,
         format_runtime_provider_error,
     )
     try:
-        runtime = resolve_runtime_provider(requested=provider)
+        resolve_kwargs = {"requested": provider}
+        if model:
+            resolve_kwargs["target_model"] = model
+        runtime = resolve_runtime_provider(**resolve_kwargs)
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
     return {
@@ -8978,7 +8983,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     model = ch.model
                 if ch.provider:
                     runtime_kwargs = _resolve_runtime_agent_kwargs_for_provider(
-                        ch.provider
+                        ch.provider, ch.model or None
                     )
                     ch_runtime_model = runtime_kwargs.pop("model", None)
                     # Only adopt the provider's bundled model when the override
@@ -29537,7 +29542,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # credential-less override — _resolve_session_agent_runtime falls
             # back to env-based resolution and applies model/provider on top.
             try:
-                runtime = _resolve_runtime_agent_kwargs_for_provider(provider)
+                runtime = _resolve_runtime_agent_kwargs_for_provider(
+                    provider, persisted.get("model")
+                )
                 override["api_key"] = runtime.get("api_key")
                 override["api_mode"] = runtime.get("api_mode")
                 override["credential_pool"] = runtime.get("credential_pool")
@@ -29585,11 +29592,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "api_mode",
             "credential_pool",
             "capabilities",
-            "max_tokens",
         ):
             val = override.get(key)
             if val is not None:
                 runtime_kwargs[key] = val
+        # Unlike partial credential fields, an explicit None output cap is a
+        # meaningful clear when switching from a capped route to an uncapped
+        # one. Preserve key presence rather than filtering None.
+        if "max_tokens" in override:
+            runtime_kwargs["max_tokens"] = override.get("max_tokens")
         # request_overrides reflects the switched-to provider; apply whenever
         # the override recorded it (even as None) so switching to a provider
         # without configured overrides clears a stale value left by the

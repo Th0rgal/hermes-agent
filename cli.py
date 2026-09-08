@@ -10509,7 +10509,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                             capabilities=getattr(
                                 _reset_result, "runtime_capabilities", None
                             ),
-                            max_tokens=_reset_result.max_output_tokens,
+                            max_tokens=getattr(
+                                _reset_result, "max_output_tokens", None
+                            ),
                         )
                     self.model = _reset_result.new_model
                     self.provider = _reset_result.target_provider
@@ -11828,7 +11830,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             self.base_url = result.base_url
         if result.api_mode:
             self.api_mode = result.api_mode
-        self._runtime_max_output_tokens = result.max_output_tokens
+        self._runtime_max_output_tokens = getattr(
+            result, "max_output_tokens", None
+        )
 
         if self.agent is not None:
             try:
@@ -11839,7 +11843,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     base_url=result.base_url,
                     api_mode=result.api_mode,
                     capabilities=getattr(result, "runtime_capabilities", None),
-                    max_tokens=result.max_output_tokens,
+                    max_tokens=getattr(result, "max_output_tokens", None),
                 )
             except Exception as exc:
                 # The agent rolled itself back to the old working model/client.
@@ -12224,7 +12228,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             self.base_url = result.base_url
         if result.api_mode:
             self.api_mode = result.api_mode
-        self._runtime_max_output_tokens = result.max_output_tokens
+        self._runtime_max_output_tokens = getattr(
+            result, "max_output_tokens", None
+        )
 
         # Apply to running agent (in-place swap)
         if self.agent is not None:
@@ -12236,7 +12242,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     base_url=result.base_url,
                     api_mode=result.api_mode,
                     capabilities=getattr(result, "runtime_capabilities", None),
-                    max_tokens=result.max_output_tokens,
+                    max_tokens=getattr(result, "max_output_tokens", None),
                 )
             except Exception as exc:
                 # Agent rolled itself back; roll the CLI back too and abort so a

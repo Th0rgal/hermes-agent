@@ -2561,17 +2561,18 @@ def switch_model(
     # its runtime. Live agents must not retain the previous model's cap.
     max_output_tokens = None
     try:
-        switched_runtime = resolve_runtime_provider(
-            requested=target_provider,
-            target_model=new_model,
+        from hermes_cli.runtime_provider import (
+            _get_named_custom_provider,
+            _resolve_effective_max_output_tokens,
         )
-        candidate_cap = switched_runtime.get("max_output_tokens")
-        if (
-            isinstance(candidate_cap, int)
-            and not isinstance(candidate_cap, bool)
-            and candidate_cap > 0
-        ):
-            max_output_tokens = candidate_cap
+
+        cap_runtime: dict = {}
+        cap_provider = _get_named_custom_provider(target_provider)
+        if cap_provider:
+            _resolve_effective_max_output_tokens(
+                cap_provider, new_model, cap_runtime
+            )
+        max_output_tokens = cap_runtime.get("max_output_tokens")
     except Exception:
         pass
 

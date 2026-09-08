@@ -6815,7 +6815,7 @@ def _apply_model_switch(
                 base_url=result.base_url,
                 api_mode=result.api_mode,
                 capabilities=getattr(result, "runtime_capabilities", None),
-                max_tokens=result.max_output_tokens,
+                max_tokens=getattr(result, "max_output_tokens", None),
             )
         except Exception as exc:
             # The in-place swap rolled the agent back to the old working

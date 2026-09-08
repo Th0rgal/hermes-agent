@@ -2912,19 +2912,18 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # request budget.
         fb_max_tokens = None
         try:
-            from hermes_cli.runtime_provider import resolve_runtime_provider
-
-            fb_runtime = resolve_runtime_provider(
-                requested=fb_provider,
-                target_model=fb_model,
+            from hermes_cli.runtime_provider import (
+                _get_named_custom_provider,
+                _resolve_effective_max_output_tokens,
             )
-            candidate_cap = fb_runtime.get("max_output_tokens")
-            if (
-                isinstance(candidate_cap, int)
-                and not isinstance(candidate_cap, bool)
-                and candidate_cap > 0
-            ):
-                fb_max_tokens = candidate_cap
+
+            cap_runtime: dict = {}
+            cap_provider = _get_named_custom_provider(fb_provider)
+            if cap_provider:
+                _resolve_effective_max_output_tokens(
+                    cap_provider, fb_model, cap_runtime
+                )
+            fb_max_tokens = cap_runtime.get("max_output_tokens")
         except Exception:
             pass
         for cap_key in ("max_output_tokens", "max_tokens"):

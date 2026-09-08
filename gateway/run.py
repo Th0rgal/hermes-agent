@@ -3341,17 +3341,9 @@ def _resolve_runtime_agent_kwargs() -> dict:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
 
     model_cfg = _get_model_config()
-    max_tokens = None
-    _env_mt = os.environ.get("HERMES_MAX_TOKENS")
-    if _env_mt:
-        try:
-            max_tokens = int(_env_mt)
-        except (ValueError, TypeError):
-            max_tokens = None
-    elif isinstance(model_cfg, dict):
-        mt = model_cfg.get("max_tokens")
-        if isinstance(mt, int):
-            max_tokens = mt
+    from hermes_cli.max_tokens import resolve_global_max_tokens
+
+    max_tokens = resolve_global_max_tokens(model_cfg)
     # Fall back to a per-provider output cap (custom_providers max_output_tokens)
     # only when the documented global model.max_tokens isn't set, so the global
     # key always wins.
@@ -3508,16 +3500,31 @@ def _resolve_gateway_model_context(model: Optional[str] = None) -> _GatewayModel
     )
 
 
-def _resolve_runtime_agent_kwargs_for_provider(provider: str) -> dict:
+def _resolve_runtime_agent_kwargs_for_provider(
+    provider: str, model: str | None = None
+) -> dict:
     """Resolve runtime credentials for a specific provider (e.g. from channel override)."""
     from hermes_cli.runtime_provider import (
         resolve_runtime_provider,
         format_runtime_provider_error,
+        _get_model_config,
     )
     try:
-        runtime = resolve_runtime_provider(requested=provider)
+        resolve_kwargs = {"requested": provider}
+        if model:
+            resolve_kwargs["target_model"] = model
+        runtime = resolve_runtime_provider(**resolve_kwargs)
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
+    model_cfg = _get_model_config()
+    from hermes_cli.max_tokens import resolve_global_max_tokens
+
+    configured_cap = resolve_global_max_tokens(model_cfg)
+    max_tokens = (
+        configured_cap
+        if configured_cap is not None
+        else runtime.get("max_output_tokens")
+    )
     return {
         "api_key": runtime.get("api_key"),
         "base_url": runtime.get("base_url"),
@@ -3529,7 +3536,7 @@ def _resolve_runtime_agent_kwargs_for_provider(provider: str) -> dict:
         "credential_pool": runtime.get("credential_pool"),
         "request_overrides": dict(runtime.get("request_overrides") or {}),
         "capabilities": dict(runtime.get("capabilities") or {}),
-        "max_tokens": runtime.get("max_output_tokens"),
+        "max_tokens": max_tokens,
     }
 
 
@@ -3582,6 +3589,7 @@ def _try_resolve_fallback_provider() -> dict | None:
                     requested=entry.get("provider"),
                     explicit_base_url=entry.get("base_url"),
                     explicit_api_key=resolve_entry_api_key(entry),
+                    target_model=entry.get("model") or None,
                 )
                 # Log the literal `provider` key from config, not the resolved
                 # runtime category — an Ollama fallback resolves through the
@@ -3592,6 +3600,18 @@ def _try_resolve_fallback_provider() -> dict | None:
                     entry.get("provider") or runtime.get("provider"),
                     entry.get("model"),
                 )
+                model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+                max_tokens = (
+                    model_cfg.get("max_tokens")
+                    if isinstance(model_cfg, dict)
+                    else None
+                )
+                if not (
+                    isinstance(max_tokens, int)
+                    and not isinstance(max_tokens, bool)
+                    and max_tokens > 0
+                ):
+                    max_tokens = runtime.get("max_output_tokens")
                 return {
                     "api_key": runtime.get("api_key"),
                     "base_url": runtime.get("base_url"),
@@ -3601,9 +3621,9 @@ def _try_resolve_fallback_provider() -> dict | None:
                     "command": runtime.get("command"),
                     "args": list(runtime.get("args") or []),
                     "credential_pool": runtime.get("credential_pool"),
-                    "request_overrides": dict(runtime.get("request_overrides") or {}),
                     "model": entry.get("model"),
                     "request_overrides": runtime.get("request_overrides"),
+                    "max_tokens": max_tokens,
                 }
             except Exception as fb_exc:
                 logger.debug("Fallback entry %s failed: %s", entry.get("provider"), fb_exc)
@@ -8976,9 +8996,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if ch:
                 if ch.model:
                     model = ch.model
-                if ch.provider:
-                    runtime_kwargs = _resolve_runtime_agent_kwargs_for_provider(
+                if ch.provider or ch.model:
+                    target_provider = (
                         ch.provider
+                        or runtime_kwargs.get("requested_provider")
+                        or runtime_kwargs.get("provider")
+                    )
+                    runtime_kwargs = _resolve_runtime_agent_kwargs_for_provider(
+                        target_provider, ch.model or None
                     )
                     ch_runtime_model = runtime_kwargs.pop("model", None)
                     # Only adopt the provider's bundled model when the override
@@ -29537,7 +29562,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # credential-less override — _resolve_session_agent_runtime falls
             # back to env-based resolution and applies model/provider on top.
             try:
-                runtime = _resolve_runtime_agent_kwargs_for_provider(provider)
+                runtime = _resolve_runtime_agent_kwargs_for_provider(
+                    provider, persisted.get("model")
+                )
                 override["api_key"] = runtime.get("api_key")
                 override["api_mode"] = runtime.get("api_mode")
                 override["credential_pool"] = runtime.get("credential_pool")
@@ -29585,11 +29612,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "api_mode",
             "credential_pool",
             "capabilities",
-            "max_tokens",
         ):
             val = override.get(key)
             if val is not None:
                 runtime_kwargs[key] = val
+        # Unlike partial credential fields, an explicit None output cap is a
+        # meaningful clear when switching from a capped route to an uncapped
+        # one. Preserve key presence rather than filtering None.
+        if "max_tokens" in override:
+            runtime_kwargs["max_tokens"] = override.get("max_tokens")
         # request_overrides reflects the switched-to provider; apply whenever
         # the override recorded it (even as None) so switching to a provider
         # without configured overrides clears a stale value left by the

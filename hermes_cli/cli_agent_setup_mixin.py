@@ -72,6 +72,7 @@ class CLIAgentSetupMixin:
                 requested=self.requested_provider,
                 explicit_api_key=self._explicit_api_key,
                 explicit_base_url=self._explicit_base_url,
+                target_model=self.model or None,
             )
         except Exception as exc:
             _primary_exc = exc
@@ -90,6 +91,7 @@ class CLIAgentSetupMixin:
                         from hermes_cli.fallback_config import resolve_entry_api_key
 
                         _fb_kwargs = {"requested": _fb_provider}
+                        _fb_kwargs["target_model"] = _fb_model
                         if _fb.get("base_url"):
                             _fb_kwargs["explicit_base_url"] = _fb["base_url"]
                         _fb_api_key = resolve_entry_api_key(_fb)
@@ -171,6 +173,7 @@ class CLIAgentSetupMixin:
         self.acp_args = resolved_acp_args
         self._credential_pool = resolved_credential_pool
         self._provider_source = runtime.get("source")
+        self._runtime_max_output_tokens = runtime.get("max_output_tokens")
         self.api_key = api_key
         self.base_url = base_url
 
@@ -337,6 +340,9 @@ class CLIAgentSetupMixin:
             "command": self.acp_command,
             "args": list(self.acp_args or []),
             "credential_pool": getattr(self, "_credential_pool", None),
+            "max_output_tokens": getattr(
+                self, "_runtime_max_output_tokens", None
+            ),
         }
         route = {
             "model": self.model,
@@ -520,6 +526,9 @@ class CLIAgentSetupMixin:
                 "command": self.acp_command,
                 "args": list(self.acp_args or []),
                 "credential_pool": getattr(self, "_credential_pool", None),
+                "max_output_tokens": getattr(
+                    self, "_runtime_max_output_tokens", None
+                ),
             }
             effective_model = model_override or self.model
             self.agent = AIAgent(
@@ -532,7 +541,11 @@ class CLIAgentSetupMixin:
                 acp_command=runtime.get("command"),
                 acp_args=runtime.get("args"),
                 credential_pool=runtime.get("credential_pool"),
-                max_tokens=self.max_tokens,
+                max_tokens=(
+                    self.max_tokens
+                    if self.max_tokens is not None
+                    else runtime.get("max_output_tokens")
+                ),
                 max_iterations=self.max_turns,
                 run_budget_seconds=getattr(self, "run_budget_seconds", None),
                 enabled_toolsets=self.enabled_toolsets,

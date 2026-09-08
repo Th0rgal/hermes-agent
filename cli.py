@@ -5406,17 +5406,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # model (#56828). A ``moa:`` prefix wins over an explicit ``--provider``.
         _moa_provider_override, self.model = _normalize_moa_model(self.model)
         # Read max_tokens from config (env var override: HERMES_MAX_TOKENS)
-        _env_mt = os.environ.get("HERMES_MAX_TOKENS")
-        if _env_mt:
-            try:
-                self.max_tokens = int(_env_mt)
-            except (ValueError, TypeError):
-                self.max_tokens = None
-        elif isinstance(_model_config, dict):
-            _mt = _model_config.get("max_tokens")
-            self.max_tokens = _mt if isinstance(_mt, int) else None
-        else:
-            self.max_tokens = None
+        from hermes_cli.max_tokens import resolve_global_max_tokens
+
+        self.max_tokens = resolve_global_max_tokens(_model_config)
         # Auto-detect model from local server if still on default
         if self.model == _DEFAULT_CONFIG_MODEL:
             _base_url = (_model_config.get("base_url") or "") if isinstance(_model_config, dict) else ""
@@ -10509,6 +10501,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                             capabilities=getattr(
                                 _reset_result, "runtime_capabilities", None
                             ),
+                            max_tokens=getattr(
+                                _reset_result, "max_output_tokens", None
+                            ),
                         )
                     self.model = _reset_result.new_model
                     self.provider = _reset_result.target_provider
@@ -11638,6 +11633,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             "api_key": self.api_key,
             "base_url": self.base_url,
             "api_mode": self.api_mode,
+            "_runtime_max_output_tokens": getattr(
+                self, "_runtime_max_output_tokens", None
+            ),
             "agent_primary_runtime": copy.deepcopy(
                 getattr(agent, "_primary_runtime", None)
             ) if agent is not None else None,
@@ -11653,6 +11651,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             "requested_provider",
             "_explicit_api_key",
             "_explicit_base_url",
+            "_runtime_max_output_tokens",
             "api_key",
             "base_url",
             "api_mode",
@@ -11684,6 +11683,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     base_url=snapshot.get("base_url", ""),
                     api_mode=snapshot.get("api_mode", ""),
                     capabilities=snapshot.get("capabilities"),
+                    max_tokens=snapshot.get("_runtime_max_output_tokens"),
                 )
             except Exception as exc:
                 logger.warning("CLI one-turn model restore failed: %s", exc)
@@ -11804,6 +11804,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             "api_key": self.api_key,
             "base_url": self.base_url,
             "api_mode": self.api_mode,
+            "_runtime_max_output_tokens": getattr(
+                self, "_runtime_max_output_tokens", None
+            ),
         }
         self.model = result.new_model
         self.provider = result.target_provider
@@ -11819,6 +11822,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             self.base_url = result.base_url
         if result.api_mode:
             self.api_mode = result.api_mode
+        self._runtime_max_output_tokens = getattr(
+            result, "max_output_tokens", None
+        )
 
         if self.agent is not None:
             try:
@@ -11829,6 +11835,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     base_url=result.base_url,
                     api_mode=result.api_mode,
                     capabilities=getattr(result, "runtime_capabilities", None),
+                    max_tokens=getattr(result, "max_output_tokens", None),
                 )
             except Exception as exc:
                 # The agent rolled itself back to the old working model/client.
@@ -12195,6 +12202,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             "api_key": self.api_key,
             "base_url": self.base_url,
             "api_mode": self.api_mode,
+            "_runtime_max_output_tokens": getattr(
+                self, "_runtime_max_output_tokens", None
+            ),
         }
         self.model = result.new_model
         self.provider = result.target_provider
@@ -12210,6 +12220,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             self.base_url = result.base_url
         if result.api_mode:
             self.api_mode = result.api_mode
+        self._runtime_max_output_tokens = getattr(
+            result, "max_output_tokens", None
+        )
 
         # Apply to running agent (in-place swap)
         if self.agent is not None:
@@ -12221,6 +12234,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     base_url=result.base_url,
                     api_mode=result.api_mode,
                     capabilities=getattr(result, "runtime_capabilities", None),
+                    max_tokens=getattr(result, "max_output_tokens", None),
                 )
             except Exception as exc:
                 # Agent rolled itself back; roll the CLI back too and abort so a

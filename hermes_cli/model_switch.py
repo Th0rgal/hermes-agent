@@ -892,6 +892,7 @@ class ModelSwitchResult:
     api_key: str = ""
     base_url: str = ""
     api_mode: str = ""
+    max_output_tokens: Optional[int] = None
     request_overrides: Optional[dict] = None
     error_message: str = ""
     warning_message: str = ""
@@ -2556,6 +2557,37 @@ def switch_model(
     except Exception:
         request_overrides = None
 
+    # Resolve the destination's effective output cap along with the rest of
+    # its runtime. Live agents must not retain the previous model's cap.
+    max_output_tokens = None
+    try:
+        from hermes_cli.runtime_provider import (
+            _get_named_custom_provider,
+            _resolve_effective_max_output_tokens,
+        )
+
+        cap_runtime: dict = {}
+        cap_provider = _get_named_custom_provider(target_provider)
+        if cap_provider:
+            _resolve_effective_max_output_tokens(
+                cap_provider, new_model, cap_runtime
+            )
+        max_output_tokens = cap_runtime.get("max_output_tokens")
+    except Exception:
+        pass
+
+    # The documented global cap has higher precedence, matching construction.
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.max_tokens import resolve_global_max_tokens
+
+        model_cfg = (load_config() or {}).get("model", {})
+        configured_cap = resolve_global_max_tokens(model_cfg)
+        if configured_cap is not None:
+            max_output_tokens = configured_cap
+    except Exception:
+        pass
+
     # --- Build result ---
     return ModelSwitchResult(
         success=True,
@@ -2565,6 +2597,7 @@ def switch_model(
         api_key=api_key,
         base_url=base_url,
         api_mode=api_mode,
+        max_output_tokens=max_output_tokens,
         request_overrides=dict(request_overrides or {}),
         warning_message=" | ".join(warnings) if warnings else "",
         provider_label=provider_label,

@@ -6563,6 +6563,7 @@ def _snapshot_agent_model_runtime(agent) -> dict:
         "api_key": getattr(agent, "api_key", ""),
         "base_url": getattr(agent, "base_url", ""),
         "api_mode": getattr(agent, "api_mode", ""),
+        "max_tokens": getattr(agent, "max_tokens", None),
         "primary_runtime": copy.deepcopy(getattr(agent, "_primary_runtime", None)),
     }
 
@@ -6589,6 +6590,7 @@ def _restore_agent_model_runtime(agent, snapshot: dict | None) -> None:
             base_url=snapshot.get("base_url", ""),
             api_mode=snapshot.get("api_mode", ""),
             capabilities=snapshot.get("capabilities"),
+            max_tokens=snapshot.get("max_tokens"),
         )
 
 
@@ -6813,6 +6815,7 @@ def _apply_model_switch(
                 base_url=result.base_url,
                 api_mode=result.api_mode,
                 capabilities=getattr(result, "runtime_capabilities", None),
+                max_tokens=getattr(result, "max_output_tokens", None),
             )
         except Exception as exc:
             # The in-place swap rolled the agent back to the old working
@@ -8933,6 +8936,7 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
         "acp_command": getattr(agent, "acp_command", None) or None,
         "acp_args": getattr(agent, "acp_args", None) or None,
         "model": getattr(agent, "model", None) or _resolve_model(),
+        "max_tokens": getattr(agent, "max_tokens", None),
         "max_iterations": _cfg_max_turns(cfg, 25),
         "enabled_toolsets": getattr(agent, "enabled_toolsets", None)
         # Detached background tasks declare platform="tui" below: they have no
@@ -9412,9 +9416,17 @@ def _make_agent(
             if not resolution.selected_model:
                 raise RuntimeError("Auth fallback resolved without a model")
             model = resolution.selected_model
+    model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+    from hermes_cli.max_tokens import resolve_global_max_tokens
+
+    configured_max_tokens = resolve_global_max_tokens(model_cfg)
+    if configured_max_tokens is None:
+        configured_max_tokens = runtime.get("max_output_tokens")
+
     _pr = _load_provider_routing()
     agent = AIAgent(
         model=model,
+        max_tokens=configured_max_tokens,
         max_iterations=_cfg_max_turns(cfg, 500),
         provider=runtime.get("provider"),
         base_url=runtime.get("base_url"),

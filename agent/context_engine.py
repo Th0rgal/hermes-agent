@@ -26,12 +26,30 @@ Lifecycle:
 """
 
 from abc import ABC, abstractmethod
+import inspect
 from typing import Any, Dict, List, Optional
 
 from agent.redact import redact_sensitive_text
 
 
 MEMORY_CONTEXT_MAX_CHARS = 6_000
+
+
+def update_context_engine_model(engine: Any, **kwargs: Any) -> None:
+    """Call a context engine without breaking older plugin signatures."""
+    update = engine.update_model
+    try:
+        parameters = inspect.signature(update).parameters
+    except (TypeError, ValueError):
+        update(**kwargs)
+        return
+    if any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        update(**kwargs)
+        return
+    update(**{key: value for key, value in kwargs.items() if key in parameters})
 _MEMORY_CONTEXT_HEAD_CHARS = 4_000
 _MEMORY_CONTEXT_TAIL_CHARS = 1_500
 _MEMORY_CONTEXT_TRUNCATION_MARKER = "\n...[memory provider context truncated]...\n"

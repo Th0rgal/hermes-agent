@@ -2107,6 +2107,24 @@ class TestUpdateModelBudgets:
         assert comp.tail_token_budget == int(comp.threshold_tokens * comp.summary_target_ratio)
         assert comp.max_summary_tokens == min(int(10_000 * 0.05), 4000)
 
+    def test_explicit_none_clears_output_reservation(self):
+        from unittest.mock import patch
+
+        with patch(
+            "agent.context_compressor.get_model_context_length",
+            return_value=100_000,
+        ):
+            comp = ContextCompressor(
+                "model-a", max_tokens=8192, quiet_mode=True
+            )
+
+        comp.update_model("model-b", context_length=100_000, max_tokens=None)
+
+        assert comp.max_tokens is None
+        assert comp.threshold_tokens == int(
+            100_000 * comp.threshold_percent
+        )
+
     def test_default_mode_is_lean(self):
         """#tail-default-flip: an unconfigured compressor uses the lean tail.
 

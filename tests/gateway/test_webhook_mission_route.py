@@ -310,3 +310,50 @@ def test_session_db_for_profile_unwraps_the_async_door(monkeypatch):
     assert db is inner
     assert owned is False
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("folded", [False, True])
+async def test_controller_callback_persists_before_both_routing_paths(monkeypatch, folded):
+    from cron import jobs, controller_callbacks as relay
+    job = jobs.create_job("Check", "0 * * * *", deliver="project:verity-lido")
+    with jobs._jobs_lock():
+        rows = jobs.load_jobs()
+        rows[0]["controller"] = {"project": "verity-lido", "callback_relay": True,
+            "repositories": ["example/proof"], "permissions": [], "reserved_local_areas": []}
+        jobs.save_jobs(rows)
+    adapter = _make_adapter()
+    adapter.handle_message = AsyncMock()
+    if folded:
+        import tools.async_delegation as ad
+        registration = ad.register_mission_delegation(goal="Review", session_key="test", parent_session_id="parent")
+        ad.set_delegation_mission_id(registration["delegation_id"], MISSION)
+    payload = {"project": "verity-lido", "mission_id": MISSION, "status": "completed",
+               "type": "completed", "title": "Ready", "event_id": "controller-event"}
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == (200 if folded else 202)
+    assert len(relay.pending_callbacks(job["id"])["event_ids"]) == 1
+    await adapter._handle_webhook(_mock_request(payload))
+    assert len(relay.pending_callbacks(job["id"])["event_ids"]) == 1
+    assert adapter.handle_message.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_controller_inbox_failure_is_retryable_before_transport_dedupe(monkeypatch):
+    from cron import controller_callbacks as relay
+    adapter = _make_adapter()
+    adapter.handle_message = AsyncMock()
+    def unavailable(payload):
+        raise OSError("disk unavailable")
+    monkeypatch.setattr(relay, "enqueue_mission_callback", unavailable)
+    payload = {"project": "verity-lido", "mission_id": MISSION, "status": "completed",
+               "type": "completed", "title": "Ready", "event_id": "retry-inbox"}
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 503
+    monkeypatch.setattr(relay, "enqueue_mission_callback", lambda p:
+                        {"job_id": "j", "event_id": "e", "duplicate": False})
+    monkeypatch.setattr(adapter, "_maybe_fold_mission_delegation", lambda *a, **kw: None)
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 202
+    assert json.loads(response.body)["status"] == "controller_queued"
+    assert adapter.handle_message.await_count == 0

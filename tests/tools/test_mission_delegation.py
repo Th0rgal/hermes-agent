@@ -64,6 +64,9 @@ def test_fold_enqueues_from_ledger_not_payload(ad):
     assert evt["parent_session_id"] == "parent-123"
     assert evt["results"][0]["summary"] == "done"
     assert evt["results"][0]["mission_id"] == "m2"
+    assert ad._records[reg["delegation_id"]]["status"] == "completed"
+    assert ad._records[reg["delegation_id"]]["interrupt_fn"] is None
+    assert ad.active_count() == 0
 
 
 def test_exactly_once_after_delivery(ad):
@@ -140,3 +143,27 @@ def test_abandon_removes_phantom_slot(ad):
     assert ad.find_delegation_by_mission_id("m4") is not None
     ad.abandon_pending_delegation(reg["delegation_id"])
     assert ad.find_delegation_by_mission_id("m4") is None
+
+
+def test_fold_persistence_failure_keeps_live_slot(ad, monkeypatch):
+    reg = ad.register_mission_delegation(goal="g", session_key="sk")
+    ad.set_delegation_mission_id(reg["delegation_id"], "persist-fail")
+    def fail(*args, **kwargs):
+        raise OSError("full")
+    monkeypatch.setattr(ad, "_persist_completion", fail)
+    with pytest.raises(OSError):
+        ad.fold_mission_completion(mission_id="persist-fail", status="completed")
+    assert ad._records[reg["delegation_id"]]["status"] == "running"
+    assert ad.active_count() == 1
+
+
+def test_delivered_retry_reconciles_stale_live_record(ad):
+    reg = ad.register_mission_delegation(goal="g", session_key="sk")
+    did = reg["delegation_id"]
+    ad.set_delegation_mission_id(did, "stale-live")
+    ad.fold_mission_completion(mission_id="stale-live", status="completed")
+    assert ad.claim_completion_delivery(did, "claim")
+    ad.complete_completion_delivery(did, "claim")
+    ad._records[did]["status"] = "running"
+    assert ad.fold_mission_completion(mission_id="stale-live", status="completed") == "duplicate"
+    assert ad.active_count() == 0

@@ -569,6 +569,11 @@ def fold_mission_completion(
     if row is None:
         return "not_delegated"
     if (row.get("delivery_state") or "") != "pending":
+        # A retry may find a delivered durable result while this process still
+        # counts its original native delegation as running. No event is replayed.
+        if row.get("state") not in {"running", "stalling", "finalizing"}:
+            _begin_finalization(row["delegation_id"])
+            _finish_finalization(row["delegation_id"], row["state"])
         return "duplicate"
     try:
         task = json.loads(row.get("task_json") or "{}")
@@ -604,6 +609,14 @@ def fold_mission_completion(
     if live_transcript:
         combined["live_transcripts"] = [live_transcript]
     _push_batch_completion_event(event_record, combined, status)
+    # Native callbacks previously bypassed the normal batch finalizer, leaving
+    # _records running even after the durable result was terminal. Reconcile
+    # only after successful persistence; retain a live slot on persistence or
+    # import failure so shutdown/recovery cannot silently abandon the result.
+    persisted = find_delegation_by_mission_id(mission_id)
+    if persisted and persisted.get("state") == status:
+        _begin_finalization(row["delegation_id"])
+        _finish_finalization(row["delegation_id"], status)
     logger.info(
         "mission %s folded into delegation %s (status=%s)",
         mission_id, row["delegation_id"], status,

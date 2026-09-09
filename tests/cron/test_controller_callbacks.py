@@ -114,3 +114,33 @@ def test_alias_callback_matches_canonical_job(monkeypatch):
     monkeypatch.setattr(projects, "_project_alias_map", lambda: {"lido": "verity-lido"})
     job_id = controller()
     assert relay.enqueue_mission_callback(event(project="lido"))["job_id"] == job_id
+
+
+def test_corrupt_binding_does_not_abort_other_jobs_or_consume_its_inbox():
+    damaged = controller()
+    relay.enqueue_mission_callback(event())
+    good = controller("other-project")
+    with jobs._jobs_lock():
+        rows = jobs.load_jobs()
+        next(j for j in rows if j["id"] == damaged)["deliver"] = "project:eip-8282"
+        jobs.save_jobs(rows)
+    assert relay.enqueue_mission_callback(event(project="other-project"))["job_id"] == good
+    assert relay.wake_pending_controllers() == 1
+    damaged_row = next(j for j in jobs.load_jobs() if j["id"] == damaged)
+    assert not damaged_row["controller_callbacks"][0].get("handled_at")
+    assert good in [job["id"] for job in jobs.get_due_jobs()]
+    for affected in ("verity-lido", "eip-8282"):
+        with pytest.raises(ValueError, match="Malformed controller binding"):
+            relay.enqueue_mission_callback(event(project=affected))
+
+
+def test_nonobject_binding_quarantines_its_known_delivery_only():
+    damaged = controller()
+    with jobs._jobs_lock():
+        rows = jobs.load_jobs()
+        rows[0]["controller"] = "broken"
+        jobs.save_jobs(rows)
+    assert relay.wake_pending_controllers() == 0
+    with pytest.raises(ValueError, match="Malformed controller binding"):
+        relay.enqueue_mission_callback(event())
+    assert relay.enqueue_mission_callback(event(project="other-project")) is None

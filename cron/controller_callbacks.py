@@ -8,17 +8,48 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from typing import Any
 
 from cron import jobs
 
+logger = logging.getLogger(__name__)
+
 
 def controller_project(job: dict) -> str | None:
     binding = job.get("controller")
-    if not isinstance(binding, dict) or binding.get("callback_relay") is not True:
+    if binding is None:
+        return None
+    if not isinstance(binding, dict):
+        raise ValueError("job.controller must be an object")
+    if binding.get("callback_relay") is not True:
         return None
     from cron.controller_scope import controller_project as resolve_project
     return resolve_project(job)
+
+
+def _affected_projects(job: dict) -> set[str]:
+    """Conservative independent hints for quarantining conflicting bindings.
+
+    A broken project/delivery pair cannot swallow an unrelated project's input,
+    nor silently send either known affected project to a throwaway writer.
+    """
+    from cron.controller_scope import controller_project as resolve_project
+    binding = job.get("controller")
+    hints = [binding.get("project")] if isinstance(binding, dict) else []
+    deliver = job.get("deliver") or ""
+    targets = deliver if isinstance(deliver, (list, tuple)) else str(deliver).split(",")
+    hints.extend(target.strip().split(":", 1)[1] for target in targets
+                 if isinstance(target, str) and target.strip().startswith("project:"))
+    projects = set()
+    for hint in hints:
+        try:
+            value = resolve_project({"controller": {"project": hint}})
+            if value:
+                projects.add(value)
+        except ValueError:
+            continue
+    return projects
 
 
 def _eligible(job: dict) -> bool:
@@ -69,7 +100,17 @@ def enqueue_mission_callback(payload: dict[str, Any]) -> dict | None:
     event_id = hashlib.sha256(identity.encode()).hexdigest()
     with jobs._jobs_lock():
         records = jobs.load_jobs()
-        matches = [job for job in records if controller_project(job) == project]
+        matches = []
+        for candidate in records:
+            try:
+                binding = controller_project(candidate)
+            except ValueError:
+                logger.warning("Quarantined malformed controller job %s", candidate.get("id"))
+                if project in _affected_projects(candidate):
+                    raise ValueError(f"Malformed controller binding affects {project}")
+                continue
+            if binding == project:
+                matches.append(candidate)
         if not matches:
             return None
         if len(matches) != 1:
@@ -97,7 +138,12 @@ def wake_pending_controllers() -> int:
         records = jobs.load_jobs()
         count = 0
         for job in records:
-            if _eligible(job) and _pending(job):
+            try:
+                eligible = _eligible(job)
+            except ValueError:
+                logger.warning("Quarantined malformed controller job %s; pending input retained", job.get("id"))
+                continue
+            if eligible and _pending(job):
                 _wake(job)
                 count += 1
         if count:

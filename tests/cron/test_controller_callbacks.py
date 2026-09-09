@@ -144,3 +144,32 @@ def test_nonobject_binding_quarantines_its_known_delivery_only():
     with pytest.raises(ValueError, match="Malformed controller binding"):
         relay.enqueue_mission_callback(event())
     assert relay.enqueue_mission_callback(event(project="other-project")) is None
+
+
+def test_native_nested_execution_keeps_distinct_same_status_runs_without_event_id():
+    job_id = controller()
+    payload = {"project": "verity-lido", "mission_id": "mission-1", "status": "completed",
+               "type": "completed", "execution": {"run_id": "native-run-1", "generation": 1,
+               "state": "completed", "heartbeat_at": None, "scope_unit": None}}
+    first = relay.enqueue_mission_callback(payload)
+    assert relay.enqueue_mission_callback(payload)["duplicate"]
+    second = relay.enqueue_mission_callback({**payload, "execution": {
+        **payload["execution"], "run_id": "native-run-2", "generation": 2}})
+    assert second["event_id"] != first["event_id"]
+    row = next(j for j in jobs.load_jobs() if j["id"] == job_id)
+    assert [entry["run_id"] for entry in row["controller_callbacks"]] == ["native-run-1", "native-run-2"]
+
+
+@pytest.mark.parametrize("execution, legacy, expected", [
+    ({"generation": 0}, {}, "0"),
+    ({"generation": 7}, {}, "7"),
+    ({"run_id": "nested"}, {"run_id": "legacy"}, "legacy"),
+    (None, {"run_generation": 3}, "3"),
+    ("malformed", {"generation": 4}, "4"),
+])
+def test_native_execution_fallback_preserves_legacy_identity(execution, legacy, expected):
+    controller()
+    payload = {"project": "verity-lido", "mission_id": "mission-1", "status": "completed",
+               "execution": execution, **legacy}
+    relay.enqueue_mission_callback(payload)
+    assert jobs.load_jobs()[0]["controller_callbacks"][0]["run_id"] == expected

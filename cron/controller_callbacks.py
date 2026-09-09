@@ -93,8 +93,14 @@ def enqueue_mission_callback(payload: dict[str, Any]) -> dict | None:
     project = controller_project({"controller": {"project": project, "callback_relay": True}})
     mission = str(payload["mission_id"]).strip()
     status = extract_status(payload)
-    run = str(payload.get("run_id") or payload.get("run_generation")
-              or payload.get("generation") or "")
+    # Native control callbacks nest execution identity; retain compatibility
+    # with older top-level producers. Generation zero is a valid fallback.
+    execution = payload.get("execution")
+    execution = execution if isinstance(execution, dict) else {}
+    run = str(next((value for value in (
+        payload.get("run_id"), payload.get("run_generation"), payload.get("generation"),
+        execution.get("run_id"), execution.get("generation"),
+    ) if value is not None and value != ""), ""))
     native_event = extract_event_id(payload) or status
     identity = json.dumps([project, mission, run, native_event], separators=(",", ":"))
     event_id = hashlib.sha256(identity.encode()).hexdigest()

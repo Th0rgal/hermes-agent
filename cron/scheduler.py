@@ -5099,6 +5099,12 @@ def _build_job_prompt(
             stored prompt under a ``## Run Context`` header for this single
             fire only — never persisted to the job definition.
     """
+    from cron.controller_scope import check_prompt_budget, current_controller_scope, scope_from_job
+
+    controller_scope = current_controller_scope()
+    if controller_scope is None or controller_scope.job_id != job.get("id"):
+        controller_scope = scope_from_job(job)
+    controller_prefix = controller_scope.prompt_prefix() if controller_scope else ""
     user_prompt = str(job.get("prompt") or "")
     if extra_prompt:
         user_prompt = f"{user_prompt}\n\n## Run Context\n{extra_prompt}"
@@ -5242,20 +5248,21 @@ def _build_job_prompt(
 
     skill_names = [str(name).strip() for name in skills if str(name).strip()]
     if not skill_names:
-        return _scan_assembled_cron_prompt(
-            prompt,
+        assembled = _scan_assembled_cron_prompt(
+            controller_prefix + prompt,
             job,
             has_skills=False,
             has_injected_data=has_injected_data,
             user_prompt=user_prompt,
         )
+        return check_prompt_budget(controller_scope, assembled)
 
     from tools.skills_tool import skill_view
     from tools.skill_usage import bump_use
     from agent.skill_bundles import build_bundle_invocation_message, resolve_bundle_command_key
     from agent.skill_utils import normalize_skill_lookup_name
 
-    parts = []
+    parts = [controller_prefix.rstrip(), ""] if controller_prefix else []
     skipped: list[str] = []
     for skill_name in skill_names:
         # Cron jobs historically accepted only skill names here, but the CLI/gateway
@@ -5332,6 +5339,7 @@ def _build_job_prompt(
         # that boundary for the Anthropic cache planner (#81867).
         stable_prefix = append_user_instruction(parts, prompt)
     assembled = _scan_assembled_cron_prompt("\n".join(parts), job, has_skills=True)
+    check_prompt_budget(controller_scope, assembled)
     if stable_prefix and len(assembled) > len(stable_prefix) and assembled.startswith(stable_prefix):
         # Guarded because the injection scanner may sanitize (mutate) the
         # assembled bytes; a mismatch simply falls back to whole-message
@@ -6074,6 +6082,33 @@ def run_job(
     cancel_event: Optional[_CancelEventLike] = None,
     execution_id: Optional[str] = None,
 ) -> tuple[bool, str, str, Optional[str]]:
+    """Run under this job's opt-in authority, restoring the caller on every exit.
+
+    Existing worker hops copy ContextVars. An ordinary cron job explicitly
+    binds no controller authority even if called from a scoped controller.
+    """
+    from cron.controller_scope import ControllerScopeError, bind_controller_scope, scope_from_job
+
+    try:
+        scope = scope_from_job(job)
+    except ControllerScopeError as exc:
+        return False, f"Controller configuration rejected: {exc}", "", str(exc)
+    with bind_controller_scope(scope):
+        return _run_job(
+            job, defer_agent_teardown=defer_agent_teardown,
+            extra_prompt=extra_prompt, cancel_event=cancel_event,
+            execution_id=execution_id,
+        )
+
+
+def _run_job(
+    job: dict,
+    *,
+    defer_agent_teardown: Optional[list] = None,
+    extra_prompt: Optional[str] = None,
+    cancel_event: Optional[_CancelEventLike] = None,
+    execution_id: Optional[str] = None,
+) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
 
@@ -6353,7 +6388,16 @@ def run_job(
             )
             return True, silent_doc, SILENT_MARKER, None
 
+    callback_event_ids = []
     try:
+        if (job.get("controller") or {}).get("callback_relay") is True:
+            from cron.controller_callbacks import pending_callbacks
+
+            snapshot = pending_callbacks(job_id)
+            callback_event_ids = snapshot["event_ids"]
+            callback_prompt = snapshot["prompt"]
+            if callback_prompt:
+                extra_prompt = "\n\n".join(part for part in (extra_prompt, callback_prompt) if part)
         prompt = _build_job_prompt(
             job, prerun_script=prerun_script, extra_prompt=extra_prompt
         )
@@ -6380,6 +6424,11 @@ def run_job(
             "the threat pattern (`tools/cronjob_tools.py::_CRON_THREAT_PATTERNS`)."
         )
         return False, blocked_doc, "", str(block_exc)
+    except Exception as exc:
+        # Scope/budget and callback storage failures must not start an agent or
+        # consume pending callbacks. Ordinary prompt-building errors also keep
+        # the existing failure result contract instead of escaping the caller.
+        return False, f"Cron prompt preparation failed: {exc}", "", str(exc)
     if prompt is None:
         logger.info("Job '%s': script produced no output, skipping AI call.", job_name)
         return True, "", SILENT_MARKER, None
@@ -7356,6 +7405,13 @@ def run_job(
             "duration_ms": _audit_duration_ms,
             "error": None,
         })
+        # Cron can deliver a useful max-iteration summary while the agent is
+        # still incomplete. That legacy delivery success must not consume
+        # controller input; empty/abnormal turns also leave the inbox pending.
+        if callback_event_ids and result.get("completed") is True and final_response.strip():
+            from cron.controller_callbacks import acknowledge_callbacks
+
+            acknowledge_callbacks(job_id, callback_event_ids, success=True)
         return True, output, final_response, None
 
     except Exception as e:
@@ -8984,6 +9040,11 @@ def tick(
         except Exception as _wt_exc:
             logger.debug("Worktree maintenance dispatch failed: %s", _wt_exc)
 
+        # Feed callback completions through the existing controller job and its
+        # durable fire claim. Pause/drain gates above still own admission.
+        from cron.controller_callbacks import wake_pending_controllers
+
+        wake_pending_controllers()
         due_jobs = get_due_jobs()
 
         # Bound the in-flight set BEFORE the dedup guard is consulted, so a

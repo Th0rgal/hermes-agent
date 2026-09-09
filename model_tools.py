@@ -1569,6 +1569,18 @@ def handle_function_call(
                     )
             else:
                 def _dispatch(next_args: Dict[str, Any]) -> Any:
+                    # Validate the arguments that will actually execute, after
+                    # plugin hooks and execution middleware. Deferred tool_call
+                    # recurses here too; interactive sessions have no scope.
+                    from cron.controller_scope import guard_sandboxed_call
+
+                    next_args = guard_sandboxed_call(
+                        function_name, next_args,
+                        lambda name, args: registry.dispatch(
+                            name, args, task_id=task_id, session_id=session_id,
+                            user_task=user_task,
+                        ),
+                    )
                     return registry.dispatch(
                         function_name, next_args,
                         task_id=task_id,

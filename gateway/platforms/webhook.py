@@ -891,7 +891,8 @@ class WebhookAdapter(BasePlatformAdapter):
         return adapter, source
 
     async def _maybe_route_mission_status(
-        self, payload: dict, *, profile: Optional[str] = None
+        self, payload: dict, *, profile: Optional[str] = None,
+        controller_callback: bool = False,
     ) -> "Optional[web.Response]":
         """Append a mission-complete callback into the dedicated session.
 
@@ -969,7 +970,8 @@ class WebhookAdapter(BasePlatformAdapter):
                 should_wake_mission_callback,
             )
 
-            wake = bool(appended and live and should_wake_mission_callback(session_db, live))
+            wake = bool(appended and live and not controller_callback
+                        and should_wake_mission_callback(session_db, live))
         except Exception:
             logger.exception("[webhook] failed to append routed mission callback")
             return None
@@ -1214,6 +1216,19 @@ class WebhookAdapter(BasePlatformAdapter):
         # (the auth anchor). Unknown / non-delegated missions fall through to the
         # normal webhook path untouched.
         request_profile = profile if isinstance(profile, str) else None
+        # One durable handoff before either completion path and before the
+        # transport dedupe claim. Paused controllers retain input without
+        # being re-enabled; a failed conversation route cannot lose this work.
+        try:
+            from cron.controller_callbacks import enqueue_mission_callback
+
+            with self._profile_scope(profile):
+                _controller_callback = await asyncio.to_thread(
+                    enqueue_mission_callback, payload
+                )
+        except Exception:
+            logger.exception("[webhook] controller callback handoff failed; retry required")
+            return web.json_response({"status": "retry", "reason": "controller_inbox"}, status=503)
         _folded = self._maybe_fold_mission_delegation(payload, profile=request_profile)
         if _folded is not None:
             return _folded
@@ -1317,10 +1332,15 @@ class WebhookAdapter(BasePlatformAdapter):
         # Route sandboxed.sh mission-status events into the dedicated
         # conversation before minting a throwaway webhook session.
         _routed = await self._maybe_route_mission_status(
-            payload, profile=request_profile
+            payload, profile=request_profile,
+            controller_callback=_controller_callback is not None,
         )
         if _routed is not None:
             return _routed
+        if _controller_callback is not None:
+            # The existing controller is the sole operational owner. Do not
+            # spawn an isolated webhook writer when its chat route is absent.
+            return web.json_response({"status": "controller_queued", **_controller_callback}, status=202)
 
         # ── Direct delivery mode (deliver_only) ─────────────────
         # Skip the agent entirely — the rendered prompt IS the message we

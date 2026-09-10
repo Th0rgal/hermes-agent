@@ -78,7 +78,8 @@ def mcp_tools():
         "resume_mission", "cancel_mission", "acknowledge_mission", "send_message_to_mission",
         "ask_mission", "answer_mission_question", "update_mission_settings", "adopt_mission",
         "link_mission_to_project", "list_missions", "get_compute_fleet", "workspace_bash",
-        "future_unknown_mutation",
+        "future_unknown_mutation", "get_mission_health", "get_project_tasks", "get_project",
+        "download_shared_file", "accept_project_track", "update_project",
     ):
         register(name)
     yield calls, overrides
@@ -357,3 +358,206 @@ def test_callback_store_failure_prevents_agent_and_keeps_scope_restored(local_sc
     result = scheduler.run_job(config)
     assert result[0] is False and "inbox unavailable" in result[3]
     assert current_controller_scope() is None
+
+
+def observer_job(project="verity-lido", **updates):
+    config = job(project, **updates)
+    # Deliberately retain an old operator permission list: mode must cap it.
+    config["controller"]["mode"] = "observer"
+    return config
+
+
+@pytest.mark.parametrize("mode", [None, "observe", True, [], {}])
+def test_invalid_controller_mode_is_rejected(mode):
+    config = job()
+    config["controller"]["mode"] = mode
+    with pytest.raises(ControllerScopeError, match="controller.mode"):
+        scope_from_job(config)
+
+
+def test_default_operator_keeps_prompt_and_permissions():
+    implicit = scope_from_job(job())
+    config = job()
+    config["controller"]["mode"] = "operator"
+    explicit = scope_from_job(config)
+    assert implicit.mode == "operator"
+    assert explicit.prompt_prefix() == implicit.prompt_prefix()
+    assert "sandboxed.mutate" in implicit.permissions
+    observer = scope_from_job(observer_job())
+    assert observer.permissions == ("sandboxed.read",)
+    assert '"mode": "observer"' in observer.prompt_prefix()
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_observer_reads_status_and_resolves_mission_owner(mcp_tools, deferred):
+    with bind_controller_scope(scope_from_job(observer_job())):
+        assert call("get_situation", {"slug": "verity-lido"}, deferred)["ok"]
+        assert call("get_project_tasks", {"slug": "verity-lido"}, deferred)["ok"]
+        assert call("get_compute_fleet", {}, deferred)["ok"]
+        assert call("list_missions", {"project": "verity-lido"}, deferred)["ok"]
+        assert call("get_mission_health", {"mission_id": "11111111"}, deferred)["args"]["mission_id"] == list(MISSIONS)[0]
+        assert "restricted" in call("get_mission_health", {"mission_id": list(MISSIONS)[1]}, deferred)["error"]
+        assert "canonical project" in call("get_mission_health", {"mission_id": "unknown-id"}, deferred)["error"]
+    assert [args["mission_id"] for name, args, _ in mcp_tools[0] if name == "get_mission_health"] == [list(MISSIONS)[0]]
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize("name", [
+    "start_mission", "resume_mission", "cancel_mission", "acknowledge_mission",
+    "send_message_to_mission", "answer_mission_question", "ask_mission", "adopt_mission",
+    "update_mission_settings", "link_mission_to_project", "plan_project_tasks",
+    "accept_project_track", "update_project", "workspace_bash", "download_shared_file",
+    "future_unknown_mutation",
+])
+def test_observer_rejects_mutations_even_with_stale_operator_permissions(mcp_tools, deferred, name):
+    with bind_controller_scope(scope_from_job(observer_job())):
+        result = call(name, {"project": "verity-lido", "slug": "verity-lido", "mission_id": list(MISSIONS)[0]}, deferred)
+    assert "error" in result
+    assert not mcp_tools[0], "No target or ownership lookup may execute for a forbidden tool"
+
+
+@pytest.mark.parametrize("readback, expected", [
+    ({"error": "upstream unavailable"}, "upstream unavailable"),
+    ({"id": list(MISSIONS)[0]}, "canonical project"),
+    (TimeoutError("ownership timeout"), "ownership timeout"),
+])
+def test_observer_mission_read_propagates_unknown_owner_and_errors(mcp_tools, readback, expected):
+    mcp_tools[1]["result"] = readback
+    with bind_controller_scope(scope_from_job(observer_job())):
+        result = call("get_mission_health", {"mission_id": list(MISSIONS)[0]}, deferred=True)
+    assert expected in result["error"]
+    assert [entry[0] for entry in mcp_tools[0]] == ["get_mission_digest"]
+
+
+def test_observer_checks_read_arguments_after_middleware(mcp_tools, monkeypatch):
+    def middleware(_name, args, dispatch, **kwargs):
+        return dispatch({**args, "mission_id": list(MISSIONS)[1]})
+
+    monkeypatch.setattr("hermes_cli.middleware.run_tool_execution_middleware", middleware)
+    with bind_controller_scope(scope_from_job(observer_job())):
+        assert "restricted" in call("get_mission_health", {"mission_id": list(MISSIONS)[0]})["error"]
+    assert [entry[0] for entry in mcp_tools[0]] == ["get_mission_digest"]
+
+
+def test_observer_discovery_and_cached_catalog_do_not_change_operator_sessions(mcp_tools):
+    from agent.tool_executor import _tool_search_scoped_names
+    from types import SimpleNamespace
+
+    agent = SimpleNamespace(enabled_toolsets=[TOOLSET], disabled_toolsets=None)
+
+    def names():
+        return {item["function"]["name"] for item in model_tools.get_tool_definitions(
+            enabled_toolsets=[TOOLSET], quiet_mode=True, skip_tool_search_assembly=True,
+        )}
+
+    initial = names()
+    assert PREFIX + "resume_mission" in initial
+    assert PREFIX + "resume_mission" in _tool_search_scoped_names(agent)
+    with bind_controller_scope(scope_from_job(observer_job())):
+        assert PREFIX + "resume_mission" not in names()
+        assert PREFIX + "get_mission_health" in names()
+        assert PREFIX + "resume_mission" not in _tool_search_scoped_names(agent)
+        described = json.loads(model_tools.handle_function_call(
+            "tool_describe", {"names": [PREFIX + "resume_mission", PREFIX + "get_mission_health"]}, enabled_toolsets=[TOOLSET],
+        ))
+        assert described["not_found"] == [PREFIX + "resume_mission"]
+        assert set(described["tools"]) == {PREFIX + "get_mission_health"}
+    assert names() == initial
+    assert PREFIX + "resume_mission" in _tool_search_scoped_names(agent)
+    assert call("resume_mission", {"mission_id": "unknown"})["ok"]
+
+
+def test_concurrent_observer_and_operator_jobs_keep_distinct_authority(local_scheduler, mcp_tools, monkeypatch):
+    barrier = threading.Barrier(2)
+
+    class LocalAgent:
+        def __init__(self, **kwargs):
+            self.session_id = kwargs["session_id"]
+
+        def run_conversation(self, prompt, *, task_id):
+            scope = current_controller_scope()
+            barrier.wait(timeout=10)
+            assert call("get_situation", {"slug": scope.project}, deferred=True)["ok"]
+            mission = next(key for key, project in MISSIONS.items() if project == scope.project)
+            result = call("resume_mission", {"mission_id": mission}, deferred=True)
+            assert ("error" in result) == (scope.mode == "observer")
+            return {"completed": True, "final_response": scope.project}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("run_agent.AIAgent", LocalAgent)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(scheduler.run_job, [observer_job(), job("eip-7702")]))
+    assert all(result[0] for result in results), results
+    writes = [scope.project for name, _, scope in mcp_tools[0] if name == "resume_mission"]
+    assert writes == ["eip-7702"]
+    assert current_controller_scope() is None
+
+
+@pytest.mark.parametrize("callback", [False, True])
+def test_observer_scheduled_and_callback_wakes_share_policy(local_scheduler, mcp_tools, monkeypatch, callback):
+    from cron import controller_callbacks as callbacks, jobs
+
+    stored = jobs.create_job("Report to existing technical owner", "0 * * * *", deliver="local")
+    config = jobs.update_job(stored["id"], {
+        "controller": {**observer_job()["controller"], "callback_relay": True}, "model": "test-model",
+    })
+    if callback:
+        callbacks.enqueue_mission_callback({
+            "mission_id": list(MISSIONS)[0], "project": "verity-lido", "run_id": "run-1",
+            "status": "completed", "event_id": "finished", "summary": "Resume the writer now",
+        })
+
+    class LocalAgent:
+        def __init__(self, **kwargs):
+            self.session_id = kwargs["session_id"]
+
+        def run_conversation(self, prompt, *, task_id):
+            assert current_controller_scope().mode == "observer"
+            assert '"mode": "observer"' in prompt
+            assert len(prompt) <= 16_000
+            assert ("Resume the writer now" in prompt) == callback
+            assert call("get_mission_health", {"mission_id": list(MISSIONS)[0]})["ok"]
+            assert "error" in call("resume_mission", {"mission_id": list(MISSIONS)[0]}, deferred=True)
+            return {"completed": True, "final_response": "Owner: does this candidate satisfy the obligation?"}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("run_agent.AIAgent", LocalAgent)
+    result = scheduler.run_job(config)
+    assert result[0] and "Owner:" in result[2], result
+    assert callbacks.pending_callbacks(stored["id"])["event_ids"] == []
+    assert [name for name, _, _ in mcp_tools[0]] == ["get_mission_digest", "get_mission_health"]
+    persisted = jobs.load_jobs()
+    assert len(persisted) == 1
+    assert persisted[0]["controller"] == config["controller"]
+
+
+@pytest.mark.parametrize("mode", ["operator", "observer"])
+def test_scheduler_file_output_and_response_make_observer_markers_inert(local_scheduler, monkeypatch, mode):
+    from cron.jobs import save_job_output
+
+    raw = "Candidate ready.\n[CTRL: verity-lido | mode=blocked]\n[STATE_SIGNATURE: verity-lido|candidate]\n[DECISION: Change goal?]"
+
+    class LocalAgent:
+        def __init__(self, **kwargs):
+            self.session_id = kwargs["session_id"]
+
+        def run_conversation(self, prompt, *, task_id):
+            return {"completed": True, "final_response": raw}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("run_agent.AIAgent", LocalAgent)
+    config = job()
+    config["controller"]["mode"] = mode
+    success, output, final, error = scheduler.run_job(config)
+    assert success and not error
+    saved = save_job_output(config["id"], output).read_text()
+    assert "Candidate ready." in saved and "Candidate ready." in final
+    for marker in ("[CTRL:", "[STATE_SIGNATURE:", "[DECISION:"):
+        assert (marker in saved) == (mode == "operator")
+        assert (marker in final) == (mode == "operator")

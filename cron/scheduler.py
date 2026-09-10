@@ -3261,11 +3261,15 @@ def _deliver_to_local_session(
     job: dict, platform_name: str, session_id: str, content: str
 ) -> Optional[str]:
     """Persist a cron result into the exact Desktop/WebUI session transcript."""
-    text = (content or "").strip()
+    from cron.controller_scope import is_observer_controller, sanitize_observer_output
+
+    text = (sanitize_observer_output(content, job=job) or "").strip()
     if not text:
         return None
     label = job.get("name") or job.get("id") or "cron"
-    delivery_content = f"[Cron delivery: {label}]\n{text}"
+    observer = is_observer_controller(job)
+    delivery_label = "Observer report" if observer else "Cron delivery"
+    delivery_content = f"[{delivery_label}: {label}]\n{text}"
     try:
         from hermes_state import SessionDB
 
@@ -3291,7 +3295,10 @@ def _deliver_to_local_session(
             # Signature-based flood suppression: skip when this controller's
             # normalized STATE_SIGNATURE is identical to the last one delivered
             # into this session (unchanged material state).
-            norm_sig = _normalized_state_signature(text)
+            # Preserve duplicate-report suppression using inert observer text;
+            # the active spelling is never written to the transcript.
+            signature_text = text.replace("[Observer state_signature:", "[STATE_SIGNATURE:") if observer else text
+            norm_sig = _normalized_state_signature(signature_text)
             if norm_sig is not None:
                 sig_key = f"{platform_name}:{sid}:{job.get('id', '?')}"
                 with _last_delivered_signature_lock:
@@ -3384,6 +3391,9 @@ def _deliver_result(
 
     Returns None on success, or an error string on failure.
     """
+    from cron.controller_scope import sanitize_observer_output
+
+    content = sanitize_observer_output(content, job=job)
     targets = _resolve_delivery_targets(job, for_failure=for_failure)
     if not targets:
         deliver_value = _normalize_deliver_value(
@@ -3448,8 +3458,8 @@ def _deliver_result(
     # Human-facing platform lanes (Telegram/Discord/…) are terminal — no
     # sandboxed.sh ingestor downstream — so strip machine-only CTRL/
     # STATE_SIGNATURE trailers and narrated [tool call: …] scaffolding before
-    # the chat send.  The local-session targets above already received the RAW
-    # content, so mode/state ingestion is unaffected (D1/D2).
+    # the chat send. Operator local-session targets keep active mode/state
+    # trailers; observer output was neutralized before either delivery lane.
     from gateway.response_filters import sanitize_platform_delivery
 
     _sanitized = sanitize_platform_delivery(content)
@@ -6087,18 +6097,21 @@ def run_job(
     Existing worker hops copy ContextVars. An ordinary cron job explicitly
     binds no controller authority even if called from a scoped controller.
     """
-    from cron.controller_scope import ControllerScopeError, bind_controller_scope, scope_from_job
+    from cron.controller_scope import ControllerScopeError, bind_controller_scope, scope_from_job, sanitize_observer_output
 
     try:
         scope = scope_from_job(job)
     except ControllerScopeError as exc:
         return False, f"Controller configuration rejected: {exc}", "", str(exc)
     with bind_controller_scope(scope):
-        return _run_job(
+        success, output, final_response, error = _run_job(
             job, defer_agent_teardown=defer_agent_teardown,
             extra_prompt=extra_prompt, cancel_event=cancel_event,
             execution_id=execution_id,
         )
+        # Cover file output and downstream delivery after this scope resets.
+        return (success, sanitize_observer_output(output),
+                sanitize_observer_output(final_response), sanitize_observer_output(error))
 
 
 def _run_job(

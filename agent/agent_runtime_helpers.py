@@ -3524,6 +3524,13 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     tools. Used by the concurrent execution path; the sequential path retains
     its own inline invocation for backward-compatible display handling.
     """
+    # Direct _invoke_tool callers can bypass the batch executor, including its
+    # guard for tools owned by the agent rather than the registry.
+    from cron.controller_scope import observer_tool_error
+
+    observer_error = observer_tool_error(function_name)
+    if observer_error:
+        return json.dumps({"error": observer_error}, ensure_ascii=False)
     if not isinstance(function_args, dict):
         function_args = {}
 

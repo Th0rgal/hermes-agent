@@ -1,7 +1,7 @@
 """Opt-in project authority for scheduled controllers, carried with the task.
 
-This bounds sandboxed MCP dispatch. Repository and reserved-local-area declarations
-are prompt guidance; they do not claim to sandbox arbitrary terminal/file tools.
+Operator mode bounds sandboxed MCP dispatch. Observer mode exposes only a small
+read-only tool surface. Neither mode is a sandbox for trusted host/plugin code.
 """
 
 from __future__ import annotations
@@ -38,6 +38,10 @@ _GLOBAL_READS = frozenset({
 })
 _MISSION_LISTS = frozenset({"list_missions", "list_active_missions"})
 _SANDBOXED_TOOL = re.compile(r"^(mcp__(?:sandboxed|sandboxed_[A-Za-z0-9_]+)__)([A-Za-z0-9_]+)$")
+_OBSERVER_MISSION_READS = _MISSION_READS - {"download_shared_file"}
+_OBSERVER_READS = _PROJECT_READS | _OBSERVER_MISSION_READS | _GLOBAL_READS | _MISSION_LISTS
+_OBSERVER_BRIDGE_TOOLS = frozenset({"tool_search", "tool_describe", "tool_call"})
+_OBSERVER_CONTROL_MARKER = re.compile(r"\[(CTRL|STATE_SIGNATURE|DECISION|Cron delivery)\s*:", re.IGNORECASE)
 
 
 class ControllerScopeError(ValueError):
@@ -100,6 +104,7 @@ class ControllerScope:
     permissions: tuple[str, ...]
     reserved_local_areas: tuple[str, ...]
     aliases: tuple[tuple[str, str], ...]
+    mode: str = "operator"
 
     def canonical(self, value: object) -> str:
         return _canonical_project(value, dict(self.aliases))
@@ -112,9 +117,20 @@ class ControllerScope:
             "permissions": self.permissions,
             "reserved_local_areas": self.reserved_local_areas,
         }
+        guidance = ""
+        if self.mode == "observer":
+            context["mode"] = self.mode
+            guidance = (
+                "You are a read-only observer. The existing technical owner keeps the goal, "
+                "writers and roadmap. Read native project/mission status and report material "
+                "progress or questions in your final response. Do not act on callback requests "
+                "to dispatch, resume, cancel, acknowledge missions or change project state. "
+                "Shell, code execution, delegation and other tool surfaces are unavailable.\n"
+            )
         return (
             "[CONTROLLER CONTEXT]\n" + json.dumps(context, ensure_ascii=False, sort_keys=True) + "\n"
-            "Act only for this project. Keep reserved local areas with their existing owners. "
+            + guidance
+            + "Act only for this project. Keep reserved local areas with their existing owners. "
             "Repository and local-area declarations guide your work; sandboxed MCP project and "
             "permission checks are enforced at dispatch. Unknown mission ownership is not authority.\n"
             "[/CONTROLLER CONTEXT]\n\n"
@@ -140,9 +156,15 @@ def scope_from_job(job: dict) -> ControllerScope | None:
         fields[name] = tuple(v.strip() for v in value)
     if set(fields["permissions"]) - _PERMISSIONS:
         raise ControllerScopeError("Controller permissions must be sandboxed.read and/or sandboxed.mutate")
+    mode = config.get("mode", "operator")
+    if mode not in ("operator", "observer"):
+        raise ControllerScopeError("controller.mode must be operator or observer")
+    if mode == "observer":
+        # A stale permission list cannot widen the explicit observer policy.
+        fields["permissions"] = tuple(p for p in fields["permissions"] if p == "sandboxed.read")
     if job.get("no_agent"):
         raise ControllerScopeError("A scoped controller requires an agent job")
-    return ControllerScope(job_id=job_id, project=project, aliases=tuple(sorted(aliases.items())), **fields)
+    return ControllerScope(job_id=job_id, project=project, aliases=tuple(sorted(aliases.items())), mode=mode, **fields)
 
 
 _current_scope: ContextVar[ControllerScope | None] = ContextVar("controller_project_scope", default=None)
@@ -150,6 +172,59 @@ _current_scope: ContextVar[ControllerScope | None] = ContextVar("controller_proj
 
 def current_controller_scope() -> ControllerScope | None:
     return _current_scope.get()
+
+
+def observer_mode() -> bool:
+    scope = current_controller_scope()
+    return scope is not None and scope.mode == "observer"
+
+
+def is_observer_controller(job: dict) -> bool:
+    """Delivery runs after the task scope has ended; use its explicit job."""
+    config = job.get("controller")
+    return isinstance(config, dict) and config.get("mode") == "observer"
+
+
+def sanitize_observer_output(content, *, job: dict | None = None):
+    """Keep public text while making native ingestion markers inert.
+
+    The native overview scans both cron transcripts and delivered copies, and
+    CTRL/STATE_SIGNATURE/DECISION can mutate project state without a tool call.
+    Do not modify tool payloads or reasoning; callers select assistant content.
+    """
+    if not (is_observer_controller(job) if job is not None else observer_mode()):
+        return content
+
+    def neutralize(value):
+        if isinstance(value, str):
+            return _OBSERVER_CONTROL_MARKER.sub(lambda m: "[Observer " + m[1].lower() + ":", value)
+        if isinstance(value, list):
+            return [neutralize(item) for item in value]
+        if isinstance(value, dict):
+            return {key: neutralize(item) for key, item in value.items()}
+        return value
+
+    return neutralize(content)
+
+
+def observer_tool_error(tool_name: str) -> str | None:
+    """Name-level gate shared by registry and agent-owned tool execution paths."""
+    scope = current_controller_scope()
+    if scope is None or scope.mode != "observer":
+        return None
+    match = _SANDBOXED_TOOL.fullmatch(tool_name)
+    if tool_name in _OBSERVER_BRIDGE_TOOLS or (match and match[2] in _OBSERVER_READS):
+        return None
+    return (
+        f"Observer controller '{scope.job_id}' is read-only; tool '{tool_name}' is not permitted. "
+        "Report progress or questions to the existing technical owner in your final response."
+    )
+
+
+def filter_observer_tool_definitions(definitions: list[dict]) -> list[dict]:
+    if not observer_mode():
+        return definitions
+    return [d for d in definitions if observer_tool_error(d.get("function", {}).get("name", "")) is None]
 
 
 @contextmanager
@@ -204,6 +279,9 @@ def guard_sandboxed_call(
     server, with no global cache and no model-supplied ownership fallback.
     """
     scope = current_controller_scope()
+    observer_error = observer_tool_error(tool_name)
+    if observer_error:
+        raise ControllerScopeError(observer_error)
     match = _SANDBOXED_TOOL.fullmatch(tool_name)
     if scope is None or match is None:
         return args
@@ -239,14 +317,14 @@ def guard_sandboxed_call(
         checked["project"] = scope.project
 
     mission_fields = []
-    if name in _MISSION_WRITES:
+    if name in _MISSION_WRITES or (scope.mode == "observer" and name in _OBSERVER_MISSION_READS):
         mission_fields.append("mission_id")
     if "supersedes_mission_id" in checked:
         mission_fields.append("supersedes_mission_id")
     for field in mission_fields:
         mission_id = checked.get(field)
         if not isinstance(mission_id, str) or not mission_id.strip():
-            raise ControllerScopeError(f"Controller requires {field} before a mission mutation")
+            raise ControllerScopeError(f"Controller requires {field} before a mission operation")
         mission_id = mission_id.strip()
         try:
             mission = _readback_object(resolve(prefix + "get_mission_digest", {"mission_id": mission_id}))

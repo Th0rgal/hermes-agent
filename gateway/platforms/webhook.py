@@ -701,7 +701,9 @@ class WebhookAdapter(BasePlatformAdapter):
             )
         except Exception:
             logger.exception("[webhook] mission delegation fold failed")
-            return None
+            from aiohttp import web
+
+            return web.json_response({"status": "delegation_retry", "mission_id": mission_id}, status=503)
         finally:
             if token is not None:
                 try:
@@ -748,9 +750,21 @@ class WebhookAdapter(BasePlatformAdapter):
             summary=summary,
             error=str(error) if error else None,
             live_transcript=payload.get("transcript") or payload.get("transcript_url"),
+            execution=payload.get("execution"),
+            event_id=str(payload.get("event_id") or payload.get("delivery_id") or ""),
         )
         if outcome == "not_delegated":
             return None  # race: bound between the two lookups — fall through
+        if outcome in ("awaiting_enrollment", "reconciliation_required", "identity_mismatch"):
+            # A callback can beat the post-resume enrollment hook. Preserve it
+            # in the existing stash and ask the native sender to retry; neither
+            # an old delivered receipt nor the ordinary no-tools route owns it.
+            from gateway.platforms.mission_status_route import stash_unroutable_callback
+
+            stash_unroutable_callback(mission_id, payload)
+            return web.json_response(
+                {"status": outcome, "mission_id": mission_id}, status=503
+            )
         return web.json_response(
             {"status": "delivered", "mission_id": mission_id, "outcome": outcome}
         )

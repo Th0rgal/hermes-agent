@@ -16,6 +16,10 @@ back into this turn as a builtin worker, instead of opening a throwaway
 `webhook:mission-complete:` session. Controller/cron ticks are not enrolled:
 those sessions already report on their own cadence.
 
+An accepted conversational resume_mission arms a distinct receipt above the
+previous known native execution generation. Old callbacks keep their original
+receipt and cannot consume the resumed run's parent continuation.
+
 Seam: a ``tool_request`` middleware (rewrite args) plus a ``post_tool_call``
 hook (enroll after success). ``pre_tool_call`` cannot rewrite arguments.
 """
@@ -46,6 +50,10 @@ TARGET_TOOLS = frozenset(
 START_MISSION_TOOLS = frozenset(
     name for name in TARGET_TOOLS if name.endswith("start_mission")
 )
+RESUME_MISSION_TOOLS = frozenset({
+    "mcp__sandboxed_assistant__resume_mission",
+    "mcp__sandboxed-assistant__resume_mission",
+})
 
 # Mirrors the server-side validator in assistant-mcp: anything it would reject
 # is not worth sending, and a malformed id must never become a routing hint.
@@ -173,7 +181,7 @@ def stamp_origin_session(**kwargs: Any) -> Optional[Dict[str, Any]]:
 
 
 def enroll_after_start_mission(**kwargs: Any) -> None:
-    """After a successful conversational start_mission, bind the ledger row.
+    """Bind a conversational start or arm a confirmed resume's next receipt.
 
     Controller ticks (``HERMES_CRON_AUTO_DELIVER_CONTROL_SESSION`` set) are
     not enrolled: those missions report on the controller cadence. The
@@ -181,7 +189,7 @@ def enroll_after_start_mission(**kwargs: Any) -> None:
     needs the terminal notice.
     """
     tool_name = kwargs.get("tool_name")
-    if tool_name not in START_MISSION_TOOLS:
+    if tool_name not in START_MISSION_TOOLS | RESUME_MISSION_TOOLS:
         return None
     status = str(kwargs.get("status") or "ok").lower()
     if status not in ("ok", "success", ""):
@@ -203,8 +211,20 @@ def enroll_after_start_mission(**kwargs: Any) -> None:
     # if they were a builtin worker the user is waiting on.
     if _session_env(_CONTROL_SESSION_VAR).strip():
         return None
+    from cron.controller_scope import observer_mode
+
+    if observer_mode():
+        return None
 
     try:
+        if tool_name in RESUME_MISSION_TOOLS:
+            from tools.mission_delegation import enroll_conversational_resume_mission
+
+            enroll_conversational_resume_mission(
+                result=kwargs.get("result"), origin_session_id=origin,
+                tool_call_id=str(kwargs.get("tool_call_id") or ""),
+            )
+            return None
         from tools.mission_delegation import enroll_conversational_start_mission
 
         enroll_conversational_start_mission(
@@ -218,7 +238,7 @@ def enroll_after_start_mission(**kwargs: Any) -> None:
             model=args.get("model_override"),
         )
     except Exception:
-        logger.warning("start_mission enroll failed", exc_info=True)
+        logger.warning("mission enrollment hook failed for %s", tool_name, exc_info=True)
     return None
 
 

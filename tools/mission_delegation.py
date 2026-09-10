@@ -19,6 +19,7 @@ the row, never from the (untrusted) webhook payload.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 from typing import Any, Dict, Optional
 
@@ -410,6 +411,53 @@ _EARLY_CALLBACK_STATUS = {
 }
 
 
+def enroll_conversational_resume_mission(
+    *, result: Any, origin_session_id: str, tool_call_id: str,
+) -> Dict[str, Any]:
+    """Arm a distinct receipt only after a confirmed conversational resume.
+
+    The prior terminal run anchors the generation floor. Old unversioned
+    receipts require reconciliation; no timestamp or model-supplied run id is
+    used as a substitute for native execution identity.
+    """
+    from tools.async_delegation import arm_mission_resume, find_delegation_by_mission_id
+
+    text = result if isinstance(result, str) else json.dumps(result or "")
+    data = _extract_json_object(text)
+    if not data or data.get("resume_accepted") is not True or data.get("error") or data.get("isError"):
+        return {"status": "skipped", "reason": "resume_not_confirmed"}
+    mission_id = _extract_mission_id(text)
+    origin = (origin_session_id or "").strip()
+    if not mission_id or not origin or origin.startswith(_EPHEMERAL_ORIGIN_PREFIXES):
+        return {"status": "skipped", "reason": "no_durable_origin_or_mission"}
+    prior = find_delegation_by_mission_id(mission_id)
+    if prior is None:
+        return {"status": "reconciliation_required", "reason": "not_enrolled"}
+    owner = prior.get("origin_session_id") or prior.get("parent_session_id")
+    if owner != origin:
+        # Continuation rollover is explicit in the existing session store. A
+        # foreign caller cannot replace the ledger's parent using tool args.
+        from gateway.platforms.mission_status_route import resolve_live_session_id
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            if resolve_live_session_id(owner, db) != origin:
+                return {"status": "reconciliation_required", "reason": "parent_mismatch"}
+        finally:
+            db.close()
+    if not tool_call_id:
+        return {"status": "reconciliation_required", "reason": "missing_resume_identity"}
+    key = hashlib.sha256((origin + "\0" + tool_call_id).encode()).hexdigest()
+    enrolled = arm_mission_resume(mission_id=mission_id, resume_key=key)
+    if enrolled.get("status") in ("enrolled", "already_enrolled"):
+        _reconcile_early_callback(mission_id)
+    else:
+        logger.warning("resume_mission enrollment requires reconciliation for %s: %s",
+                       mission_id, enrolled.get("reason"))
+    return enrolled
+
+
 def _reconcile_early_callback(mission_id: str) -> None:
     """Fold a terminal webhook that arrived before this enroll created the row."""
     try:
@@ -443,14 +491,23 @@ def _reconcile_early_callback(mission_id: str) -> None:
         else None
     )
     try:
-        fold_mission_completion(
+        outcome = fold_mission_completion(
             mission_id=mission_id,
             status=mapped,
             summary=summary,
             error=str(error) if error else None,
             live_transcript=pending.get("transcript") or pending.get("transcript_url"),
+            execution=pending.get("execution"),
+            event_id=str(pending.get("event_id") or pending.get("delivery_id") or ""),
         )
+        if outcome in ("awaiting_enrollment", "reconciliation_required", "identity_mismatch"):
+            from gateway.platforms.mission_status_route import stash_unroutable_callback
+
+            stash_unroutable_callback(mission_id, pending)
     except Exception:
+        from gateway.platforms.mission_status_route import stash_unroutable_callback
+
+        stash_unroutable_callback(mission_id, pending)
         logger.warning(
             "early-callback reconcile failed for mission %s", mission_id, exc_info=True
         )

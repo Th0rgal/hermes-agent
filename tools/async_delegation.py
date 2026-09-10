@@ -572,7 +572,8 @@ def find_delegation_by_mission_id(mission_id: str) -> Optional[Dict[str, Any]]:
     return rows[0] if rows else None
 
 
-def arm_mission_resume(*, mission_id: str, resume_key: str) -> dict:
+def arm_mission_resume(*, mission_id: str, resume_key: str,
+                       expected_previous_execution: Optional[dict] = None) -> dict:
     """Reserve the next execution after an authenticated, accepted resume.
 
     The caller verifies its conversation against the existing ledger. All
@@ -594,6 +595,12 @@ def arm_mission_resume(*, mission_id: str, resume_key: str) -> dict:
             if row["mission_resume_key"] == resume_key:
                 return {"status": "already_enrolled", "delegation_id": row["delegation_id"]}
         prior = rows[0]
+        if expected_previous_execution is not None and (
+            prior["mission_run_id"] != expected_previous_execution["run_id"]
+            or prior["mission_generation"] != expected_previous_execution["generation"]
+            or not prior["event_json"]
+        ):
+            return {"status": "reconciliation_required", "reason": "prior_execution_changed"}
         if prior["mission_generation"] is None:
             return {"status": "reconciliation_required", "reason": "unknown_prior_execution"}
         if not prior["event_json"]:

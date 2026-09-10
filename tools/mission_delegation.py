@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
+import uuid
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -420,13 +421,54 @@ def enroll_conversational_resume_mission(
     receipts require reconciliation; no timestamp or model-supplied run id is
     used as a substitute for native execution identity.
     """
-    from tools.async_delegation import arm_mission_resume, find_delegation_by_mission_id
-
     text = result if isinstance(result, str) else json.dumps(result or "")
     data = _extract_json_object(text)
     if not data or data.get("resume_accepted") is not True or data.get("error") or data.get("isError"):
         return {"status": "skipped", "reason": "resume_not_confirmed"}
     mission_id = _extract_mission_id(text)
+    return _enroll_conversational_continuation(
+        mission_id=mission_id, origin_session_id=origin_session_id,
+        tool_call_id=tool_call_id,
+    )
+
+
+def enroll_conversational_message_mission(
+    *, result: Any, origin_session_id: str, tool_call_id: str,
+) -> Dict[str, Any]:
+    """Track only a native-confirmed idle message continuation.
+
+    Queued is not proof of a new run. Native admission captures the terminal
+    predecessor before delivery; active steering and legacy replies omit it.
+    The top-level id is a message UUID, so only mission_id identifies the worker.
+    """
+    text = result if isinstance(result, str) else json.dumps(result or "")
+    data = _extract_json_object(text)
+    if not data or data.get("message_accepted") is not True or data.get("error") or data.get("isError"):
+        return {"status": "skipped", "reason": "message_not_confirmed"}
+    previous = data.get("previous_execution")
+    if not isinstance(previous, dict):
+        return {"status": "skipped", "reason": "not_idle_continuation"}
+    try:
+        mission_id = str(uuid.UUID(data["mission_id"]))
+        run_id = str(uuid.UUID(previous["run_id"]))
+        generation = previous["generation"]
+        if type(generation) is not int or generation < 1:
+            raise ValueError("invalid generation")
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return {"status": "reconciliation_required", "reason": "invalid_previous_execution"}
+    return _enroll_conversational_continuation(
+        mission_id=mission_id, origin_session_id=origin_session_id,
+        tool_call_id=tool_call_id,
+        expected_previous_execution={"run_id": run_id, "generation": generation},
+    )
+
+
+def _enroll_conversational_continuation(
+    *, mission_id: Optional[str], origin_session_id: str, tool_call_id: str,
+    expected_previous_execution: Optional[dict] = None,
+) -> Dict[str, Any]:
+    from tools.async_delegation import arm_mission_resume, find_delegation_by_mission_id
+
     origin = (origin_session_id or "").strip()
     if not mission_id or not origin or origin.startswith(_EPHEMERAL_ORIGIN_PREFIXES):
         return {"status": "skipped", "reason": "no_durable_origin_or_mission"}
@@ -449,7 +491,8 @@ def enroll_conversational_resume_mission(
     if not tool_call_id:
         return {"status": "reconciliation_required", "reason": "missing_resume_identity"}
     key = hashlib.sha256((origin + "\0" + tool_call_id).encode()).hexdigest()
-    enrolled = arm_mission_resume(mission_id=mission_id, resume_key=key)
+    enrolled = arm_mission_resume(mission_id=mission_id, resume_key=key,
+                                  expected_previous_execution=expected_previous_execution)
     if enrolled.get("status") in ("enrolled", "already_enrolled"):
         _reconcile_early_callback(mission_id)
     else:

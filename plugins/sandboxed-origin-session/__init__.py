@@ -54,6 +54,10 @@ RESUME_MISSION_TOOLS = frozenset({
     "mcp__sandboxed_assistant__resume_mission",
     "mcp__sandboxed-assistant__resume_mission",
 })
+MESSAGE_MISSION_TOOLS = frozenset({
+    "mcp__sandboxed_assistant__send_message_to_mission",
+    "mcp__sandboxed-assistant__send_message_to_mission",
+})
 
 # Mirrors the server-side validator in assistant-mcp: anything it would reject
 # is not worth sending, and a malformed id must never become a routing hint.
@@ -189,7 +193,7 @@ def enroll_after_start_mission(**kwargs: Any) -> None:
     needs the terminal notice.
     """
     tool_name = kwargs.get("tool_name")
-    if tool_name not in START_MISSION_TOOLS | RESUME_MISSION_TOOLS:
+    if tool_name not in START_MISSION_TOOLS | RESUME_MISSION_TOOLS | MESSAGE_MISSION_TOOLS:
         return None
     status = str(kwargs.get("status") or "ok").lower()
     if status not in ("ok", "success", ""):
@@ -217,6 +221,14 @@ def enroll_after_start_mission(**kwargs: Any) -> None:
         return None
 
     try:
+        if tool_name in MESSAGE_MISSION_TOOLS:
+            from tools.mission_delegation import enroll_conversational_message_mission
+
+            enroll_conversational_message_mission(
+                result=kwargs.get("result"), origin_session_id=origin,
+                tool_call_id=str(kwargs.get("tool_call_id") or ""),
+            )
+            return None
         if tool_name in RESUME_MISSION_TOOLS:
             from tools.mission_delegation import enroll_conversational_resume_mission
 

@@ -28497,6 +28497,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return "retry"
         return "deliver"
 
+    async def _background_api_parent_busy(self, evt: dict) -> bool:
+        """Defer opted-in API completions before charging durable retry attempts."""
+        if evt.get("type") != "async_delegation" or not evt.get("origin_session_id"):
+            return False
+        adapter = self.adapters.get(Platform.API_SERVER)
+        resolve = getattr(adapter, "background_delegation_target", None)
+        busy = getattr(adapter, "background_delegation_busy", None)
+        if not callable(resolve) or not callable(busy):
+            return False
+        target = await asyncio.to_thread(resolve, evt["origin_session_id"])
+        return bool(target and busy(target))
+
     async def _deliver_completion_notification(
         self, synth_text: str, evt: dict,
     ) -> Optional[bool]:
@@ -28508,6 +28520,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         event or the event has no gateway route. No cross-process exactly-once
         guarantee is claimed.
         """
+        if await self._background_api_parent_busy(evt):
+            return False
         identity = self._completion_delivery_identity(evt)
         durable_claim_id = ""
         durable_delegation_id = ""
@@ -28917,6 +28931,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         are requeued here before returning).
         """
         from tools.process_registry import process_registry as _pr
+
+        # Check before claiming siblings too: a long foreground turn is a
+        # scheduling wait, not eight failed deliveries that exhaust the ledger.
+        if group and await self._background_api_parent_busy(group[0]):
+            return False
 
         deliverable: list[tuple[dict, str]] = []
         for evt in group:

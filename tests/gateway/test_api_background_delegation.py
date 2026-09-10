@@ -134,3 +134,41 @@ def test_policy_db_failure_does_not_break_ordinary_request_binding(db, monkeypat
     # The delivery-side lookup remains a retryable failure, not a false ack.
     with pytest.raises(RuntimeError, match="SessionDB unavailable"):
         asyncio.run(deliver_api_delegation(adapter, text="result", session_id="parent"))
+
+
+@pytest.mark.asyncio
+async def test_busy_batch_preserves_retry_budget_then_delivers(db, monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+    from hermes_state import AsyncSessionDB
+    from tests.gateway.test_background_process_notifications import _build_runner
+    from tests.gateway.test_completion_delivery import _async_event, _persist_pending_completion
+    from tools.async_delegation import get_durable_delegation
+    import gateway.wake as wake
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    runner._session_db = AsyncSessionDB(db)
+    adapter = adapter_for(db, ["parent"])
+    runner.adapters[Platform.API_SERVER] = adapter
+    adapter._active_run_agents["run"] = SimpleNamespace(session_id="parent")
+    events = []
+    for did in ("busy-first", "busy-second"):
+        evt = _async_event(did)
+        evt.update(origin_session_id="parent", parent_session_id="parent", session_key="run-key")
+        _persist_pending_completion(evt)
+        events.append(evt)
+    for _ in range(12):
+        assert await runner._deliver_async_delegation_group(events) is False
+        assert await runner._deliver_completion_notification("result", events[0]) is False
+    for evt in events:
+        row = get_durable_delegation(evt["delegation_id"])
+        assert row["delivery_attempts"] == 0
+        assert row["delivery_state"] == "pending"
+    adapter._active_run_agents.clear()
+    post = AsyncMock()
+    monkeypatch.setattr(wake, "_self_post_chat_completion", post)
+    assert await runner._deliver_async_delegation_group(events) is True
+    assert post.await_count == 1
+    for evt in events:
+        row = get_durable_delegation(evt["delegation_id"])
+        assert row["delivery_attempts"] == 1
+        assert row["delivery_state"] == "delivered"

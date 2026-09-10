@@ -120,3 +120,17 @@ async def test_mismatched_origin_cannot_wake_another_authorized_parent(db):
         await deliver_api_delegation(adapter, text="result", session_id="parent",
                                      evt={"parent_session_id": "other"})
     assert db.get_messages("parent") == []
+
+
+def test_policy_db_failure_does_not_break_ordinary_request_binding(db, monkeypatch):
+    adapter = adapter_for(db, ["parent"])
+    monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+    for sid in ("other", "parent"):
+        tokens = adapter._bind_api_server_session(chat_id=sid, session_id=sid)
+        try:
+            assert async_delivery_supported() is False
+        finally:
+            clear_session_vars(tokens)
+    # The delivery-side lookup remains a retryable failure, not a false ack.
+    with pytest.raises(RuntimeError, match="SessionDB unavailable"):
+        asyncio.run(deliver_api_delegation(adapter, text="result", session_id="parent"))

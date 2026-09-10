@@ -7441,6 +7441,19 @@ class APIServerAdapter(BasePlatformAdapter):
         """
         from gateway.session_context import set_session_vars
 
+        # Optional autonomy must not make ordinary API turns depend on an
+        # available policy DB. Delivery itself still raises/retries on lookup
+        # failures, rather than acknowledging an undelivered wake.
+        try:
+            background_delivery = bool(self.background_delegation_target(session_id))
+        except Exception:
+            logger.warning(
+                "Background delegation policy unavailable for session %s; "
+                "disabling async delivery for this request", session_id,
+                exc_info=True,
+            )
+            background_delivery = False
+
         return set_session_vars(
             platform="api_server",
             chat_id=chat_id,
@@ -7448,7 +7461,7 @@ class APIServerAdapter(BasePlatformAdapter):
             session_id=session_id,
             browser_control_principal=browser_control_principal,
             browser_control_transport_family=browser_control_transport_family,
-            async_delivery=bool(self.background_delegation_target(session_id)),
+            async_delivery=background_delivery,
             cron_session="",
         )
 

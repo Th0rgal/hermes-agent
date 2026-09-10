@@ -275,3 +275,87 @@ def test_fenced_resume_envelope_arms_confirmed_mutation(runtime, mission):
         origin_session_id=PARENT, tool_call_id="real-envelope",
     )
     assert result["status"] == "enrolled" and result["generation_floor"] == 2
+
+
+def message_reply(*, accepted=True, previous=True, queued=False):
+    reply = {"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "mission_id": MISSION,
+             "message_accepted": accepted, "queued": queued}
+    if previous:
+        reply["previous_execution"] = {"run_id": RUN1, "generation": 1}
+    return reply
+
+
+def send_message(runtime, reply, *, call_id="message-one", origin=PARENT, status="ok"):
+    runtime.plugin.enroll_after_start_mission(
+        tool_name="mcp__sandboxed_assistant__send_message_to_mission",
+        status=status, session_id=origin, args={"mission_id": MISSION},
+        tool_call_id=call_id, result=reply,
+    )
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_idle_message_continuation_uses_native_identity_and_same_parent(runtime, queued):
+    start(runtime)
+    callback(runtime, RUN1, 1)
+    # Native MCP keeps the HTTP response inside a fenced JSON result.
+    reply = json.dumps({"result": '<untrusted_tool_result>\n' +
+                        json.dumps(message_reply(queued=queued)) + '\n</untrusted_tool_result>'})
+    send_message(runtime, reply)
+    assert len(rows(runtime)) == 2
+    assert runtime.ad.find_delegation_by_mission_id(MISSION)["mission_generation"] == 2
+    assert callback(runtime, RUN2, 2)[1]["outcome"] == "folded"
+    send_message(runtime, reply)  # delayed duplicate hook cannot arm generation 3
+    assert len(rows(runtime)) == 2
+    events = [runtime.queue.get_nowait(), runtime.queue.get_nowait()]
+    assert all(event["parent_session_id"] == PARENT for event in events)
+
+
+@pytest.mark.parametrize("reply", [
+    {"id": MISSION, "queued": False},  # legacy id is never a mission identifier
+    message_reply(accepted=False),
+    message_reply(previous=False, queued=True),  # active queued steer
+    message_reply(previous=False, queued=False),  # accepted duplicate, no new run
+    {**message_reply(), "error": "rejected"},
+    {**message_reply(), "mission_id": None},
+    {**message_reply(), "previous_execution": {"run_id": RUN1, "generation": True}},
+    {**message_reply(), "previous_execution": {"run_id": RUN2, "generation": 1}},
+])
+def test_message_without_authentic_idle_admission_never_arms(runtime, reply):
+    start(runtime)
+    callback(runtime, RUN1, 1)
+    before = rows(runtime)
+    send_message(runtime, reply)
+    assert rows(runtime) == before
+
+
+def test_idle_message_callback_arriving_before_hook_is_reconciled(runtime):
+    start(runtime)
+    callback(runtime, RUN1, 1)
+    assert callback(runtime, RUN2, 2)[0] == 503
+    send_message(runtime, message_reply())
+    assert runtime.ad.find_delegation_by_mission_id(MISSION)["mission_run_id"] == RUN2
+    assert runtime.queue.qsize() == 2
+
+
+def test_delayed_message_ack_cannot_arm_from_a_newer_ledger_generation(runtime):
+    from tools.mission_delegation import enroll_conversational_message_mission
+
+    start(runtime)
+    callback(runtime, RUN1, 1)
+    resume(runtime)
+    callback(runtime, RUN2, 2)
+    before = rows(runtime)
+    outcome = enroll_conversational_message_mission(
+        result=message_reply(), origin_session_id=PARENT, tool_call_id="late-message",
+    )
+    assert outcome["reason"] == "prior_execution_changed"
+    assert rows(runtime) == before
+
+
+def test_message_hook_failure_or_foreign_parent_cannot_enroll(runtime):
+    start(runtime)
+    callback(runtime, RUN1, 1)
+    before = rows(runtime)
+    send_message(runtime, message_reply(), status="error")
+    send_message(runtime, message_reply(), origin="foreign-session")
+    assert rows(runtime) == before

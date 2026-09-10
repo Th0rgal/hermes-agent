@@ -352,6 +352,8 @@ def get_tool_definitions(
     # user-visible config edits that affect dynamic schemas (execute_code
     # mode, discord action allowlist, etc.) without needing an explicit
     # invalidate hook on every config-writer.
+    from cron.controller_scope import observer_mode
+
     cache_key = None
     if quiet_mode:
         try:
@@ -374,6 +376,7 @@ def get_tool_definitions(
                 _is_delegated_child_context(),
                 _is_dispatcher_owned_worker(),
                 profile_scope,
+                observer_mode(),
             )
         with _tool_defs_cache_lock:
             cached = _tool_defs_cache.get(cache_key) if cache_key is not None else None
@@ -646,6 +649,12 @@ def _compute_tool_definitions(
             print(f"🛠️  Final tool selection ({len(filtered_tools)} tools): {', '.join(tool_names)}")
         else:
             print("🛠️  No tools selected (all filtered out or unavailable)")
+
+    # Filter before progressive disclosure so both direct and deferred catalogs
+    # expose the same observer surface. Its mode is part of the cache key.
+    from cron.controller_scope import filter_observer_tool_definitions
+
+    filtered_tools = filter_observer_tool_definitions(filtered_tools)
 
     global _last_resolved_tool_names
     _last_resolved_tool_names = [t["function"]["name"] for t in filtered_tools]
@@ -1301,6 +1310,15 @@ def handle_function_call(
     # the dispatch seam so every replay keeps working; new schemas only
     # advertise the new names, so fresh sessions never see the old ones.
     function_name = _LEGACY_TOOL_ALIASES.get(function_name, function_name)
+
+    # Direct callers (including execute_code RPC) do not necessarily pass
+    # through the agent executor. Reject executable/non-read surfaces before
+    # any handler can run; deferred calls recurse through this gate too.
+    from cron.controller_scope import observer_tool_error
+
+    observer_error = observer_tool_error(function_name)
+    if observer_error:
+        return tool_error(observer_error)
 
     # ── Tool Search bridge dispatch ──────────────────────────────────
     # tool_search and tool_describe are pure catalog reads — handle them

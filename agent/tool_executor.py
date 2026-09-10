@@ -395,11 +395,14 @@ def _tool_search_scoped_names(agent) -> frozenset:
 
     enabled = getattr(agent, "enabled_toolsets", None)
     disabled = getattr(agent, "disabled_toolsets", None)
+    from cron.controller_scope import observer_mode
+
     cache_key = (
         _registry.current_scope_key(),
         getattr(_registry, "_generation", 0),
         frozenset(enabled) if enabled is not None else None,
         frozenset(disabled) if disabled is not None else None,
+        observer_mode(),
     )
     cached = getattr(agent, "_tool_search_scope_cache", None)
     if cached is not None and cached[0] == cache_key:
@@ -638,6 +641,14 @@ def _run_agent_tool_execution_middleware(
 
         block_message = scope_block
         block_error_type = "tool_scope_block"
+        if block_message is None:
+            # Agent-owned tools bypass model_tools (memory, delegation, etc.).
+            # Both sequential and concurrent calls pass through this gate.
+            from cron.controller_scope import observer_tool_error
+
+            block_message = observer_tool_error(function_name)
+            if block_message is not None:
+                block_error_type = "controller_observer_block"
         if block_message is None:
             block_error_type = "plugin_block"
 

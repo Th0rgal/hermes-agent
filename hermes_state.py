@@ -12921,6 +12921,10 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         tool_calls_json = json.dumps(tool_calls) if tool_calls else None
         # Multimodal content (list of parts) must be JSON-encoded: sqlite3
         # cannot bind list/dict parameters directly.
+        if role == "assistant":
+            from cron.controller_scope import sanitize_observer_output
+
+            content = sanitize_observer_output(content)
         stored_content = self._encode_content(content)
 
         message_timestamp = time.time()
@@ -13078,6 +13082,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         if not messages:
             return 0
 
+        from cron.controller_scope import sanitize_observer_output
+
         if chunk_rows is not None and len(messages) > chunk_rows:
             inserted_total = 0
             for start in range(0, len(messages), chunk_rows):
@@ -13104,9 +13110,20 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 conn,
                 target_id,
                 messages,
-                encode_content_fn=self._encode_content,
+                # Repair only writes assistant content into an empty row.
+                # Normalize the storage projection without changing the live
+                # conversation (including its already cached prefix).
+                encode_content_fn=lambda content: self._encode_content(sanitize_observer_output(content)),
                 decode_content_fn=self._decode_content,
             )
+            for message in messages:
+                if message.get("role") == "assistant" and "_canonical_content" in message:
+                    original = message.get("content")
+                    canonical = message["_canonical_content"]
+                    if canonical != original and canonical == sanitize_observer_output(original):
+                        # This is our own inert storage projection, not a
+                        # different concurrent winner to copy into live cache.
+                        message.pop("_canonical_content")
             inserted = 0
             tool_calls_total = 0
             if inserted_rows:
@@ -13425,6 +13442,11 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         tool_calls_total = 0
         for msg in messages:
             role = msg.get("role", "unknown")
+            content = msg.get("content")
+            if role == "assistant":
+                from cron.controller_scope import sanitize_observer_output
+
+                content = sanitize_observer_output(content)
             tool_calls = msg.get("tool_calls")
             message_timestamp = now_ts
             if msg.get("timestamp") is not None:
@@ -13473,7 +13495,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 (
                     session_id,
                     role,
-                    self._encode_content(msg.get("content")),
+                    self._encode_content(content),
                     msg.get("tool_call_id"),
                     tool_calls_json,
                     _scrub_surrogates(msg.get("tool_name")),

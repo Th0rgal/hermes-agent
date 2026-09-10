@@ -16,7 +16,7 @@ Opt in on an existing agent job:
     "mode": "observer",
     "callback_relay": true,
     "permissions": ["sandboxed.read"],
-    "repositories": ["lfglabs-dev/verity"],
+    "repositories": ["lfglabs-dev/lido-srv3-proof-closure"],
     "reserved_local_areas": ["Existing technical owner's worktree and durable goal"]
   }
 }

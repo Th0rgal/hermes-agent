@@ -194,6 +194,13 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
         # Hermes itself created, and parent/origin are read from the row, never
         # from the (untrusted) webhook payload. See tools/mission_delegation.py.
         ("mission_id", "TEXT"),
+        # One receipt per native execution. A resumed row initially has a
+        # generation floor and no run id; only a matching native callback can
+        # bind the actual run. Legacy rows remain NULL and are not rearmed.
+        ("mission_run_id", "TEXT"),
+        ("mission_generation", "INTEGER"),
+        ("mission_event_id", "TEXT"),
+        ("mission_resume_key", "TEXT"),
     ):
         if name not in columns:
             conn.execute(f"ALTER TABLE async_delegations ADD COLUMN {name} {sql_type}")
@@ -201,6 +208,11 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_async_delegations_mission_id "
         "ON async_delegations(mission_id)"
     )
+    for field in ("mission_run_id", "mission_generation", "mission_resume_key"):
+        conn.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS idx_async_delegations_{field} "
+            f"ON async_delegations(mission_id, {field}) WHERE {field} IS NOT NULL"
+        )
 
 
 @contextmanager
@@ -271,7 +283,7 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
             # Mission-backed delegation fields (backend="mission"): persisted so
             # the webhook fork can reconstruct the completion event and so a
             # restart-recovered mission slot keeps its provenance.
-            "backend", "workspace_id", "project",
+            "backend", "workspace_id", "project", "mission_receipt_version",
         )
         if key in record
     }
@@ -336,16 +348,22 @@ def _prune_durable_records() -> None:
             )
 
 
-def _persist_completion(event: Dict[str, Any], result: Dict[str, Any]) -> None:
+def _persist_completion(event: Dict[str, Any], result: Dict[str, Any]) -> bool:
     now = time.time()
     with _DB_LOCK, _transaction() as conn:
-        conn.execute(
+        # A repeated native terminal event must not overwrite a pending or
+        # claimed receipt, nor queue it twice across competing processes.
+        once = " AND event_json IS NULL" if event.get("mission_completion") else ""
+        cur = conn.execute(
             """UPDATE async_delegations SET state=?, completed_at=?, updated_at=?,
-               event_json=?, result_json=?, delivery_state='pending'
-               WHERE delegation_id=?""",
+               event_json=?, result_json=?, delivery_state='pending',
+               mission_event_id=CASE WHEN ? THEN ? ELSE mission_event_id END
+               WHERE delegation_id=?""" + once,
             (event.get("status", "completed"), event.get("completed_at", now), now,
-             json.dumps(event), json.dumps(result), event["delegation_id"]),
+             json.dumps(event), json.dumps(result), bool(event.get("mission_completion")),
+             event.get("mission_event_id"), event["delegation_id"]),
         )
+        return cur.rowcount == 1
 
 
 def _note_delivery_attempt(delegation_id: str) -> None:
@@ -368,12 +386,22 @@ def recover_abandoned_delegations() -> int:
         rows = conn.execute(
             """SELECT delegation_id, origin_session, origin_ui_session_id,
                       parent_session_id, dispatched_at, owner_pid,
-                      owner_started_at, task_json, origin_session_id
+                      owner_started_at, task_json, origin_session_id, mission_id,
+                      mission_generation
                FROM async_delegations WHERE state IN ('running','finalizing')"""
         ).fetchall()
         for row in rows:
             (delegation_id, session_key, origin_ui, parent_id, dispatched_at,
-             pid, started, task_json, origin_session_id) = row
+             pid, started, task_json, origin_session_id, mission_id, mission_generation) = row
+            task = json.loads(task_json or "{}")
+            if mission_id and task.get("backend") == "mission" and (
+                mission_generation is not None or task.get("mission_receipt_version") == 1
+            ):
+                # The gateway does not own the external runner process. Its
+                # restart is not a terminal result, including before the first
+                # callback has supplied an execution identity. Preserve the
+                # pending native receipt and its authenticated callback route.
+                continue
             live = False
             if pid:
                 live = _pid_exists(int(pid))
@@ -381,7 +409,6 @@ def recover_abandoned_delegations() -> int:
                     live = get_process_start_time(int(pid)) == int(started)
             if live:
                 continue
-            task = json.loads(task_json or "{}")
             event = {
                 "type": "async_delegation", "delegation_id": delegation_id,
                 "session_key": session_key, "origin_ui_session_id": origin_ui,
@@ -511,35 +538,157 @@ def claim_event_delivery(evt: Dict[str, Any], consumer: str) -> Optional[str]:
     return claim_id if claim_completion_delivery(delegation_id, claim_id) else None
 
 
+_MISSION_ROW_FIELDS = (
+    "delegation_id", "parent_session_id", "origin_session",
+    "origin_session_id", "origin_ui_session_id", "delivery_state",
+    "state", "task_json", "event_json", "mission_id", "mission_run_id",
+    "mission_generation", "mission_event_id", "mission_resume_key", "dispatched_at",
+)
+
+
+def _mission_rows(conn, mission_id: str) -> list[dict]:
+    rows = conn.execute(
+        f"SELECT {', '.join(_MISSION_ROW_FIELDS)} FROM async_delegations "
+        "WHERE mission_id=? ORDER BY mission_generation DESC, dispatched_at DESC, delegation_id",
+        (mission_id,),
+    ).fetchall()
+    return [dict(zip(_MISSION_ROW_FIELDS, row)) for row in rows]
+
+
 def find_delegation_by_mission_id(mission_id: str) -> Optional[Dict[str, Any]]:
-    """Resolve a sandboxed.sh ``mission_id`` to the delegation row Hermes created
-    for it (backend="mission"), or None.
+    """Return the newest enrolled execution of a native mission, or None.
 
     This is the authentication anchor for the webhook fork: a mission result is
     folded into a parent turn ONLY when this returns a row, and the caller must
     read ``parent_session_id``/``origin_session_id`` from the returned row —
-    never from the (untrusted) webhook payload. Returns the routing fields plus
-    ``delivery_state`` so the caller can ignore already-delivered/dropped rows.
+    never from the (untrusted) webhook payload. Completion lookup additionally
+    matches the execution identity; this general lookup is for enrollment/UI.
     """
     mid = (mission_id or "").strip()
     if not mid:
         return None
     with _DB_LOCK, _transaction() as conn:
-        row = conn.execute(
-            """SELECT delegation_id, parent_session_id, origin_session,
-                      origin_session_id, origin_ui_session_id, delivery_state,
-                      state, task_json, event_json, mission_id
-               FROM async_delegations WHERE mission_id=?""",
-            (mid,),
-        ).fetchone()
-    if row is None:
-        return None
-    keys = (
-        "delegation_id", "parent_session_id", "origin_session",
-        "origin_session_id", "origin_ui_session_id", "delivery_state",
-        "state", "task_json", "event_json", "mission_id",
-    )
-    return dict(zip(keys, row))
+        rows = _mission_rows(conn, mid)
+    return rows[0] if rows else None
+
+
+def arm_mission_resume(*, mission_id: str, resume_key: str) -> dict:
+    """Reserve the next execution after an authenticated, accepted resume.
+
+    The caller verifies its conversation against the existing ledger. All
+    routing/task data here are copied from that ledger, never the tool args or
+    callback. The old receipt and its current delivery claim remain untouched.
+    """
+    from gateway.status import get_process_start_time
+
+    if not resume_key:
+        return {"status": "reconciliation_required", "reason": "missing_resume_identity"}
+    now = time.time()
+    pid = __import__("os").getpid()
+    with _records_lock, _DB_LOCK, _transaction() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = _mission_rows(conn, mission_id)
+        if not rows:
+            return {"status": "reconciliation_required", "reason": "not_enrolled"}
+        for row in rows:
+            if row["mission_resume_key"] == resume_key:
+                return {"status": "already_enrolled", "delegation_id": row["delegation_id"]}
+        prior = rows[0]
+        if prior["mission_generation"] is None:
+            return {"status": "reconciliation_required", "reason": "unknown_prior_execution"}
+        if not prior["event_json"]:
+            return {"status": "already_enrolled", "delegation_id": prior["delegation_id"]}
+        # The completed predecessor may still have a delivery claim: the
+        # parent can resume it while handling that very completion.
+        generation = prior["mission_generation"] + 1
+        did = _new_delegation_id()
+        task = json.loads(prior["task_json"] or "{}")
+        conn.execute(
+            """INSERT INTO async_delegations
+               (delegation_id, origin_session, origin_ui_session_id,
+                parent_session_id, state, dispatched_at, updated_at,
+                delivery_state, owner_pid, owner_started_at, task_json,
+                origin_session_id, mission_id, mission_generation, mission_resume_key)
+               VALUES (?, ?, ?, ?, 'running', ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)""",
+            (did, prior["origin_session"], prior["origin_ui_session_id"],
+             prior["parent_session_id"], now, now, pid, get_process_start_time(pid),
+             prior["task_json"], prior["origin_session_id"], mission_id, generation, resume_key),
+        )
+        record = {
+            **task, "delegation_id": did, "session_key": prior["origin_session"],
+            "parent_session_id": prior["parent_session_id"],
+            "origin_session_id": prior["origin_session_id"],
+            "origin_ui_session_id": prior["origin_ui_session_id"],
+            "status": "running", "dispatched_at": now, "completed_at": None,
+        }
+    # Only publish the local slot after SQLite commit succeeded. A resume is
+    # already admitted remotely; tracking it must not fail on the start gate's
+    # capacity counter or leave it unowned because other children exist.
+    with _records_lock:
+        # A callback may have completed between commit and publication. Read
+        # its state while holding the local record lock; a concurrent finalizer
+        # will either precede this read or update the record after publication.
+        with _DB_LOCK, _transaction() as conn:
+            persisted = conn.execute(
+                "SELECT state FROM async_delegations WHERE delegation_id=?", (did,)
+            ).fetchone()
+        if persisted:
+            record["status"] = persisted[0]
+        _records[did] = record
+    return {"status": "enrolled", "delegation_id": did, "mission_id": mission_id,
+            "generation_floor": generation}
+
+
+def _mission_completion_row(mission_id: str, execution: Optional[dict], event_id: str):
+    """Bind a terminal callback to one reserved execution, atomically."""
+    identity = None
+    if execution is not None:
+        if not isinstance(execution, dict):
+            return None, "identity_mismatch"
+        try:
+            run_id = str(uuid.UUID(execution["run_id"]))
+            generation = execution["generation"]
+            if type(generation) is not int or generation < 1:
+                raise ValueError("invalid generation")
+            identity = (run_id, generation)
+        except (KeyError, ValueError, TypeError, AttributeError):
+            return None, "identity_mismatch"
+    with _DB_LOCK, _transaction() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = _mission_rows(conn, mission_id)
+        if not rows:
+            return None, "not_delegated"
+        if event_id and any(row["mission_event_id"] == event_id and row["event_json"] for row in rows):
+            return None, "duplicate"
+        if identity is None:
+            if any(row["mission_generation"] is not None for row in rows):
+                return None, "reconciliation_required"
+            return rows[0], None  # old producers/first deliveries retain their contract
+        run_id, generation = identity
+        for row in rows:
+            if row["mission_run_id"] == run_id:
+                if row["mission_generation"] != generation:
+                    return None, "identity_mismatch"
+                return row, None
+            if row["mission_generation"] == generation and row["mission_run_id"]:
+                return None, "identity_mismatch"
+        row = rows[0]
+        if row["mission_generation"] is None and row["event_json"]:
+            return None, "reconciliation_required"
+        if row["mission_generation"] is not None and generation < row["mission_generation"]:
+            return None, "stale_execution"
+        if row["mission_run_id"] or row["event_json"]:
+            return None, "awaiting_enrollment"
+        # Initial enrollment, or a strictly newer execution of an accepted
+        # resume. A delayed callback of the predecessor cannot consume it.
+        conn.execute(
+            """UPDATE async_delegations SET mission_run_id=?, mission_generation=?,
+               mission_event_id=? WHERE delegation_id=?""",
+            (run_id, generation, event_id or None, row["delegation_id"]),
+        )
+        row.update(mission_run_id=run_id, mission_generation=generation,
+                   mission_event_id=event_id or None)
+        return row, None
 
 
 def fold_mission_completion(
@@ -550,6 +699,8 @@ def fold_mission_completion(
     error: Optional[str] = None,
     live_transcript: Optional[str] = None,
     duration_seconds: Optional[float] = None,
+    execution: Optional[dict] = None,
+    event_id: str = "",
 ) -> str:
     """Fold a sandboxed.sh mission's TERMINAL result into the delegating turn.
 
@@ -564,11 +715,15 @@ def fold_mission_completion(
       - ``"duplicate"``     : row already delivered/dropped — idempotent no-op
       - ``"not_delegated"`` : mission_id is not a Hermes mission delegation
                               (the caller should fall back to its normal path)
+      - ``"awaiting_enrollment"`` : newer execution arrived before its resume hook
+      - ``"reconciliation_required"`` : legacy or missing execution identity
+      - ``"identity_mismatch"`` : malformed/conflicting execution identity
+      - ``"stale_execution"`` : older execution whose receipt was already pruned
     """
-    row = find_delegation_by_mission_id(mission_id)
-    if row is None:
-        return "not_delegated"
-    if (row.get("delivery_state") or "") != "pending":
+    row, outcome = _mission_completion_row(mission_id, execution, event_id)
+    if outcome:
+        return outcome
+    if row.get("event_json") or (row.get("delivery_state") or "") != "pending":
         # A retry may find a delivered durable result while this process still
         # counts its original native delegation as running. No event is replayed.
         if row.get("state") not in {"running", "stalling", "finalizing"}:
@@ -589,6 +744,10 @@ def fold_mission_completion(
         "role": task.get("role"),
         "model": task.get("model"),
         "completed_at": time.time(),
+        "dispatched_at": row["dispatched_at"],
+        "mission_completion": True,
+        "mission_execution": execution,
+        "mission_event_id": event_id or None,
     }
     for _k in ("scope_id", "user_id", "user_name"):
         if task.get(_k):
@@ -601,6 +760,7 @@ def fold_mission_completion(
                 "error": error,
                 "goal": task.get("goal", ""),
                 "mission_id": mission_id,
+                "execution": execution,
             }
         ],
         "error": error,
@@ -608,12 +768,15 @@ def fold_mission_completion(
     }
     if live_transcript:
         combined["live_transcripts"] = [live_transcript]
-    _push_batch_completion_event(event_record, combined, status)
+    if _push_batch_completion_event(event_record, combined, status) is False:
+        return "duplicate"
     # Native callbacks previously bypassed the normal batch finalizer, leaving
     # _records running even after the durable result was terminal. Reconcile
     # only after successful persistence; retain a live slot on persistence or
     # import failure so shutdown/recovery cannot silently abandon the result.
-    persisted = find_delegation_by_mission_id(mission_id)
+    with _DB_LOCK, _transaction() as conn:
+        persisted = next((r for r in _mission_rows(conn, mission_id)
+                          if r["delegation_id"] == row["delegation_id"]), None)
     if persisted and persisted.get("state") == status:
         _begin_finalization(row["delegation_id"])
         _finish_finalization(row["delegation_id"], status)
@@ -1233,6 +1396,7 @@ def register_mission_delegation(
         # A single mission renders like a one-task fan-out on completion.
         "is_batch": True,
         "backend": "mission",
+        "mission_receipt_version": 1,
         "workspace_id": workspace_id,
         "project": project,
     }
@@ -1403,7 +1567,7 @@ def _finalize_batch(
 
 def _push_batch_completion_event(
     event_record: Dict[str, Any], combined: Dict[str, Any], status: str
-) -> None:
+) -> Optional[bool]:
     """Push a combined async-delegation batch completion event."""
     try:
         from tools.process_registry import process_registry
@@ -1448,6 +1612,9 @@ def _push_batch_completion_event(
     for _k in ("scope_id", "user_id", "user_name"):
         if event_record.get(_k):
             evt[_k] = event_record[_k]
+    for key in ("mission_completion", "mission_execution", "mission_event_id"):
+        if key in event_record:
+            evt[key] = event_record[key]
     # Structured stall metadata (#51690) — additive, present only on
     # stall-monitor finalizations.
     for _k in (
@@ -1458,9 +1625,11 @@ def _push_batch_completion_event(
     ):
         if _k in combined:
             evt[_k] = combined[_k]
-    _persist_completion(evt, combined)
+    if _persist_completion(evt, combined) is False and evt.get("mission_completion"):
+        return False
     try:
         process_registry.completion_queue.put(evt)
+        return True
     except Exception as exc:  # pragma: no cover
         logger.error(
             "Async delegation batch %s: failed to enqueue completion event; "

@@ -19,8 +19,9 @@ Two delivery strategies, selected by the target adapter's
   session, with full history, and its result is visible the next time the
   client polls/reopens the conversation.
 
-Async-delegation completions are the exception on the stateless path
-(#85957): after the parent turn ends (``finish_reason=stop``, SSE
+Async-delegation completions default to delivery-only on the stateless path
+(#85957). Operators can explicitly opt named conversations into autonomous
+continuation via ``background_delegation_sessions``. For all other sessions, after the parent turn ends (``finish_reason=stop``, SSE
 ``event.complete``) the CLIENT owns the next turn, so a completion must never
 be self-POSTed as a new ``role=user`` prompt — that starts an unauthorized
 agent turn that can blow through a pending human-confirmation gate. Instead
@@ -147,6 +148,33 @@ def _delegation_display_metadata(evt: dict) -> dict:
     if isinstance(duration, (int, float)):
         metadata["duration_seconds"] = duration
     return metadata
+
+
+async def deliver_api_delegation(
+    adapter: Any, *, text: str, session_id: str, evt: Optional[dict] = None
+) -> None:
+    """Continue an opted-in API parent; otherwise persist a client-owned delivery.
+
+    The operator's session allowlist is checked again at delivery, so removing
+    an opt-in stops future autonomous turns, including after a restart. The
+    existing durable delegation claim owns retries and duplicate suppression.
+    """
+    resolve = getattr(adapter, "background_delegation_target", None)
+    target = await asyncio.to_thread(resolve, session_id) if callable(resolve) else None
+    if target:
+        parent = str((evt or {}).get("parent_session_id") or session_id)
+        if await asyncio.to_thread(resolve, parent) != target:
+            raise RuntimeError("Background delegation parent/origin mismatch")
+        busy = getattr(adapter, "background_delegation_busy", None)
+        if callable(busy) and busy(target):
+            raise RuntimeError("Background delegation parent still running; retry later")
+        await deliver_wake(
+            adapter, text=text, session_id=target,
+            display_kind="async_delegation_complete",
+            display_metadata=_delegation_display_metadata(evt or {}),
+        )
+        return
+    await persist_delegation_delivery(adapter, text=text, session_id=session_id, evt=evt)
 
 
 async def persist_delegation_delivery(

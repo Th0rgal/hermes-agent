@@ -28247,22 +28247,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 from gateway.wake import (
                     adapter_supports_push,
                     deliver_wake,
-                    persist_delegation_delivery,
+                    deliver_api_delegation,
                 )
                 if adapter is not None and not adapter_supports_push(adapter):
                     if evt.get("type") == "async_delegation":
-                        # #85957: after the parent turn's event.complete the
-                        # CLIENT owns the next turn on this stateless surface.
-                        # Persist the completion as a durable delivery row —
-                        # never self-post it as a new role=user prompt.
+                        # Stateless clients own their next turn (#85957).
+                        # The shared delivery helper honors only an explicit
+                        # operator opt-in for autonomous API conversations.
                         try:
                             logger.info(
                                 "Async delegation completion — persisting "
                                 "delivery row for api_server session %s "
-                                "(no wake turn)",
+                                "(session continuation policy)",
                                 raw_sid,
                             )
-                            await persist_delegation_delivery(
+                            await deliver_api_delegation(
                                 adapter, text=synth_text,
                                 session_id=raw_sid, evt=evt,
                             )
@@ -28339,19 +28338,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # which binds chat_id = session_id). handle_message would run the
             # wake under a build_session_key()-derived key that never matches
             # the raw X-Hermes-Session-Id session — self-post instead.
-            from gateway.wake import deliver_wake, persist_delegation_delivery
+            from gateway.wake import deliver_wake, deliver_api_delegation
             raw_sid = str(evt.get("origin_session_id") or "").strip() or str(source.chat_id or "")
             if evt.get("type") == "async_delegation":
-                # #85957: same client-owns-the-turn rule as the raw-key branch
-                # above — persist the completion as a delivery row, never
-                # self-post it as a new role=user prompt.
+                # Apply the same session-scoped opt-in as the raw-key branch;
+                # ordinary API clients retain delivery-only behavior.
                 try:
                     logger.info(
                         "Async delegation completion — persisting delivery "
-                        "row for api_server session %s (no wake turn)",
+                        "row for api_server session %s (session continuation policy)",
                         raw_sid,
                     )
-                    await persist_delegation_delivery(
+                    await deliver_api_delegation(
                         adapter, text=synth_text, session_id=raw_sid, evt=evt,
                     )
                     return True
@@ -28499,6 +28497,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return "retry"
         return "deliver"
 
+    async def _background_api_parent_busy(self, evt: dict) -> bool:
+        """Defer opted-in API completions before charging durable retry attempts."""
+        if evt.get("type") != "async_delegation" or not evt.get("origin_session_id"):
+            return False
+        adapter = self.adapters.get(Platform.API_SERVER)
+        resolve = getattr(adapter, "background_delegation_target", None)
+        busy = getattr(adapter, "background_delegation_busy", None)
+        if not callable(resolve) or not callable(busy):
+            return False
+        target = await asyncio.to_thread(resolve, evt["origin_session_id"])
+        return bool(target and busy(target))
+
     async def _deliver_completion_notification(
         self, synth_text: str, evt: dict,
     ) -> Optional[bool]:
@@ -28510,6 +28520,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         event or the event has no gateway route. No cross-process exactly-once
         guarantee is claimed.
         """
+        if await self._background_api_parent_busy(evt):
+            return False
         identity = self._completion_delivery_identity(evt)
         durable_claim_id = ""
         durable_delegation_id = ""
@@ -28919,6 +28931,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         are requeued here before returning).
         """
         from tools.process_registry import process_registry as _pr
+
+        # Check before claiming siblings too: a long foreground turn is a
+        # scheduling wait, not eight failed deliveries that exhaust the ledger.
+        if group and await self._background_api_parent_busy(group[0]):
+            return False
 
         deliverable: list[tuple[dict, str]] = []
         for evt in group:

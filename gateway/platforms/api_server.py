@@ -1540,6 +1540,14 @@ class APIServerAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.API_SERVER)
         extra = config.extra or {}
+        # Explicit operator opt-in, scoped to durable conversations. Ordinary
+        # API clients still own the next turn after event.complete (#85957).
+        background_sessions = extra.get("background_delegation_sessions", [])
+        if not isinstance(background_sessions, list) or any(
+            not isinstance(sid, str) or not sid.strip() for sid in background_sessions
+        ):
+            raise ValueError("background_delegation_sessions must be a list of session IDs")
+        self._background_delegation_sessions = frozenset(background_sessions)
         self._host: str = extra.get("host", os.getenv("API_SERVER_HOST", DEFAULT_HOST))
         raw_port = extra.get("port")
         if raw_port is None:
@@ -7381,8 +7389,38 @@ class APIServerAdapter(BasePlatformAdapter):
             )
         return None
 
-    @staticmethod
+    def background_delegation_target(self, session_id: str) -> Optional[str]:
+        """Resolve an explicitly authorized conversation's live compression tip.
+
+        Config belongs to this adapter/profile, not a process-wide env flag.
+        Only verified compression descendants inherit authorization; /new,
+        branches, unknown sessions and ended tips cannot start a wake turn.
+        """
+        roots = self._background_delegation_sessions
+        if not roots or not session_id:
+            return None
+        db = self._ensure_session_db()
+        if db is None:
+            raise RuntimeError("SessionDB unavailable for background delegation policy")
+        for root in roots:
+            chain = db.get_compression_chain(root)
+            if session_id not in chain:
+                continue
+            tip = chain[-1]
+            row = db.get_session(tip)
+            if row and not row.get("ended_at"):
+                return tip
+        return None
+
+    def background_delegation_busy(self, session_id: str) -> bool:
+        """Defer a completion while this API adapter is running its parent."""
+        agents = list(self._active_run_agents.values()) + list(
+            self._shutdown_interruptible_agents.values()
+        )
+        return any(getattr(agent, "session_id", None) == session_id for agent in agents)
+
     def _bind_api_server_session(
+        self,
         *,
         chat_id: str = "",
         session_key: str = "",
@@ -7392,13 +7430,9 @@ class APIServerAdapter(BasePlatformAdapter):
     ) -> list:
         """Bind session contextvars for an API-server agent run.
 
-        This is the SINGLE structural chokepoint every API-server agent-entry
-        path must use to seed session context — it hardwires
-        ``platform="api_server"`` and ``async_delivery=False`` so a new route
-        physically cannot reintroduce the silent-no-op bug (#10760) by
-        forgetting to mark the channel as non-delivering. There is no
-        ``async_delivery`` parameter to get wrong; the stateless HTTP path can
-        never wake the agent after the turn ends, on ANY route.
+        Every API entry path uses this chokepoint. Stateless requests cannot
+        promise async delivery; only an operator-configured durable session
+        (or its verified compression continuation) can opt into it.
 
         Returns reset tokens; pass them to ``clear_session_vars`` in a
         ``finally`` block (the binding is request-scoped and must not outlive
@@ -7414,7 +7448,7 @@ class APIServerAdapter(BasePlatformAdapter):
             session_id=session_id,
             browser_control_principal=browser_control_principal,
             browser_control_transport_family=browser_control_transport_family,
-            async_delivery=False,
+            async_delivery=bool(self.background_delegation_target(session_id)),
             cron_session="",
         )
 

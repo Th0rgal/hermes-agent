@@ -158,6 +158,19 @@ def test_replayed_receipt_absorbs_native_supersession_without_second_dispatch_id
     assert successor in relay.pending_callbacks(job_id)["prompt"]
 
 
+def test_late_supersession_reopens_an_acknowledged_receipt():
+    job_id = controller()
+    first = relay.enqueue_mission_callback(event())
+    relay.acknowledge_callbacks(job_id, [first["event_id"]], success=True)
+    dispatch_key = jobs.get_job(job_id)["controller_callbacks"][0]["dispatch_idempotency_key"]
+    successor = "f43e7dec-7143-4902-8b00-968a2b715dae"
+    relay.enqueue_mission_callback(event(tags=["superseded_by:" + successor]))
+    entry = jobs.get_job(job_id)["controller_callbacks"][0]
+    assert not entry.get("handled_at")
+    assert entry["dispatch_idempotency_key"] == dispatch_key
+    assert successor in relay.pending_callbacks(job_id)["prompt"]
+
+
 def test_incomplete_summary_retains_input_without_immediate_replay():
     job_id = controller()
     relay.enqueue_mission_callback(event())
@@ -171,6 +184,16 @@ def test_incomplete_summary_retains_input_without_immediate_replay():
     assert relay.pending_callbacks(job_id)["event_ids"] == snapshot["event_ids"]
     relay.enqueue_mission_callback(event(2))
     assert jobs.get_job(job_id)["next_run_at"] < retry_at
+
+
+def test_incomplete_bounded_batch_defers_its_unselected_tail(monkeypatch):
+    job_id = controller()
+    first = relay.enqueue_mission_callback(event(summary="first"))
+    relay.enqueue_mission_callback(event(2, summary="second"))
+    snapshot = relay.pending_callbacks(job_id, max_chars=1000)
+    assert snapshot["event_ids"] == [first["event_id"]]
+    relay.defer_callbacks(job_id, snapshot["event_ids"])
+    assert all(entry.get("retry_after") for entry in jobs.get_job(job_id)["controller_callbacks"])
 
 
 def test_alias_callback_matches_canonical_job(monkeypatch):

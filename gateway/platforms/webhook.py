@@ -221,6 +221,7 @@ class WebhookAdapter(BasePlatformAdapter):
         # Idempotency: TTL cache of recently processed delivery IDs.
         # Prevents duplicate agent runs when webhook providers retry.
         self._seen_deliveries: Dict[str, float] = {}
+        self._inflight_deliveries: set[str] = set()
         self._idempotency_ttl: int = 3600  # 1 hour
         self._seen_deliveries_next_prune_at: float = 0.0
 
@@ -451,17 +452,21 @@ class WebhookAdapter(BasePlatformAdapter):
         window.append(now)
         return True
 
-    def _record_delivery_id(self, delivery_id: str, now: float) -> bool:
-        """Return True when this delivery should be processed."""
+    def _record_delivery_id(self, delivery_id: str, now: float) -> str:
+        """Claim a delivery as ``new``, ``inflight``, or already ``seen``."""
         seen_at = self._seen_deliveries.get(delivery_id)
         if seen_at is not None and now - seen_at < self._idempotency_ttl:
-            return False
+            return "inflight" if delivery_id in self._inflight_deliveries else "seen"
         if seen_at is not None:
             self._seen_deliveries.pop(delivery_id, None)
         self._seen_deliveries[delivery_id] = now
+        self._inflight_deliveries.add(delivery_id)
         if len(self._seen_deliveries) > max(self._rate_limit * 2, 128):
             self._prune_seen_deliveries(now)
-        return True
+        return "new"
+
+    def _finish_delivery_id(self, delivery_id: str) -> None:
+        self._inflight_deliveries.discard(delivery_id)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {"name": chat_id, "type": "webhook"}
@@ -1400,13 +1405,16 @@ class WebhookAdapter(BasePlatformAdapter):
         # Skip duplicate deliveries (webhook retries). Applied before
         # origin-route so a routed callback cannot wake twice.
         now = time.time()
-        if not self._record_delivery_id(delivery_id, now):
+        delivery_claim = self._record_delivery_id(delivery_id, now)
+        if delivery_claim != "new":
             logger.info(
                 "[webhook] Skipping duplicate delivery %s", delivery_id
             )
             return web.json_response(
                 {"status": "duplicate", "delivery_id": delivery_id},
-                status=200,
+                # A concurrent request must not acknowledge a delivery whose
+                # first attempt can still fail a transient routing gate.
+                status=503 if delivery_claim == "inflight" else 200,
             )
 
         # Route sandboxed.sh mission-status events into the dedicated
@@ -1420,16 +1428,27 @@ class WebhookAdapter(BasePlatformAdapter):
                 # No accepted route handoff: allow the authenticated producer
                 # to replay this exact delivery after the transient gate clears.
                 self._seen_deliveries.pop(delivery_id, None)
+            self._finish_delivery_id(delivery_id)
             return _routed
         if _controller_callback is not None:
             # The existing controller is the sole operational owner. Do not
             # spawn an isolated webhook writer when its chat route is absent.
+            self._finish_delivery_id(delivery_id)
             return web.json_response({"status": "controller_queued", **_controller_callback}, status=202)
 
         from gateway.platforms.mission_status_route import is_routable_mission_status
-        if is_routable_mission_status(payload):
+        # A generic authenticated webhook is not thereby a mission-status
+        # producer.  Preserve its configured delivery/agent path when a
+        # coincidental payload has mission_id + a terminal-looking status.
+        # ``mission-complete`` is the established dedicated route; custom
+        # names opt in explicitly.
+        mission_status_route = route_config.get(
+            "mission_status", route_name == "mission-complete"
+        ) is True
+        if mission_status_route and is_routable_mission_status(payload):
             # No durable owner accepted this event. Permit replay after repair.
             self._seen_deliveries.pop(delivery_id, None)
+            self._finish_delivery_id(delivery_id)
             return web.json_response({
                 "status": "rejected", "reason": "missing_conversation_binding",
                 "mission_id": payload.get("mission_id"),
@@ -1466,12 +1485,14 @@ class WebhookAdapter(BasePlatformAdapter):
                     route_name,
                     delivery_id,
                 )
+                self._finish_delivery_id(delivery_id)
                 return web.json_response(
                     {"status": "error", "error": "Delivery failed", "delivery_id": delivery_id},
                     status=502,
                 )
 
             if result.success:
+                self._finish_delivery_id(delivery_id)
                 return web.json_response(
                     {
                         "status": "delivered",
@@ -1489,6 +1510,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 delivery["deliver"],
                 result.error,
             )
+            self._finish_delivery_id(delivery_id)
             return web.json_response(
                 {"status": "error", "error": "Delivery failed", "delivery_id": delivery_id},
                 status=502,
@@ -1548,6 +1570,7 @@ class WebhookAdapter(BasePlatformAdapter):
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
+        self._finish_delivery_id(delivery_id)
         return web.json_response(
             {
                 "status": "accepted",

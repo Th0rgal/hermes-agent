@@ -357,7 +357,10 @@ def format_mission_callback(payload: dict, *, replacement_evidence: dict | None 
     """Human + machine trailer written into the dedicated session."""
     mission_id = str(payload.get("mission_id") or "").strip()
     status = extract_status(payload)
-    title = str(payload.get("title") or "mission").strip()
+    # This line is part of the machine-readable callback envelope.  A title
+    # comes from an external producer, so it must not be allowed to split the
+    # header and defeat exact event-id deduplication.
+    title = " ".join(str(payload.get("title") or "mission").split())
     project = extract_project_slug(payload) or "unknown"
     workspace = str(payload.get("workspace_name") or "").strip()
     bits = [
@@ -546,23 +549,15 @@ def append_mission_callback(
 
 
 def append_mission_wake_failure(session_id: str, payload: dict, session_db: Any) -> None:
-    """Record ambiguous notification delivery without changing native status."""
-    session_db = sync_session_db(session_db)
-    live = resolve_live_session_id(session_id, session_db) or session_id
-    metadata = mission_callback_display_metadata(payload)
-    metadata["delivery_status"] = "unknown"
-    if _last_message_role(session_db, live) == "assistant":
-        _append_typed(session_db, session_id=live, role="user",
-                      content="Notification delivery receipt follows.",
-                      display_kind=MISSION_CALLBACK_SEPARATOR_DISPLAY_KIND,
-                      display_metadata=metadata)
-    _append_typed(
-        session_db, session_id=live, role="assistant",
-        content=("The mission callback evidence was saved, but its automatic notification "
-                 "did not confirm completion. Delivery outcome is unknown. Inspect this "
-                 "conversation before requesting another notice; no automatic retry was scheduled."),
-        display_kind="mission_callback_delivery", display_metadata=metadata,
-    )
+    """Do not write an ambiguous wake receipt into a live conversation.
+
+    A self-post timeout does not cancel the underlying model turn.  Appending
+    an assistant receipt here can race that turn's final assistant message and
+    corrupt strict role alternation.  The callback itself is already durable;
+    retain the ambiguity in logs until the turn has a terminal receipt.
+    """
+    logger.warning("mission wake delivery outcome unknown for %s event=%s; no transcript receipt appended",
+                   session_id, extract_event_id(payload))
 
 
 def _pending_callback_path(mission_id: str) -> Path:

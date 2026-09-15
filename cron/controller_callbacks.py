@@ -176,7 +176,15 @@ def enqueue_mission_callback(payload: dict[str, Any]) -> dict | None:
         if successor:
             # Native retries may carry newer relationship metadata for the same
             # terminal receipt. Preserve its identity and original receive time.
-            next(entry for entry in inbox if entry["id"] == event_id)["superseded_by"] = successor
+            entry = next(entry for entry in inbox if entry["id"] == event_id)
+            # A native retry can add relationship evidence after this receipt
+            # was already dispatched.  The dispatch identity stays stable, but
+            # the controller must see the revised evidence on its next turn.
+            if entry.get("superseded_by") != successor:
+                entry["superseded_by"] = successor
+                if entry.get("handled_at"):
+                    entry.pop("handled_at", None)
+                    entry.pop("retry_after", None)
         _wake(job)
         jobs.save_jobs(records)
         return {"job_id": job["id"], "event_id": event_id, "duplicate": duplicate}
@@ -276,8 +284,9 @@ def defer_callbacks(job_id: str, event_ids: list[str]) -> None:
         retry_at = jobs.compute_next_run(job["schedule"], jobs._hermes_now().isoformat())
         if retry_at is None:
             return
-        wanted = set(event_ids)
         for entry in _pending(job):
-            if entry["id"] in wanted:
-                entry["retry_after"] = retry_at
+            # The model saw only a bounded prefix.  Holding back only that
+            # prefix leaves an unselected tail ready, which wakes every tick
+            # and repeatedly replays the same incomplete batch.
+            entry["retry_after"] = retry_at
         jobs.save_jobs(records)

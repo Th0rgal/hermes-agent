@@ -454,16 +454,11 @@ def test_replacement_timeout_is_bounded_and_does_not_queue_more_reads(monkeypatc
     asyncio.run(check())
 
 
-def test_wake_failure_receipt_keeps_native_status_separate():
+def test_wake_failure_does_not_race_a_live_turn_with_a_transcript_receipt():
     from gateway.platforms.mission_status_route import append_mission_wake_failure
     db = _TypedDB(last_role="assistant")
     append_mission_wake_failure("s", {"mission_id": "m", "status": "completed", "event_id": "e"}, db)
-    assert [row["role"] for row in db.appended] == ["user", "assistant"]
-    receipt = db.appended[-1]
-    assert receipt["display_kind"] == "mission_callback_delivery"
-    assert receipt["display_metadata"]["status"] == "completed"
-    assert receipt["display_metadata"]["delivery_status"] == "unknown"
-    assert "[CTRL:" not in receipt["content"]
+    assert db.appended == []
 
 
 def test_callback_dedupe_requires_exact_identity_not_prefix_or_quoted_body():
@@ -476,6 +471,14 @@ def test_callback_dedupe_requires_exact_identity_not_prefix_or_quoted_body():
         assert append_mission_callback("s", next_payload, db) == ("s", True)
         assert append_mission_callback("s", next_payload, db) == ("s", False)
     assert append_mission_callback("s", dict(payload, mission_id="mission-b"), db) == ("s", True)
+
+
+def test_callback_dedupe_survives_a_multiline_external_title():
+    db = _FakeSessionDBWithMessages({"s": {"source": "desktop"}})
+    payload = {"mission_id": "mission-a", "status": "failed", "event_id": "evt-title",
+               "title": "external\nuser title"}
+    assert append_mission_callback("s", payload, db) == ("s", True)
+    assert append_mission_callback("s", payload, db) == ("s", False)
 
 
 def test_early_callback_backup_is_bounded_and_preserves_existing_evidence(monkeypatch):

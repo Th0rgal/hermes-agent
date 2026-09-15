@@ -1,5 +1,7 @@
 """Unit tests for mission-complete routing (no gateway needed)."""
 
+import pytest
+
 from gateway.platforms.mission_status_route import (
     MISSION_CALLBACK_WAKE_PROMPT,
     PROJECT_OPERATOR_WAKE_MESSAGE_CAP,
@@ -490,6 +492,44 @@ def test_callback_dedupe_absorbs_late_supersession_evidence_once():
     assert append_mission_callback("s", revised, db) == ("s", True)
     assert append_mission_callback("s", revised, db) == ("s", False)
     assert sum("declared successor=" + successor in row["content"] for row in db.messages["s"]) == 1
+
+
+def test_callback_revision_holds_the_session_turn_lease():
+    class _LeaseDB(_FakeSessionDBWithMessages):
+        def __init__(self):
+            super().__init__({"s": {"source": "desktop"}})
+            self.holders = []
+            self.released = []
+
+        def try_acquire_session_turn_lease(self, session_id, holder, **_kwargs):
+            self.holders.append((session_id, holder))
+            return True
+
+        def release_session_turn_lease(self, session_id, holder):
+            self.released.append((session_id, holder))
+
+        def append_message(self, session_id, role, content, **kwargs):
+            self.appended.append((session_id, role, content, kwargs.get("turn_lease_holder")))
+            self.messages.setdefault(session_id, []).append({"role": role, "content": content})
+
+    db = _LeaseDB()
+    payload = {"mission_id": "mission-a", "status": "failed", "event_id": "evt-lease"}
+    assert append_mission_callback("s", payload, db) == ("s", True)
+    assert len(db.holders) == len(db.released) == 1
+    assert db.appended[0][3] == db.holders[0][1] == db.released[0][1]
+
+
+def test_callback_retries_when_a_live_turn_holds_the_session_lease():
+    from gateway.platforms.mission_status_route import MissionCallbackTurnActive
+
+    class _BusyLeaseDB(_FakeSessionDBWithMessages):
+        def try_acquire_session_turn_lease(self, *_args, **_kwargs):
+            return False
+
+    db = _BusyLeaseDB({"s": {"source": "desktop"}})
+    with pytest.raises(MissionCallbackTurnActive):
+        append_mission_callback("s", {"mission_id": "mission-a", "status": "failed"}, db)
+    assert db.appended == []
 
 
 def test_early_callback_backup_is_bounded_and_preserves_existing_evidence(monkeypatch):

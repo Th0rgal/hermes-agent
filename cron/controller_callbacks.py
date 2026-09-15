@@ -189,9 +189,11 @@ def enqueue_mission_callback(payload: dict[str, Any]) -> dict | None:
                 entry["superseded_by"] = successor
                 entry["revision"] = int(entry.get("revision", 0)) + 1
                 entry["revised_at"] = jobs._hermes_now().isoformat()
+                # A changed receipt is fresh evidence even if the previous
+                # revision was held for an incomplete controller turn.
+                entry.pop("retry_after", None)
                 if entry.get("handled_at"):
                     entry.pop("handled_at", None)
-                    entry.pop("retry_after", None)
         _wake(job)
         jobs.save_jobs(records)
         return {"job_id": job["id"], "event_id": event_id, "duplicate": duplicate}

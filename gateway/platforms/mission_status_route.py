@@ -14,7 +14,7 @@ import re
 import threading
 from pathlib import Path
 from typing import Any, Optional, Tuple
-from uuid import UUID
+from uuid import UUID, uuid4
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -439,7 +439,37 @@ def _append_typed(session_db: Any, **kwargs: Any) -> None:
     except TypeError:
         kwargs.pop("display_kind", None)
         kwargs.pop("display_metadata", None)
+        kwargs.pop("turn_lease_holder", None)
         session_db.append_message(**kwargs)
+
+
+class MissionCallbackTurnActive(RuntimeError):
+    """A live agent turn owns the transcript; webhook delivery must retry."""
+
+
+def _acquire_callback_turn_lease(session_db: Any, session_id: str) -> str | None:
+    """Fence callback transcript writes behind a live agent turn when supported.
+
+    Older DB shims lack durable turn leases and retain their existing behaviour.
+    On the real SessionDB, failing to acquire means a turn is actively loading
+    or flushing this conversation, so callers must leave native delivery
+    unacknowledged rather than inserting a callback into its transcript.
+    """
+    acquire = getattr(session_db, "try_acquire_session_turn_lease", None)
+    if not callable(acquire):
+        return None
+    holder = f"mission-callback:{uuid4().hex}"
+    if not acquire(session_id, holder, ttl_seconds=30.0, patience_s=0.5):
+        raise MissionCallbackTurnActive(session_id)
+    return holder
+
+
+def _release_callback_turn_lease(session_db: Any, session_id: str, holder: str | None) -> None:
+    if not holder:
+        return
+    release = getattr(session_db, "release_session_turn_lease", None)
+    if callable(release):
+        release(session_id, holder)
 
 
 def _last_message_role(session_db: Any, session_id: str) -> Optional[str]:
@@ -503,72 +533,78 @@ def append_mission_callback(
     """
     session_db = sync_session_db(session_db)
     live = resolve_live_session_id(session_id, session_db) or session_id
-    event_id = extract_event_id(payload)
-    if event_id:
-        texts = _recent_message_texts(session_db, live)
-        if texts is not None:
-            mission_id = str(payload.get("mission_id") or "").strip()
-            header = re.compile(
-                rf"status=\S+ mission={re.escape(mission_id)} event={re.escape(event_id)}"
-                r"(?: workspace=.*)?"
-            )
-            # Match the producer identity line, never a prefix or quoted
-            # evidence further down the callback body.
-            def matches(text):
-                lines = text.splitlines()
-                return (len(lines) >= 2 and lines[0].startswith("[Mission callback:")
-                        and header.fullmatch(lines[1]) is not None)
+    lease_holder = _acquire_callback_turn_lease(session_db, live)
+    try:
+        event_id = extract_event_id(payload)
+        if event_id:
+            texts = _recent_message_texts(session_db, live)
+            if texts is not None:
+                mission_id = str(payload.get("mission_id") or "").strip()
+                header = re.compile(
+                    rf"status=\S+ mission={re.escape(mission_id)} event={re.escape(event_id)}"
+                    r"(?: workspace=.*)?"
+                )
+                # Match the producer identity line, never a prefix or quoted
+                # evidence further down the callback body.
+                def matches(text):
+                    lines = text.splitlines()
+                    return (len(lines) >= 2 and lines[0].startswith("[Mission callback:")
+                            and header.fullmatch(lines[1]) is not None)
 
-            existing = [text for text in texts if matches(text)]
-            if existing:
-                # Native retry delivery may enrich a terminal event with its
-                # supersession relationship after the original callback was
-                # stored.  Keep unchanged retries idempotent, but append the
-                # new attempt evidence so the owning conversation is woken
-                # with the same revision the controller inbox receives.
-                successor = (
-                    (replacement_evidence or {}).get("mission_id")
-                    or extract_superseded_by(payload)
-                )
-                successor_recorded = successor and any(
-                    f"declared successor={successor}." in text for text in existing
-                )
-                verified_now = bool(
-                    replacement_evidence
-                    and replacement_evidence.get("verified_live") is True
-                )
-                verified_recorded = any(
-                    f"declared successor={successor}." in text
-                    and "Replacement execution verified live" in text
-                    for text in existing
-                )
-                if not successor or (successor_recorded and (not verified_now or verified_recorded)):
-                    logger.info(
-                        "duplicate mission callback event %s for %s — skipping append",
-                        event_id,
-                        live,
+                existing = [text for text in texts if matches(text)]
+                if existing:
+                    # Native retry delivery may enrich a terminal event with its
+                    # supersession relationship after the original callback was
+                    # stored.  Keep unchanged retries idempotent, but append the
+                    # new attempt evidence so the owning conversation is woken
+                    # with the same revision the controller inbox receives.
+                    successor = (
+                        (replacement_evidence or {}).get("mission_id")
+                        or extract_superseded_by(payload)
                     )
-                    return live, False
-    content = format_mission_callback(payload, replacement_evidence=replacement_evidence)
-    metadata = mission_callback_display_metadata(payload)
-    if _last_message_role(session_db, live) == "assistant":
+                    successor_recorded = successor and any(
+                        f"declared successor={successor}." in text for text in existing
+                    )
+                    verified_now = bool(
+                        replacement_evidence
+                        and replacement_evidence.get("verified_live") is True
+                    )
+                    verified_recorded = any(
+                        f"declared successor={successor}." in text
+                        and "Replacement execution verified live" in text
+                        for text in existing
+                    )
+                    if not successor or (successor_recorded and (not verified_now or verified_recorded)):
+                        logger.info(
+                            "duplicate mission callback event %s for %s — skipping append",
+                            event_id,
+                            live,
+                        )
+                        return live, False
+        content = format_mission_callback(payload, replacement_evidence=replacement_evidence)
+        metadata = mission_callback_display_metadata(payload)
+        if _last_message_role(session_db, live) == "assistant":
+            _append_typed(
+                session_db,
+                session_id=live,
+                role="user",
+                content="A mission you started has finished. The result follows.",
+                display_kind=MISSION_CALLBACK_SEPARATOR_DISPLAY_KIND,
+                display_metadata=metadata,
+                turn_lease_holder=lease_holder,
+            )
         _append_typed(
             session_db,
             session_id=live,
-            role="user",
-            content="A mission you started has finished. The result follows.",
-            display_kind=MISSION_CALLBACK_SEPARATOR_DISPLAY_KIND,
+            role="assistant",
+            content=content,
+            display_kind=MISSION_CALLBACK_DISPLAY_KIND,
             display_metadata=metadata,
+            turn_lease_holder=lease_holder,
         )
-    _append_typed(
-        session_db,
-        session_id=live,
-        role="assistant",
-        content=content,
-        display_kind=MISSION_CALLBACK_DISPLAY_KIND,
-        display_metadata=metadata,
-    )
-    return live, True
+        return live, True
+    finally:
+        _release_callback_turn_lease(session_db, live, lease_holder)
 
 
 def append_mission_wake_failure(session_id: str, payload: dict, session_db: Any) -> None:

@@ -220,6 +220,28 @@ def test_deferral_does_not_delay_a_receipt_revised_after_snapshot(monkeypatch):
     assert not entry.get("retry_after")
 
 
+def test_revised_receipt_clears_an_existing_callback_deferral(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    relay.enqueue_mission_callback(event())
+    snapshot = relay.pending_callbacks(job_id)
+    relay.defer_callbacks(
+        job_id,
+        snapshot["event_ids"],
+        captured_versions=snapshot["captured_versions"],
+    )
+    assert jobs.get_job(job_id)["controller_callbacks"][0].get("retry_after")
+
+    now += timedelta(seconds=1)
+    relay.enqueue_mission_callback(
+        event(tags=["superseded_by:f43e7dec-7143-4902-8b00-968a2b715dae"])
+    )
+    assert not jobs.get_job(job_id)["controller_callbacks"][0].get("retry_after")
+
+
 def test_early_wake_snapshots_fresh_callbacks_before_deferred_backlog(monkeypatch):
     from datetime import datetime, timedelta, timezone
 

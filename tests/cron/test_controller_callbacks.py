@@ -109,6 +109,70 @@ def test_large_callback_burst_is_batched_without_acknowledging_unsent_entries():
     assert len(remaining) == 9 - len(snapshot["event_ids"])
 
 
+def test_callback_snapshot_fits_actual_remaining_prompt_budget():
+    job_id = controller()
+    for index in range(3):
+        relay.enqueue_mission_callback(event(index, summary="x" * 2000))
+    snapshot = relay.pending_callbacks(job_id, max_chars=3200)
+    assert len(snapshot["prompt"]) <= 3200
+    assert len(snapshot["event_ids"]) == 1
+    assert len(relay.pending_callbacks(job_id)["event_ids"]) > 1
+
+
+def test_callback_that_cannot_fit_is_explicit_and_remains_pending():
+    job_id = controller()
+    receipt = relay.enqueue_mission_callback(event(summary="x" * 2000))
+    with pytest.raises(ValueError, match="callback.*budget"):
+        relay.pending_callbacks(job_id, max_chars=100)
+    assert relay.pending_callbacks(job_id)["event_ids"] == [receipt["event_id"]]
+
+
+def test_failed_controller_callback_replay_preserves_scheduled_retry():
+    job_id = controller()
+    relay.enqueue_mission_callback(event())
+    jobs.mark_job_run(job_id, success=False, error="Controller prompt exceeds budget")
+    retry_at = jobs.get_job(job_id)["next_run_at"]
+    for _ in range(3):
+        relay.wake_pending_controllers()
+        relay.enqueue_mission_callback(event())
+        assert jobs.get_job(job_id)["next_run_at"] == retry_at
+    assert relay.pending_callbacks(job_id)["event_ids"]
+    # Fresh native evidence can wake the controller; replay cannot.
+    relay.enqueue_mission_callback(event(2))
+    assert jobs.get_job(job_id)["next_run_at"] < retry_at
+
+
+def test_replayed_receipt_absorbs_native_supersession_without_second_dispatch_identity():
+    job_id = controller()
+    first = relay.enqueue_mission_callback(event())
+    before = jobs.get_job(job_id)["controller_callbacks"][0]
+    successor = "f43e7dec-7143-4902-8b00-968a2b715dae"
+    replay = relay.enqueue_mission_callback(event(tags=["superseded_by:" + successor]))
+    assert replay["duplicate"]
+    assert replay["event_id"] == first["event_id"]
+    entries = jobs.get_job(job_id)["controller_callbacks"]
+    assert len(entries) == 1
+    assert entries[0]["superseded_by"] == successor
+    assert entries[0]["received_at"] == before["received_at"]
+    assert entries[0]["dispatch_idempotency_key"] == before["dispatch_idempotency_key"]
+    assert successor in relay.pending_callbacks(job_id)["prompt"]
+
+
+def test_incomplete_summary_retains_input_without_immediate_replay():
+    job_id = controller()
+    relay.enqueue_mission_callback(event())
+    snapshot = relay.pending_callbacks(job_id)
+    relay.defer_callbacks(job_id, snapshot["event_ids"])
+    # A max-iteration summary is still deliverable, so outer status is success.
+    jobs.mark_job_run(job_id, success=True)
+    retry_at = jobs.get_job(job_id)["next_run_at"]
+    relay.wake_pending_controllers()
+    assert jobs.get_job(job_id)["next_run_at"] == retry_at
+    assert relay.pending_callbacks(job_id)["event_ids"] == snapshot["event_ids"]
+    relay.enqueue_mission_callback(event(2))
+    assert jobs.get_job(job_id)["next_run_at"] < retry_at
+
+
 def test_alias_callback_matches_canonical_job(monkeypatch):
     import hermes_cli.projects_db as projects
     monkeypatch.setattr(projects, "_project_alias_map", lambda: {"lido": "verity-lido"})

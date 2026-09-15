@@ -13,6 +13,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Any, Optional, Tuple
+from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +46,32 @@ MISSION_CALLBACK_SEPARATOR_DISPLAY_KIND = "hidden"
 
 MISSION_CALLBACK_WAKE_PROMPT = (
     "A routed mission-complete callback was just appended to this conversation. "
-    "In one or two sentences, tell the operator what finished and whether they "
-    "need to act. Do not inspect the mission, do not run tools, and do not "
-    "continue the work in this chat — the project controller owns follow-up."
+    "In one or two sentences, report the attempt outcome and any verified follow-up. "
+    "Distinguish a superseded attempt from its replacement. A supersession tag "
+    "does not prove the replacement is executing: name a live replacement only "
+    "with current native execution evidence already available in this conversation. "
+    "Otherwise say replacement execution is unverified. Never promise rerouting "
+    "or say no action is needed merely because a controller exists. Preserve "
+    "actionable failures and unresolved questions. Do not inspect the mission, "
+    "do not run tools, and do not dispatch or continue project work in this notice."
 )
+
+
+def extract_superseded_by(payload: dict) -> str | None:
+    """Native mission_horizon tag: relationship evidence, never liveness proof."""
+    tags = payload.get("tags")
+    if not isinstance(tags, list):
+        return None
+    # Match the producer's last valid tag precedence.
+    for tag in reversed(tags):
+        if isinstance(tag, str) and tag.startswith("superseded_by:"):
+            try:
+                successor = str(UUID(tag.split(":", 1)[1].strip()))
+            except ValueError:
+                continue
+            if successor != str(payload.get("mission_id", "")).strip():
+                return successor
+    return None
 
 
 def extract_origin_session(payload: dict) -> str:
@@ -257,7 +280,6 @@ def format_mission_callback(payload: dict) -> str:
         payload.get("terminal_evidence") if status != "completed" else None,
     ]
     body = "\n".join(str(b).strip() for b in bits if b and str(b).strip())
-    mode = "active" if status == "completed" else "blocked"
     event_id = extract_event_id(payload)
     lines = [
         f"[Mission callback: {title}]",
@@ -267,18 +289,22 @@ def format_mission_callback(payload: dict) -> str:
     ]
     if body:
         lines.append(body)
-    if status != "completed":
-        lines.append(
-            "If this is infra (missing CLI, auth, workspace), fix or "
-            "[DECISION:] — do not stay silent in another session."
-        )
+    successor = extract_superseded_by(payload)
+    if successor:
+        lines.append(f"Superseded attempt; declared successor={successor}.")
     lines.append(
-        f"[CTRL: {project} | mode={mode} | wait=0 | next=inspect {mission_id}]"
+        f"Attempt evidence for project={project}; replacement execution is not verified by this callback. "
+        "The controller must check current native execution and evidence before claiming recovery "
+        "or dispatching more work. Retain actionable failures until resolved."
     )
-    lines.append(
-        f"[STATE_SIGNATURE: {project}|mission-callback|{mission_id}|{status}|inspect]"
+    # Callbacks are attempt evidence. They must not write project mode/decisions
+    # through the native transcript ingestor, including markers quoted by a
+    # worker's result. Only subsequent controller judgment owns that action.
+    return re.sub(
+        r"\[(CTRL|STATE_SIGNATURE|DECISION|Cron delivery)\s*:",
+        lambda match: "[Mission evidence " + match[1] + ":",
+        "\n".join(lines), flags=re.IGNORECASE,
     )
-    return "\n".join(lines)
 
 
 def mission_callback_display_metadata(payload: dict) -> dict:

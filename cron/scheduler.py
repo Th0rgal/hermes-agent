@@ -6415,17 +6415,27 @@ def _run_job(
 
     callback_event_ids = []
     try:
-        if (job.get("controller") or {}).get("callback_relay") is True:
-            from cron.controller_callbacks import pending_callbacks
-
-            snapshot = pending_callbacks(job_id)
-            callback_event_ids = snapshot["event_ids"]
-            callback_prompt = snapshot["prompt"]
-            if callback_prompt:
-                extra_prompt = "\n\n".join(part for part in (extra_prompt, callback_prompt) if part)
         prompt = _build_job_prompt(
             job, prerun_script=prerun_script, extra_prompt=extra_prompt
         )
+        if prompt is not None and (job.get("controller") or {}).get("callback_relay") is True:
+            from cron.controller_callbacks import pending_callbacks
+            from cron.controller_scope import CONTROLLER_PROMPT_MAX_CHARS, check_prompt_budget, current_controller_scope
+
+            # Assemble mandatory instructions once; script and skill expansion
+            # must not run again while fitting a callback burst. Append only a
+            # complete snapshot, leaving every unselected entry durable.
+            callback_header = "\n\n## Native callback evidence\n"
+            snapshot = pending_callbacks(
+                job_id, max_chars=min(6000, CONTROLLER_PROMPT_MAX_CHARS - len(prompt) - len(callback_header)),
+            )
+            callback_event_ids = snapshot["event_ids"]
+            callback_prompt = snapshot["prompt"]
+            if callback_prompt:
+                callback_prompt = _scan_assembled_cron_prompt(
+                    callback_prompt, job, has_injected_data=True,
+                )
+                prompt = check_prompt_budget(current_controller_scope(), prompt + callback_header + callback_prompt)
     except CronPromptInjectionBlocked as block_exc:
         # Assembled prompt (user prompt + loaded skill content) tripped the
         # injection scanner. Refuse to run the agent this tick and surface
@@ -7437,6 +7447,10 @@ def _run_job(
             from cron.controller_callbacks import acknowledge_callbacks
 
             acknowledge_callbacks(job_id, callback_event_ids, success=True)
+        elif callback_event_ids:
+            from cron.controller_callbacks import defer_callbacks
+
+            defer_callbacks(job_id, callback_event_ids)
         return True, output, final_response, None
 
     except Exception as e:

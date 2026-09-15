@@ -441,7 +441,7 @@ def test_scheduler_acknowledges_only_completed_snapshot(
 def test_callback_store_failure_prevents_agent_and_keeps_scope_restored(local_scheduler, monkeypatch):
     from cron import controller_callbacks as callbacks
 
-    def fail_snapshot(_job_id):
+    def fail_snapshot(_job_id, **kwargs):
         raise OSError("inbox unavailable")
 
     def unexpected(**kwargs):
@@ -454,6 +454,43 @@ def test_callback_store_failure_prevents_agent_and_keeps_scope_restored(local_sc
     result = scheduler.run_job(config)
     assert result[0] is False and "inbox unavailable" in result[3]
     assert current_controller_scope() is None
+
+
+def test_scheduler_fits_complete_callback_snapshot_after_mandatory_prompt(local_scheduler, monkeypatch):
+    from cron import controller_callbacks as callbacks, jobs
+
+    mandatory = "Inspect receipts and preserve project authority. " + "x" * 11000
+    config = jobs.create_job(
+        mandatory, "every 10m", deliver="local", model="test-model",
+        controller={**job()["controller"], "callback_relay": True},
+    )
+    for index in range(3):
+        callbacks.enqueue_mission_callback({
+            "mission_id": list(MISSIONS)[0], "project": "verity-lido", "status": "completed",
+            "event_id": str(index), "summary": "x" * 2000,
+        })
+    prompts = []
+
+    class LocalAgent:
+        def __init__(self, **kwargs):
+            self.session_id = kwargs["session_id"]
+
+        def run_conversation(self, prompt, *, task_id):
+            prompts.append(prompt)
+            assert mandatory in prompt
+            assert len(prompt) <= 16000
+            assert prompt.count('"dispatch_idempotency_key":') == 1
+            return {"completed": True, "final_response": "Reviewed the captured receipt."}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("run_agent.AIAgent", LocalAgent)
+    result = scheduler.run_job(config)
+    assert result[0], result
+    assert len(prompts) == 1
+    pending = [entry for entry in jobs.get_job(config["id"])["controller_callbacks"] if not entry.get("handled_at")]
+    assert len(pending) == 2
 
 
 def observer_job(project="verity-lido", **updates):

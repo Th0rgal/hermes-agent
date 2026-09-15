@@ -226,6 +226,7 @@ class WebhookAdapter(BasePlatformAdapter):
         # delivery. A terminal receipt can legitimately change successor (and
         # later change it back), unlike an exact provider retry.
         self._mission_delivery_revisions: Dict[str, tuple[Optional[str], str, float]] = {}
+        self._mission_delivery_claim_counter = 0
         self._idempotency_ttl: int = 3600  # 1 hour
         self._seen_deliveries_next_prune_at: float = 0.0
 
@@ -483,18 +484,22 @@ class WebhookAdapter(BasePlatformAdapter):
         """Claim one structured mission revision without dropping a reversal.
 
         A cache key per successor would turn A -> B -> A into a duplicate of
-        the first A. Keep only the current revision key for this delivery:
-        switching relationship admits the new evidence once, and retries of
-        whichever revision is current retain the ordinary in-flight/seen fence.
+        the first A. Keep only the current revision for retry lookup, but mint
+        a distinct claim token for every changed admission: an old A completion
+        must never clear the later A's in-flight fence.
         """
         previous = self._mission_delivery_revisions.get(delivery_id)
         if previous and now - previous[2] >= self._idempotency_ttl:
             self._mission_delivery_revisions.pop(delivery_id, None)
             previous = None
-        cache_id = f"{delivery_id}\x1fmission-superseded-by:{successor or '-'}"
-        if previous and previous[0] != successor:
-            self._seen_deliveries.pop(previous[1], None)
-            self._inflight_deliveries.discard(previous[1])
+        if previous and previous[0] == successor:
+            cache_id = previous[1]
+        else:
+            self._mission_delivery_claim_counter += 1
+            cache_id = (
+                f"{delivery_id}\x1fmission-superseded-by:{successor or '-'}"
+                f"\x1fclaim:{self._mission_delivery_claim_counter}"
+            )
         claim = self._record_delivery_id(cache_id, now)
         if claim == "new":
             self._mission_delivery_revisions[delivery_id] = (successor, cache_id, now)

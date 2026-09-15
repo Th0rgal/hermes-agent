@@ -344,6 +344,31 @@ async def test_late_supersession_revision_bypasses_only_generic_transport_dedupe
     assert wake.await_count == 4
 
 
+def test_mission_revision_claim_fences_stale_completion():
+    """A stale A completion cannot release a later A reversal's claim."""
+    adapter = _make_adapter()
+    first_successor = "22222222-2222-4222-8222-222222222222"
+    other_successor = "33333333-3333-4333-8333-333333333333"
+    first, first_token = adapter._record_mission_delivery_revision(
+        "receipt", first_successor, 100.0
+    )
+    second, _second_token = adapter._record_mission_delivery_revision(
+        "receipt", other_successor, 101.0
+    )
+    third, third_token = adapter._record_mission_delivery_revision(
+        "receipt", first_successor, 102.0
+    )
+    assert first == second == third == "new"
+    assert first_token != third_token
+
+    adapter._finish_delivery_id(first_token)
+    retry, retry_token = adapter._record_mission_delivery_revision(
+        "receipt", first_successor, 103.0
+    )
+    assert retry == "inflight"
+    assert retry_token == third_token
+
+
 @pytest.mark.asyncio
 async def test_telegram_origin_wakes_telegram_adapter_not_api_server(monkeypatch):
     db = _FakeSessionDB(

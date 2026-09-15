@@ -116,7 +116,8 @@ def _user_entries(calls):
 
 
 @pytest.mark.asyncio
-async def test_internal_event_threads_marker_into_agent_run(monkeypatch, tmp_path):
+@pytest.mark.parametrize("notification_only", [False, True])
+async def test_internal_event_threads_marker_into_agent_run(monkeypatch, tmp_path, notification_only):
     runner = _bootstrap(monkeypatch, tmp_path)
     runner._run_agent = AsyncMock(
         return_value={
@@ -128,13 +129,14 @@ async def test_internal_event_threads_marker_into_agent_run(monkeypatch, tmp_pat
         }
     )
 
-    await runner._handle_message_with_agent(
-        _event(internal=True, text="[ASYNC DELEGATION BATCH COMPLETE]"),
-        _source(), SESSION_KEY, 1,
-    )
+    event = _event(internal=True, text="Evidence notice")
+    event.notification_only = notification_only
+    await runner._handle_message_with_agent(event, _source(), SESSION_KEY, 1)
 
     kwargs = runner._run_agent.call_args.kwargs
-    assert kwargs["persist_user_display_kind"] == "internal_notification"
+    assert kwargs["persist_user_display_kind"] == (
+        "mission_callback_wake" if notification_only else "internal_notification"
+    )
 
 
 @pytest.mark.asyncio

@@ -21430,6 +21430,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         persist_user_display_kind = (
             "internal_notification" if getattr(event, "internal", False) else None
         )
+        if getattr(event, "internal", False) and getattr(event, "notification_only", False):
+            persist_user_display_kind = "mission_callback_wake"
+
         try:
             _pcfg = _load_gateway_config()
             _redact_pii = bool((_pcfg.get("privacy") or {}).get("redact_pii", False))

@@ -3524,6 +3524,9 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     tools. Used by the concurrent execution path; the sequential path retains
     its own inline invocation for backward-compatible display handling.
     """
+    if getattr(agent, "_notification_only_turn", False) is True:
+        return json.dumps({"error": "Tools are disabled for this mission notification turn."})
+
     # Direct _invoke_tool callers can bypass the batch executor, including its
     # guard for tools owned by the agent rather than the registry.
     from cron.controller_scope import observer_tool_error

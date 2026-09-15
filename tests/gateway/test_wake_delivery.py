@@ -235,3 +235,14 @@ def test_persist_delegation_delivery_raises_without_db():
         ))
 
 
+
+
+def test_push_mission_notice_carries_execution_restriction():
+    async def check():
+        adapter = PushAdapter()
+        await deliver_wake(adapter, text="Evidence notice", session_id="s", source=_source(),
+                           display_kind="mission_callback_wake")
+        assert adapter.handled[0].internal and adapter.handled[0].notification_only
+        await deliver_wake(adapter, text="Normal wake", session_id="s", source=_source())
+        assert not adapter.handled[1].notification_only
+    asyncio.run(check())

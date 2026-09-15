@@ -184,8 +184,7 @@ need an owner-reviewed replacement; no live Lido record was read or changed by
 this repair implementation.
 
 Remaining boundaries include native canonical enrollment, producer handling of
-409 responses, post-append wake-task failure/process-crash recovery, hard tool
-restrictions for notice wakes (currently instructions), and native workspace,
+409 responses, post-append wake-task failure/process-crash recovery, and native workspace,
 profile, auth, quota and event-size defects. These are not architecture-complete
 claims. Coordination was queued only to active counterpart
 f9fc8b08-dc42-49c3-88a0-26934b2255ce; no obsolete worker was resumed.
@@ -210,3 +209,28 @@ the audit workspace: `output/adapter-before.log` (causal failure),
 `output/adapter-after.log`, `output/webhook-compat-tests.log`, and
 `output/readback-bound-tests.log`. Earlier consolidated 512-test result belongs
 to 3c552d7; these targeted results validate this follow-up.
+
+
+## Notification execution authority
+
+Mission callback wakes now disable tool execution for that turn. The policy
+resets at each conversation entry, so cached agents do not restrict subsequent
+ordinary user turns. Tool schemas and cached prefixes remain unchanged. Direct
+agent invocation and the common sequential/concurrent middleware reject calls;
+the middleware guard runs before Relay dispatch. Push events carry the policy
+through their internal event metadata; authenticated API continuation carries
+the existing mission_callback_wake kind. Generic internal wakes retain their
+existing behavior. This is a per-turn restriction, not project ownership.
+
+Validation: 27 focused notification/routing tests, 143 compatibility tests
+(agent tools/turns, API typing, gateway turns and controller scope), and seven
+push gateway integration tests passed. Logs: output/notification-policy-tests.log,
+output/notification-policy-compat.log, output/notification-push-integration.log.
+No native worker dispatch or production inference was used.
+
+The reviewed native control file matches GitHub blob
+8457c6322557242bdc3a42b84c067c596db3d06e (master observed at
+d750841f1254a9e1edd75b86edd457aa64a20d32): all non-success callbacks get three
+attempts and a 60-second reconciliation sweep without an age cutoff. Thus
+HTTP409 prevents autonomous Hermes ownership but does not bound producer lifetime
+retries. This concrete finding was sent to the active native counterpart.

@@ -97,6 +97,7 @@ async def deliver_wake(
             message_type=MessageType.TEXT,
             source=source,
             internal=True,
+            notification_only=display_kind == "mission_callback_wake",
         )
         await adapter.handle_message(synth_event)
         return

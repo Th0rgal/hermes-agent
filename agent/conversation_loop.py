@@ -2055,9 +2055,10 @@ def run_conversation(
             as metadata on that persisted user message.
         persist_user_display_kind: Optional presentation type for a
             synthesized user turn (``auto_continue``, ``model_switch``, …).
-            Display-only: transcript surfaces render the row as a timeline
-            event instead of a user bubble, while the model still receives
-            the message unchanged.
+            Transcript surfaces render the row as a timeline event instead
+            of a user bubble; the model receives the message unchanged.
+            The mission_callback_wake kind additionally disables tool
+            execution for this turn without changing the tool schemas.
         persist_user_display_metadata: Optional payload for that event
             (e.g. a delegation's task count).
         persist_user_platform_id: Optional platform-side message id (e.g. the
@@ -2069,6 +2070,11 @@ def run_conversation(
     Returns:
         Dict: Complete conversation result with final response and message history
     """
+    # Mission callback wakes summarize evidence; they never own follow-up
+    # actions. Reset on every turn because gateway agents can be reused.
+    # Keep tool schemas stable and enforce the restriction at execution.
+    agent._notification_only_turn = persist_user_display_kind == "mission_callback_wake"
+
     if moa_config is None:
         try:
             from hermes_cli.moa_config import decode_moa_turn

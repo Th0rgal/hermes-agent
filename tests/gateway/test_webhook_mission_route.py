@@ -474,9 +474,11 @@ async def test_ambiguous_wake_failure_is_recorded_without_retry(monkeypatch):
     response = await adapter._handle_webhook(_mock_request(payload))
     assert response.status == 202
     await asyncio.gather(*list(adapter._background_tasks))
-    assert "Delivery outcome is unknown" in db.appended[-1][2]
-    assert "untrusted transport details" not in db.appended[-1][2]
-    assert [row[1] for row in db.appended] == ["assistant", "user", "assistant"]
+    # A timeout can leave the self-posted model turn running.  No assistant
+    # receipt may be appended beside it, or the eventual final races role
+    # alternation; the callback evidence itself remains durable.
+    assert len(db.appended) == 1
+    assert "Delivery outcome is unknown" not in db.appended[-1][2]
     before = list(db.appended)
     response = await adapter._handle_webhook(_mock_request(payload))
     assert response.status == 200

@@ -252,6 +252,10 @@ def pending_callbacks(job_id: str, *, max_chars: int = 6000) -> dict:
         entries = selected
         return {
             "event_ids": [entry["id"] for entry in entries],
+            "event_versions": {
+                entry["id"]: entry.get("revised_at") or entry["received_at"]
+                for entry in entries
+            },
             "prompt": (
                 _CALLBACK_GUIDANCE
                 + json.dumps(entries, ensure_ascii=False)
@@ -259,7 +263,8 @@ def pending_callbacks(job_id: str, *, max_chars: int = 6000) -> dict:
         }
 
 
-def acknowledge_callbacks(job_id: str, event_ids: list[str], *, success: bool) -> None:
+def acknowledge_callbacks(job_id: str, event_ids: list[str], *, success: bool,
+                          event_versions: dict[str, str] | None = None) -> None:
     """Acknowledge exactly the successfully handled snapshot, not later arrivals."""
     if not success or not event_ids:
         return
@@ -271,7 +276,10 @@ def acknowledge_callbacks(job_id: str, event_ids: list[str], *, success: bool) -
         wanted = set(event_ids)
         now = jobs._hermes_now().isoformat()
         for entry in job.get("controller_callbacks", []):
-            if entry["id"] in wanted and not entry.get("handled_at"):
+            expected = (event_versions or {}).get(entry["id"])
+            current = entry.get("revised_at") or entry.get("received_at")
+            if (entry["id"] in wanted and not entry.get("handled_at")
+                    and (expected is None or expected == current)):
                 entry["handled_at"] = now
         _wake(job)
         jobs.save_jobs(records)

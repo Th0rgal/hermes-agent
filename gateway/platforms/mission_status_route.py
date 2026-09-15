@@ -538,7 +538,9 @@ def append_mission_callback(
                     and replacement_evidence.get("verified_live") is True
                 )
                 verified_recorded = any(
-                    "Replacement execution verified live" in text for text in existing
+                    f"declared successor={successor}." in text
+                    and "Replacement execution verified live" in text
+                    for text in existing
                 )
                 if not successor or (successor_recorded and (not verified_now or verified_recorded)):
                     logger.info(

@@ -5311,7 +5311,8 @@ def _build_job_prompt(
         try:
             loaded = json.loads(skill_view(
                 normalize_skill_lookup_name(skill_name),
-                **({"preprocess": False} if validation_only else {}),
+                **({"preprocess": False, "capture_prerequisites": False}
+                   if validation_only else {}),
             ))
         except (json.JSONDecodeError, TypeError):
             logger.warning("Cron job '%s': skill '%s' returned invalid JSON, skipping", job.get("name", job.get("id")), skill_name)
@@ -6418,6 +6419,7 @@ def _run_job(
             return True, silent_doc, SILENT_MARKER, None
 
     callback_event_ids = []
+    callback_event_versions = {}
     try:
         prompt = _build_job_prompt(
             job, prerun_script=prerun_script, extra_prompt=extra_prompt
@@ -6434,6 +6436,7 @@ def _run_job(
                 job_id, max_chars=min(6000, CONTROLLER_PROMPT_MAX_CHARS - len(prompt) - len(callback_header)),
             )
             callback_event_ids = snapshot["event_ids"]
+            callback_event_versions = snapshot.get("event_versions", {})
             callback_prompt = snapshot["prompt"]
             if callback_prompt:
                 callback_prompt = _scan_assembled_cron_prompt(
@@ -7450,7 +7453,8 @@ def _run_job(
         if callback_event_ids and result.get("completed") is True and final_response.strip():
             from cron.controller_callbacks import acknowledge_callbacks
 
-            acknowledge_callbacks(job_id, callback_event_ids, success=True)
+            acknowledge_callbacks(job_id, callback_event_ids, success=True,
+                                  event_versions=callback_event_versions)
         elif callback_event_ids:
             from cron.controller_callbacks import defer_callbacks
 

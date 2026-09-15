@@ -616,8 +616,19 @@ def stash_unroutable_callback(mission_id: str, payload: dict) -> bool:
             lock.rmdir()
 
 
+def peek_stashed_callback(mission_id: str) -> Optional[dict]:
+    """Read backup evidence without consuming it before durable reconciliation."""
+    return _read_stashed_callback(mission_id, consume=False)
+
+
 def take_stashed_callback(mission_id: str, *, expected_payload: Optional[dict] = None) -> Optional[dict]:
-    """Pop existing early evidence under the same nonblocking mutation lock."""
+    """Pop only the accepted evidence under the nonblocking mutation lock."""
+    return _read_stashed_callback(mission_id, consume=True, expected_payload=expected_payload)
+
+
+def _read_stashed_callback(
+    mission_id: str, *, consume: bool, expected_payload: Optional[dict] = None,
+) -> Optional[dict]:
     mid = (mission_id or "").strip()
     if not mid:
         return None
@@ -634,7 +645,8 @@ def take_stashed_callback(mission_id: str, *, expected_payload: Optional[dict] =
             return None
         if expected_payload is not None and data != expected_payload:
             return None
-        path.unlink()
+        if consume:
+            path.unlink()
         return data
     except Exception:
         logger.debug("pending callback backup unavailable for %s", mid, exc_info=True)

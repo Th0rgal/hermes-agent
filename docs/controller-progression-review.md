@@ -432,3 +432,19 @@ Lint and whitespace checks passed. CI was not polled; previous green CI remains
 historical evidence for a0f639c only. The legacy enrollment, native retry lifetime,
 backup crash-window and live Lido metadata boundaries above remain unresolved.
 No merge, deployment or live job mutation.
+
+## Early-enrollment backup consumption
+
+Early reconciliation now reads the bounded backup without removing it. It clears
+only the identical payload after `fold_mission_completion` reports `folded` or
+`duplicate`. A fold exception, unknown outcome, missing enrollment or conflicting
+identity retains evidence in place. This closes the pop-before-fold loss window
+without a replacement authority store or an autonomous owner. Existing durable
+fold deduplication handles retry after persistence but before backup cleanup.
+
+Validation: 83 tests passed across four files in 15.6 seconds, no flaky retries;
+log `output/orphan-fold-receipt-tests.log`. Lint and whitespace checks passed.
+The crash-held directory lock still requires explicit repair; native lifetime
+retry bounds, fresh Lido metadata and authority-preserving Verity enrollment remain
+open. No CI polling, merge, deployment or live job changes. Independent review is
+pending; the operator reports Fable quota-blocked until 2026-09-16T15:00Z.

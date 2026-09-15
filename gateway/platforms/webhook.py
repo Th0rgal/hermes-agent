@@ -225,7 +225,9 @@ class WebhookAdapter(BasePlatformAdapter):
         # The latest structured relationship revision for each routed mission
         # delivery. A terminal receipt can legitimately change successor (and
         # later change it back), unlike an exact provider retry.
-        self._mission_delivery_revisions: Dict[str, tuple[Optional[str], str, float]] = {}
+        self._mission_delivery_revisions: Dict[
+            str, tuple[Optional[str], str, float, bool, bool]
+        ] = {}
         self._mission_delivery_claim_counter = 0
         self._idempotency_ttl: int = 3600  # 1 hour
         self._seen_deliveries_next_prune_at: float = 0.0
@@ -442,7 +444,7 @@ class WebhookAdapter(BasePlatformAdapter):
             self._seen_deliveries.pop(k, None)
         stale_revisions = [
             delivery_id
-            for delivery_id, (_successor, _cache_id, recorded_at)
+            for delivery_id, (_successor, _cache_id, recorded_at, _verified, _refresh_available)
             in self._mission_delivery_revisions.items()
             if recorded_at < cutoff
         ]
@@ -486,7 +488,11 @@ class WebhookAdapter(BasePlatformAdapter):
         A cache key per successor would turn A -> B -> A into a duplicate of
         the first A. Keep only the current revision for retry lookup, but mint
         a distinct claim token for every changed admission: an old A completion
-        must never clear the later A's in-flight fence.
+        must never clear the later A's in-flight fence. A settled, unverified
+        initially observed successor may make one bounded-evidence refresh
+        admission; concurrent refreshes share its in-flight fence, and an
+        unknown refresh does not turn the cache into a perpetual read-through
+        bypass.
         """
         previous = self._mission_delivery_revisions.get(delivery_id)
         if previous and now - previous[2] >= self._idempotency_ttl:
@@ -494,6 +500,18 @@ class WebhookAdapter(BasePlatformAdapter):
             previous = None
         if previous and previous[0] == successor:
             cache_id = previous[1]
+            claim = self._record_delivery_id(cache_id, now)
+            if claim != "seen" or previous[3] or not previous[4] or not successor:
+                return claim, cache_id
+            # The first callback was durable but had no native verification.
+            # Refresh exactly this current successor with its own claim token,
+            # so an old completion cannot release the refresh and a concurrent
+            # retry remains retryable rather than being acknowledged as seen.
+            self._mission_delivery_claim_counter += 1
+            cache_id = (
+                f"{delivery_id}\x1fmission-superseded-by:{successor}"
+                f"\x1fclaim:{self._mission_delivery_claim_counter}"
+            )
         else:
             self._mission_delivery_claim_counter += 1
             cache_id = (
@@ -502,8 +520,36 @@ class WebhookAdapter(BasePlatformAdapter):
             )
         claim = self._record_delivery_id(cache_id, now)
         if claim == "new":
-            self._mission_delivery_revisions[delivery_id] = (successor, cache_id, now)
+            self._mission_delivery_revisions[delivery_id] = (
+                successor,
+                cache_id,
+                now,
+                False,
+                # Only the first declared successor for a receipt can gain
+                # native state after its original unverified callback. A
+                # later A -> B -> A reversal is already distinct durable
+                # evidence and remains an exact deduped retry.
+                bool(successor and (previous is None or previous[0] is None)),
+            )
         return claim, cache_id
+
+    def _mark_mission_delivery_revision_verified(
+        self, delivery_id: str, cache_id: str,
+    ) -> None:
+        """Record verified evidence only for the currently admitted receipt."""
+        previous = self._mission_delivery_revisions.get(delivery_id)
+        if previous and previous[1] == cache_id:
+            self._mission_delivery_revisions[delivery_id] = (
+                previous[0], previous[1], previous[2], True, previous[4]
+            )
+
+    def _discard_mission_delivery_revision(
+        self, delivery_id: str, cache_id: str,
+    ) -> None:
+        """Forget only an unaccepted current claim so its retry starts clean."""
+        previous = self._mission_delivery_revisions.get(delivery_id)
+        if previous and previous[1] == cache_id:
+            self._mission_delivery_revisions.pop(delivery_id, None)
 
     def _finish_delivery_id(self, delivery_id: str) -> None:
         self._inflight_deliveries.discard(delivery_id)
@@ -985,7 +1031,7 @@ class WebhookAdapter(BasePlatformAdapter):
     async def _maybe_route_mission_status(
         self, payload: dict, *, profile: Optional[str] = None,
         controller_callback: bool = False,
-    ) -> "Optional[web.Response]":
+    ) -> "Optional[web.Response] | tuple[web.Response, bool]":
         """Append a mission-complete callback into the dedicated session.
 
         Isolated ``webhook:mission-complete:<delivery>`` sessions are how
@@ -999,6 +1045,7 @@ class WebhookAdapter(BasePlatformAdapter):
             from gateway.platforms.mission_status_route import (
                 append_mission_callback,
                 extract_origin_session,
+                extract_superseded_by,
                 is_routable_mission_status,
                 resolve_mission_delivery_session,
                 stash_unroutable_callback,
@@ -1027,6 +1074,7 @@ class WebhookAdapter(BasePlatformAdapter):
         appended = False
         row = None
         wake = False
+        replacement_verified = False
         try:
             # Off the event loop: SessionDB writes take BEGIN IMMEDIATE and
             # can wait on a busy state.db. Doing that inline starved the
@@ -1074,6 +1122,16 @@ class WebhookAdapter(BasePlatformAdapter):
             from gateway.platforms.mission_status_route import bounded_replacement_evidence
 
             replacement_evidence = await bounded_replacement_evidence(payload)
+            declared_successor = extract_superseded_by(payload)
+            # Only bounded native evidence for this declared relationship can
+            # upgrade the transport admission. Callback text never supplies
+            # verification state.
+            replacement_verified = bool(
+                declared_successor
+                and isinstance(replacement_evidence, dict)
+                and replacement_evidence.get("mission_id") == declared_successor
+                and replacement_evidence.get("verified_live") is True
+            )
             result = await asyncio.to_thread(
                 append_mission_callback, target, payload, session_db,
                 replacement_evidence=replacement_evidence,
@@ -1156,13 +1214,16 @@ class WebhookAdapter(BasePlatformAdapter):
                 logger.warning(
                     "[webhook] routed mission wake not scheduled", exc_info=True
                 )
-        return web.json_response(
-            {
-                "status": "routed",
-                "mission_id": payload.get("mission_id"),
-                "session_id": live,
-            },
-            status=202,
+        return (
+            web.json_response(
+                {
+                    "status": "routed",
+                    "mission_id": payload.get("mission_id"),
+                    "session_id": live,
+                },
+                status=202,
+            ),
+            replacement_verified,
         )
 
     @staticmethod
@@ -1488,16 +1549,30 @@ class WebhookAdapter(BasePlatformAdapter):
         # Route sandboxed.sh mission-status events into the dedicated
         # conversation before minting a throwaway webhook session.
         _routed = None
+        routed_replacement_verified = False
         if mission_status_route:
-            _routed = await self._maybe_route_mission_status(
+            route_result = await self._maybe_route_mission_status(
                 payload, profile=request_profile,
                 controller_callback=_controller_callback is not None,
             )
+            # Keep the internal route seam compatible with tests/extensions
+            # that return an aiohttp response directly.
+            if isinstance(route_result, tuple):
+                _routed, routed_replacement_verified = route_result
+            else:
+                _routed = route_result
         if _routed is not None:
             if _routed.status >= 500:
                 # No accepted route handoff: allow the authenticated producer
                 # to replay this exact delivery after the transient gate clears.
                 self._seen_deliveries.pop(delivery_cache_id, None)
+                self._discard_mission_delivery_revision(
+                    delivery_id, delivery_cache_id
+                )
+            elif mission_status_route and routed_replacement_verified:
+                self._mark_mission_delivery_revision_verified(
+                    delivery_id, delivery_cache_id
+                )
             self._finish_delivery_id(delivery_cache_id)
             return _routed
         if _controller_callback is not None:
@@ -1510,6 +1585,7 @@ class WebhookAdapter(BasePlatformAdapter):
         if mission_status_route and is_routable_mission_status(payload):
             # No durable owner accepted this event. Permit replay after repair.
             self._seen_deliveries.pop(delivery_cache_id, None)
+            self._discard_mission_delivery_revision(delivery_id, delivery_cache_id)
             self._finish_delivery_id(delivery_cache_id)
             return web.json_response({
                 "status": "rejected", "reason": "missing_conversation_binding",

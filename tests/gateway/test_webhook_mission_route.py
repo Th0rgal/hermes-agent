@@ -344,6 +344,103 @@ async def test_late_supersession_revision_bypasses_only_generic_transport_dedupe
     assert wake.await_count == 4
 
 
+@pytest.mark.asyncio
+async def test_unverified_successor_retry_refreshes_native_evidence_once(monkeypatch):
+    """A settled unverified receipt may upgrade, then becomes an exact retry."""
+    db = _FakeSessionDB(
+        {ORIGIN: {"source": "desktop"}},
+        messages={ORIGIN: [{"content": f"started {MISSION}"}]},
+    )
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    wake = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    successor = "22222222-2222-4222-8222-222222222222"
+    verified = {
+        "mission_id": successor, "verified_live": True,
+        "run_id": "run-2", "state": "running",
+        "observed_at": "2026-09-15T10:00:00+00:00",
+    }
+    native_read = AsyncMock(side_effect=[None, verified])
+    monkeypatch.setattr(
+        "gateway.platforms.mission_status_route.bounded_replacement_evidence",
+        native_read,
+    )
+    payload = {
+        "mission_id": MISSION, "status": "failed", "type": "failed",
+        "origin_session": ORIGIN, "event_id": "upgrade-retry",
+        "tags": [f"superseded_by:{successor}"],
+    }
+
+    assert (await adapter._handle_webhook(_mock_request(payload))).status == 202
+    assert (await adapter._handle_webhook(_mock_request(payload))).status == 202
+    assert (await adapter._handle_webhook(_mock_request(payload))).status == 200
+    await asyncio.gather(*list(adapter._background_tasks))
+
+    assert native_read.await_count == 2
+    assert wake.await_count == 2
+    assert sum("Replacement execution verified live" in content
+               for _sid, _role, content in db.appended) == 1
+
+
+@pytest.mark.asyncio
+async def test_unverified_successor_refresh_stays_inflight_when_readback_unknown(monkeypatch):
+    """An unknown native read never turns a concurrent retry into seen/200."""
+    db = _FakeSessionDB(
+        {ORIGIN: {"source": "desktop"}},
+        messages={ORIGIN: [{"content": f"started {MISSION}"}]},
+    )
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    wake = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    reads = 0
+
+    async def unknown_readback(_payload):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return None
+        entered.set()
+        await release.wait()
+        return None
+
+    monkeypatch.setattr(
+        "gateway.platforms.mission_status_route.bounded_replacement_evidence",
+        unknown_readback,
+    )
+    successor = "22222222-2222-4222-8222-222222222222"
+    payload = {
+        "mission_id": MISSION, "status": "failed", "type": "failed",
+        "origin_session": ORIGIN, "event_id": "unknown-refresh",
+        "tags": [f"superseded_by:{successor}"],
+    }
+
+    # The initial successor is durable but unverified. Its subsequent retry
+    # owns the one permitted refresh admission.
+    assert (await adapter._handle_webhook(_mock_request(payload))).status == 202
+    refresh = asyncio.create_task(adapter._handle_webhook(_mock_request(payload)))
+    await asyncio.wait_for(entered.wait(), 5)
+    assert (await adapter._handle_webhook(_mock_request(payload))).status == 503
+    release.set()
+    assert (await refresh).status == 202
+    # An unknown refresh is not fabricated into proof, but it also must not
+    # turn every retry into another native read-through admission.
+    assert (await adapter._handle_webhook(_mock_request(payload))).status == 200
+    await asyncio.gather(*list(adapter._background_tasks))
+
+    assert reads == 2
+    assert wake.await_count == 1
+
+
 def test_mission_revision_claim_fences_stale_completion():
     """A stale A completion cannot release a later A reversal's claim."""
     adapter = _make_adapter()

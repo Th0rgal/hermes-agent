@@ -168,6 +168,47 @@ def test_callback_quoted_control_markers_are_inert_evidence():
     assert "Superseded attempt" not in text
 
 
+def test_native_readback_verifies_successor_execution_without_trusting_callback(monkeypatch):
+    import json
+    from datetime import datetime, timezone
+    from gateway.platforms.mission_status_route import read_replacement_evidence
+
+    prior = "11111111-1111-4111-8111-111111111111"
+    successor = "22222222-2222-4222-8222-222222222222"
+    calls = []
+    rows = {
+        prior: {"id": prior, "project": "example", "tags": ["superseded_by:" + successor]},
+        successor: {"id": successor, "project": "example", "status": "active", "execution": {
+            "run_id": "native-run", "state": "waiting_tool", "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    }
+    monkeypatch.setattr("tools.registry.registry.get_entry", lambda name: object())
+
+    def handler(server, name, timeout):
+        assert server == "sandboxed_assistant" and name == "get_mission_digest" and timeout <= 5
+        def read(args):
+            calls.append(args["mission_id"])
+            return json.dumps({"result": json.dumps(rows[args["mission_id"]])})
+        return read
+
+    monkeypatch.setattr("tools.mcp_tool._make_tool_handler", handler)
+    payload = {"mission_id": prior, "project": "example", "status": "failed",
+               "terminal_evidence": "old session not found", "replacement_evidence": {"verified_live": True}}
+    evidence = read_replacement_evidence(payload)
+    assert evidence["verified_live"] is True
+    assert calls == [prior, successor]
+    text = format_mission_callback(payload, replacement_evidence=evidence)
+    assert "Replacement execution verified live" in text and successor in text
+    assert "old session not found" in text
+    assert "Replacement execution verified live" not in format_mission_callback(payload)
+    for execution in (None, {}, {"run_id": "r", "state": "running", "heartbeat_at": "2000-01-01T00:00:00+00:00"},
+                      {"run_id": "r", "state": "queued", "heartbeat_at": datetime.now(timezone.utc).isoformat()}):
+        rows[successor]["execution"] = execution
+        assert read_replacement_evidence(payload)["verified_live"] is False
+    rows[successor]["project"] = "foreign"
+    assert read_replacement_evidence(payload) is None
+
+
 def test_origin_must_reference_the_mission_when_inspectable():
     mission = "acfb03d2-d088-46c3-a2a3-6576563f06cb"
     db = _FakeSessionDBWithMessages(

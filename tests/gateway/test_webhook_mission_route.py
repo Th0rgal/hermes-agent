@@ -94,6 +94,55 @@ MISSION = "498546da-14b7-48af-afd5-db16a14f5900"
 
 
 @pytest.mark.asyncio
+async def test_compression_defers_callback_without_consuming_retry(monkeypatch):
+    db = _FakeSessionDB(
+        {ORIGIN: {"source": "desktop"}},
+        messages={ORIGIN: [{"content": f"started {MISSION}"}]},
+    )
+    locked = True
+    db.get_compression_lock_holder = lambda sid: "compressor" if locked else None
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    wake = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    payload = {"mission_id": MISSION, "status": "completed", "type": "completed",
+               "origin_session": ORIGIN, "event_id": "compression-retry"}
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 503
+    assert db.appended == []
+    locked = False
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 202
+    await asyncio.gather(*adapter._background_tasks)
+    assert wake.await_count == 1
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 200
+    assert wake.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_routed_notice_uses_trusted_replacement_readback(monkeypatch):
+    db = _FakeSessionDB({ORIGIN: {"source": "desktop"}},
+                        messages={ORIGIN: [{"content": f"started {MISSION}"}]})
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    evidence = {"mission_id": "22222222-2222-4222-8222-222222222222", "verified_live": True,
+                "run_id": "run-2", "state": "running", "observed_at": "2026-09-15T10:00:00+00:00"}
+    monkeypatch.setattr("gateway.platforms.mission_status_route.read_replacement_evidence", lambda payload: evidence)
+    response = await adapter._handle_webhook(_mock_request({
+        "mission_id": MISSION, "status": "failed", "type": "failed", "origin_session": ORIGIN,
+        "terminal_evidence": "old attempt failed", "event_id": "verified-replacement",
+    }))
+    assert response.status == 202
+    text = db.appended[-1][2]
+    assert "Replacement execution verified live" in text
+    assert evidence["mission_id"] in text and "old attempt failed" in text
+
+
+@pytest.mark.asyncio
 async def test_mission_complete_routes_into_origin_and_skips_throwaway():
     db = _FakeSessionDB(
         {ORIGIN: {"source": "desktop"}},

@@ -967,8 +967,24 @@ class WebhookAdapter(BasePlatformAdapter):
                             status=202,
                         )
                 return None
+            from gateway.platforms.mission_status_route import should_wake_mission_callback
+
+            # A native sender retries non-success responses. Check compression
+            # before persisting the event: append-then-skip permanently consumed
+            # both transcript and transport dedupe without ever waking the chat.
+            # Controller input already has its own durable scheduling handoff.
+            if not controller_callback and not await asyncio.to_thread(
+                should_wake_mission_callback, session_db, target
+            ):
+                return web.json_response(
+                    {"status": "retry", "reason": "conversation_compressing"}, status=503,
+                )
+            from gateway.platforms.mission_status_route import read_replacement_evidence
+
+            replacement_evidence = await asyncio.to_thread(read_replacement_evidence, payload)
             result = await asyncio.to_thread(
-                append_mission_callback, target, payload, session_db
+                append_mission_callback, target, payload, session_db,
+                replacement_evidence=replacement_evidence,
             )
             if isinstance(result, tuple):
                 live, appended = result
@@ -980,12 +996,7 @@ class WebhookAdapter(BasePlatformAdapter):
                     row = getter(live)
                 except Exception:
                     row = None
-            from gateway.platforms.mission_status_route import (
-                should_wake_mission_callback,
-            )
-
-            wake = bool(appended and live and not controller_callback
-                        and should_wake_mission_callback(session_db, live))
+            wake = bool(appended and live and not controller_callback)
         except Exception:
             logger.exception("[webhook] failed to append routed mission callback")
             return None
@@ -1350,6 +1361,10 @@ class WebhookAdapter(BasePlatformAdapter):
             controller_callback=_controller_callback is not None,
         )
         if _routed is not None:
+            if _routed.status >= 500:
+                # No accepted route handoff: allow the authenticated producer
+                # to replay this exact delivery after the transient gate clears.
+                self._seen_deliveries.pop(delivery_id, None)
             return _routed
         if _controller_callback is not None:
             # The existing controller is the sole operational owner. Do not

@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 from typing import Any, Optional, Tuple
 from uuid import UUID
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,67 @@ def extract_superseded_by(payload: dict) -> str | None:
             if successor != str(payload.get("mission_id", "")).strip():
                 return successor
     return None
+
+
+def read_replacement_evidence(payload: dict) -> dict | None:
+    """Read current native identity/execution through the existing MCP server.
+
+    No server name, project authority or verified result comes from callback
+    prose. Missing tools/readback preserve the explicit unverified notice.
+    """
+    from tools.registry import registry
+    from tools.mission_delegation import _MCP_SERVER_NAME
+    from cron.controller_scope import _readback_object
+
+    name = f"mcp__{_MCP_SERVER_NAME}__get_mission_digest"
+    if registry.get_entry(name) is None:
+        return None
+    try:
+        from tools.mcp_tool import _make_tool_handler
+
+        read = _make_tool_handler(_MCP_SERVER_NAME, "get_mission_digest", 5.0)
+        mission_id = str(UUID(str(payload.get("mission_id") or "")))
+        project = extract_project_slug(payload)
+        if not project:
+            return None
+
+        def verified_identity(mid):
+            row = _readback_object(read({"mission_id": mid}))
+            if (row.get("id") or row.get("mission_id")) != mid or extract_project_slug(row) != project:
+                raise ValueError("Native replacement identity/project mismatch")
+            return row
+
+        prior = verified_identity(mission_id)
+        tags = prior.get("tags")
+        if tags is None and isinstance(prior.get("project"), dict):
+            tags = prior["project"].get("tags")
+        successor = extract_superseded_by({"mission_id": mission_id, "tags": tags})
+        if not successor:
+            return None
+        replacement = verified_identity(successor)
+        result = {"mission_id": successor, "verified_live": False}
+        execution = replacement.get("execution")
+        if not isinstance(execution, dict):
+            return result
+        # Queued/starting/status=active alone do not prove execution. These
+        # states are the native durable runner's executing states. A stale
+        # heartbeat is unknown, never proof of termination or permission to
+        # dispatch another writer.
+        state = execution.get("state")
+        run_id = execution.get("run_id")
+        try:
+            heartbeat = datetime.fromisoformat(execution.get("heartbeat_at") or "")
+        except (TypeError, ValueError):
+            return result
+        if heartbeat.tzinfo is None:
+            return result
+        now = datetime.now(timezone.utc)
+        if state in {"running", "waiting_tool"} and run_id and 0 <= (now - heartbeat).total_seconds() <= 60:
+            result.update(verified_live=True, run_id=str(run_id), state=state, observed_at=now.isoformat())
+        return result
+    except Exception:
+        logger.debug("Native replacement readback unavailable", exc_info=True)
+        return None
 
 
 def extract_origin_session(payload: dict) -> str:
@@ -266,7 +328,7 @@ def resolve_mission_delivery_session(payload: dict, session_db: Any) -> Optional
     return None
 
 
-def format_mission_callback(payload: dict) -> str:
+def format_mission_callback(payload: dict, *, replacement_evidence: dict | None = None) -> str:
     """Human + machine trailer written into the dedicated session."""
     mission_id = str(payload.get("mission_id") or "").strip()
     status = extract_status(payload)
@@ -289,11 +351,19 @@ def format_mission_callback(payload: dict) -> str:
     ]
     if body:
         lines.append(body)
-    successor = extract_superseded_by(payload)
+    successor = (replacement_evidence or {}).get("mission_id") or extract_superseded_by(payload)
     if successor:
         lines.append(f"Superseded attempt; declared successor={successor}.")
+    if replacement_evidence and replacement_evidence.get("verified_live") is True:
+        lines.append(
+            f"Replacement execution verified live at {replacement_evidence['observed_at']}: "
+            f"mission={successor} run={replacement_evidence['run_id']} state={replacement_evidence['state']}. "
+            "This observation does not accept project evidence or resolve unrelated failures."
+        )
+    else:
+        lines.append("Current replacement execution is not verified.")
     lines.append(
-        f"Attempt evidence for project={project}; replacement execution is not verified by this callback. "
+        f"Attempt evidence for project={project}. "
         "The controller must check current native execution and evidence before claiming recovery "
         "or dispatching more work. Retain actionable failures until resolved."
     )
@@ -386,7 +456,7 @@ def should_wake_mission_callback(session_db: Any, live_id: str) -> bool:
 
 
 def append_mission_callback(
-    session_id: str, payload: dict, session_db: Any
+    session_id: str, payload: dict, session_db: Any, *, replacement_evidence: dict | None = None,
 ) -> Tuple[str, bool]:
     """Persist the callback on the live session.
 
@@ -417,7 +487,7 @@ def append_mission_callback(
                     live,
                 )
                 return live, False
-    content = format_mission_callback(payload)
+    content = format_mission_callback(payload, replacement_evidence=replacement_evidence)
     metadata = mission_callback_display_metadata(payload)
     if _last_message_role(session_db, live) == "assistant":
         _append_typed(

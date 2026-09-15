@@ -62,9 +62,22 @@ No new model tool, project store, polling worker or writer is introduced here.
    controller owned follow-up. It now distinguishes a declared successor from
    verified live execution and forbids promises of rerouting/no-action based
    merely on a controller's existence. Actionable failures remain visible.
-   The native callback currently supplies relationship tags but no verified
-   successor execution snapshot. Hermes therefore does not manufacture live
-   replacement status from a tag, a backend name or dispatch acceptance.
+   The native callback supplies relationship tags but no verified successor
+   execution snapshot. The route reads both prior and successor through the
+   existing `sandboxed_assistant` digest tool when registered, validates exact
+   identity/project, and requires a running/tool-waiting execution with a fresh
+   (at most 60 seconds old) heartbeat before stamping an observation time and
+   run identity. Missing tools, reads, execution, stale heartbeats and ownership
+   conflicts remain unverified. Callback-supplied verification fields are ignored.
+
+6. **Compression consumed a notification without waking.** The webhook used to
+   append during a compression lock, skip the wake and acknowledge transport;
+   a retry then looked like an already delivered event. It now checks the lock
+   before appending and returns HTTP503, releasing transport dedupe for an exact
+   retry. Controller callbacks retain their independent durable inbox handoff.
+   The lock check is an observation, not a transaction spanning compression and
+   the later model turn; asynchronous post-wake transport failure recovery remains
+   a separate boundary from this pre-append refusal.
 
 ## Reviewed invariants and remaining boundaries
 

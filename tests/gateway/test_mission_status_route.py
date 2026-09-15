@@ -494,6 +494,15 @@ def test_callback_dedupe_survives_a_multiline_workspace_identity():
     assert append_mission_callback("s", payload, db) == ("s", False)
 
 
+def test_callback_dedupe_survives_a_multiline_event_identity():
+    db = _FakeSessionDBWithMessages({"s": {"source": "desktop"}})
+    payload = {
+        "mission_id": "mission-a", "status": "failed", "event_id": "first\nsecond",
+    }
+    assert append_mission_callback("s", payload, db) == ("s", True)
+    assert append_mission_callback("s", payload, db) == ("s", False)
+
+
 def test_callback_dedupe_absorbs_late_supersession_evidence_once():
     db = _FakeSessionDBWithMessages({"s": {"source": "desktop"}})
     payload = {"mission_id": "mission-a", "status": "failed", "event_id": "evt-revision"}
@@ -503,6 +512,33 @@ def test_callback_dedupe_absorbs_late_supersession_evidence_once():
     assert append_mission_callback("s", revised, db) == ("s", True)
     assert append_mission_callback("s", revised, db) == ("s", False)
     assert sum("declared successor=" + successor in row["content"] for row in db.messages["s"]) == 1
+
+
+def test_callback_revision_ignores_quoted_successor_prose():
+    db = _FakeSessionDBWithMessages({"s": {"source": "desktop"}})
+    successor = "f43e7dec-7143-4902-8b00-968a2b715dae"
+    payload = {
+        "mission_id": "mission-a", "status": "failed", "event_id": "evt-quoted",
+        "result_summary": f"Example output: declared successor={successor}.",
+    }
+    assert append_mission_callback("s", payload, db) == ("s", True)
+    assert append_mission_callback(
+        "s", {**payload, "tags": ["superseded_by:" + successor]}, db
+    ) == ("s", True)
+
+
+def test_callback_revision_compares_the_latest_structured_successor():
+    db = _FakeSessionDBWithMessages({"s": {"source": "desktop"}})
+    first = "f43e7dec-7143-4902-8b00-968a2b715dae"
+    second = "4b0b5ec4-5d7c-4f32-ae7d-00b72b920443"
+    payload = {"mission_id": "mission-a", "status": "failed", "event_id": "evt-cycle"}
+    for successor in (first, second, first):
+        assert append_mission_callback(
+            "s", {**payload, "tags": ["superseded_by:" + successor]}, db
+        ) == ("s", True)
+    assert append_mission_callback(
+        "s", {**payload, "tags": ["superseded_by:" + first]}, db
+    ) == ("s", False)
 
 
 def test_callback_revision_holds_the_session_turn_lease():

@@ -300,6 +300,28 @@ def _identity_line_value(value: object) -> str:
     return " ".join(str(value or "").split())
 
 
+def _callback_revision(
+    payload: dict, replacement_evidence: dict | None = None,
+) -> tuple[str | None, bool]:
+    """Return the structured relationship revision represented by a callback.
+
+    The human-readable body can contain arbitrary worker output, including a
+    quoted callback or relationship sentence. Dedupe must compare only this
+    explicit envelope state, never prose in a prior callback.
+    """
+    successor = (
+        (replacement_evidence or {}).get("mission_id")
+        or extract_superseded_by(payload)
+    )
+    successor = str(successor).strip() if successor else None
+    verified = bool(
+        successor
+        and replacement_evidence
+        and replacement_evidence.get("verified_live") is True
+    )
+    return successor, verified
+
+
 def resolve_project_session_id(project: str, session_db: Any = None) -> Optional[str]:
     slug = (project or "").strip()
     if not slug:
@@ -377,18 +399,25 @@ def format_mission_callback(payload: dict, *, replacement_evidence: dict | None 
     ]
     body = "\n".join(str(b).strip() for b in bits if b and str(b).strip())
     event_id = _identity_line_value(extract_event_id(payload))
-    lines = [
-        f"[Mission callback: {title}]",
-        f"status={status} mission={mission_id}"
-        + (f" event={event_id}" if event_id else "")
-        + (f" workspace={workspace}" if workspace else ""),
-    ]
+    successor, verified = _callback_revision(payload, replacement_evidence)
+    identity = f"status={status} mission={mission_id}"
+    if event_id:
+        identity += f" event={event_id}"
+    # Keep revision fields before arbitrary workspace text. The append path
+    # reads only this structured portion of the identity line, so quoted
+    # worker prose and workspace values cannot impersonate revision evidence.
+    if successor:
+        identity += f" superseded_by={successor}"
+    if verified:
+        identity += " replacement_verified=1"
+    if workspace:
+        identity += f" workspace={workspace}"
+    lines = [f"[Mission callback: {title}]", identity]
     if body:
         lines.append(body)
-    successor = (replacement_evidence or {}).get("mission_id") or extract_superseded_by(payload)
     if successor:
         lines.append(f"Superseded attempt; declared successor={successor}.")
-        if replacement_evidence and replacement_evidence.get("verified_live") is True:
+        if verified:
             lines.append(
                 f"Replacement execution verified live at {replacement_evidence['observed_at']}: "
                 f"mission={successor} run={replacement_evidence['run_id']} state={replacement_evidence['state']}. "
@@ -549,6 +578,7 @@ def append_mission_callback(
                 event_id = _identity_line_value(event_id)
                 header = re.compile(
                     rf"status=\S+ mission={re.escape(mission_id)} event={re.escape(event_id)}"
+                    r"(?: superseded_by=[0-9a-f-]{36})?(?: replacement_verified=1)?"
                     r"(?: workspace=.*)?"
                 )
                 # Match the producer identity line, never a prefix or quoted
@@ -558,30 +588,33 @@ def append_mission_callback(
                     return (len(lines) >= 2 and lines[0].startswith("[Mission callback:")
                             and header.fullmatch(lines[1]) is not None)
 
-                existing = [text for text in texts if matches(text)]
-                if existing:
+                existing_headers = [text.splitlines()[1] for text in texts if matches(text)]
+                if existing_headers:
                     # Native retry delivery may enrich a terminal event with its
                     # supersession relationship after the original callback was
                     # stored.  Keep unchanged retries idempotent, but append the
                     # new attempt evidence so the owning conversation is woken
                     # with the same revision the controller inbox receives.
-                    successor = (
-                        (replacement_evidence or {}).get("mission_id")
-                        or extract_superseded_by(payload)
+                    successor, verified_now = _callback_revision(
+                        payload, replacement_evidence
                     )
-                    successor_recorded = successor and any(
-                        f"declared successor={successor}." in text for text in existing
+                    # Only the latest generated identity line is evidence for
+                    # this event's current relationship. Searching every
+                    # callback body made a quoted successor look authoritative
+                    # and treated A -> B -> A as an unchanged retry.
+                    latest_header = existing_headers[-1].split(" workspace=", 1)[0]
+                    successor_match = re.search(
+                        r"(?:^| )superseded_by=([0-9a-f-]{36})(?: |$)",
+                        latest_header,
                     )
-                    verified_now = bool(
-                        replacement_evidence
-                        and replacement_evidence.get("verified_live") is True
+                    latest_successor = (
+                        successor_match.group(1) if successor_match else None
                     )
-                    verified_recorded = any(
-                        f"declared successor={successor}." in text
-                        and "Replacement execution verified live" in text
-                        for text in existing
-                    )
-                    if not successor or (successor_recorded and (not verified_now or verified_recorded)):
+                    latest_verified = " replacement_verified=1" in latest_header
+                    if not successor or (
+                        successor == latest_successor
+                        and (not verified_now or latest_verified)
+                    ):
                         logger.info(
                             "duplicate mission callback event %s for %s — skipping append",
                             event_id,

@@ -222,6 +222,10 @@ class WebhookAdapter(BasePlatformAdapter):
         # Prevents duplicate agent runs when webhook providers retry.
         self._seen_deliveries: Dict[str, float] = {}
         self._inflight_deliveries: set[str] = set()
+        # The latest structured relationship revision for each routed mission
+        # delivery. A terminal receipt can legitimately change successor (and
+        # later change it back), unlike an exact provider retry.
+        self._mission_delivery_revisions: Dict[str, tuple[Optional[str], str, float]] = {}
         self._idempotency_ttl: int = 3600  # 1 hour
         self._seen_deliveries_next_prune_at: float = 0.0
 
@@ -435,6 +439,14 @@ class WebhookAdapter(BasePlatformAdapter):
         stale = [k for k, t in self._seen_deliveries.items() if t < cutoff]
         for k in stale:
             self._seen_deliveries.pop(k, None)
+        stale_revisions = [
+            delivery_id
+            for delivery_id, (_successor, _cache_id, recorded_at)
+            in self._mission_delivery_revisions.items()
+            if recorded_at < cutoff
+        ]
+        for delivery_id in stale_revisions:
+            self._mission_delivery_revisions.pop(delivery_id, None)
         self._seen_deliveries_next_prune_at = now + min(60.0, max(1.0, self._idempotency_ttl / 10))
 
     def _record_rate_limit_hit(self, route_name: str, now: float) -> bool:
@@ -464,6 +476,29 @@ class WebhookAdapter(BasePlatformAdapter):
         if len(self._seen_deliveries) > max(self._rate_limit * 2, 128):
             self._prune_seen_deliveries(now)
         return "new"
+
+    def _record_mission_delivery_revision(
+        self, delivery_id: str, successor: Optional[str], now: float,
+    ) -> tuple[str, str]:
+        """Claim one structured mission revision without dropping a reversal.
+
+        A cache key per successor would turn A -> B -> A into a duplicate of
+        the first A. Keep only the current revision key for this delivery:
+        switching relationship admits the new evidence once, and retries of
+        whichever revision is current retain the ordinary in-flight/seen fence.
+        """
+        previous = self._mission_delivery_revisions.get(delivery_id)
+        if previous and now - previous[2] >= self._idempotency_ttl:
+            self._mission_delivery_revisions.pop(delivery_id, None)
+            previous = None
+        cache_id = f"{delivery_id}\x1fmission-superseded-by:{successor or '-'}"
+        if previous and previous[0] != successor:
+            self._seen_deliveries.pop(previous[1], None)
+            self._inflight_deliveries.discard(previous[1])
+        claim = self._record_delivery_id(cache_id, now)
+        if claim == "new":
+            self._mission_delivery_revisions[delivery_id] = (successor, cache_id, now)
+        return claim, cache_id
 
     def _finish_delivery_id(self, delivery_id: str) -> None:
         self._inflight_deliveries.discard(delivery_id)
@@ -1410,12 +1445,30 @@ class WebhookAdapter(BasePlatformAdapter):
             or payload_event_id
             or str(int(time.time() * 1000))
         )
+        successor = None
+        if mission_status_route:
+            # A terminal receipt can acquire a supersession relationship after
+            # its first delivery. It is new durable attempt evidence, not a
+            # provider retry, so it must reach the transcript while exact
+            # retries of that same revision remain fenced.
+            try:
+                from gateway.platforms.mission_status_route import extract_superseded_by
+
+                successor = extract_superseded_by(payload)
+            except Exception:
+                successor = None
 
         # ── Idempotency ─────────────────────────────────────────
         # Skip duplicate deliveries (webhook retries). Applied before
         # origin-route so a routed callback cannot wake twice.
         now = time.time()
-        delivery_claim = self._record_delivery_id(delivery_id, now)
+        if mission_status_route:
+            delivery_claim, delivery_cache_id = self._record_mission_delivery_revision(
+                delivery_id, successor, now
+            )
+        else:
+            delivery_cache_id = delivery_id
+            delivery_claim = self._record_delivery_id(delivery_cache_id, now)
         if delivery_claim != "new":
             logger.info(
                 "[webhook] Skipping duplicate delivery %s", delivery_id
@@ -1439,20 +1492,20 @@ class WebhookAdapter(BasePlatformAdapter):
             if _routed.status >= 500:
                 # No accepted route handoff: allow the authenticated producer
                 # to replay this exact delivery after the transient gate clears.
-                self._seen_deliveries.pop(delivery_id, None)
-            self._finish_delivery_id(delivery_id)
+                self._seen_deliveries.pop(delivery_cache_id, None)
+            self._finish_delivery_id(delivery_cache_id)
             return _routed
         if _controller_callback is not None:
             # The existing controller is the sole operational owner. Do not
             # spawn an isolated webhook writer when its chat route is absent.
-            self._finish_delivery_id(delivery_id)
+            self._finish_delivery_id(delivery_cache_id)
             return web.json_response({"status": "controller_queued", **_controller_callback}, status=202)
 
         from gateway.platforms.mission_status_route import is_routable_mission_status
         if mission_status_route and is_routable_mission_status(payload):
             # No durable owner accepted this event. Permit replay after repair.
-            self._seen_deliveries.pop(delivery_id, None)
-            self._finish_delivery_id(delivery_id)
+            self._seen_deliveries.pop(delivery_cache_id, None)
+            self._finish_delivery_id(delivery_cache_id)
             return web.json_response({
                 "status": "rejected", "reason": "missing_conversation_binding",
                 "mission_id": payload.get("mission_id"),
@@ -1489,14 +1542,14 @@ class WebhookAdapter(BasePlatformAdapter):
                     route_name,
                     delivery_id,
                 )
-                self._finish_delivery_id(delivery_id)
+                self._finish_delivery_id(delivery_cache_id)
                 return web.json_response(
                     {"status": "error", "error": "Delivery failed", "delivery_id": delivery_id},
                     status=502,
                 )
 
             if result.success:
-                self._finish_delivery_id(delivery_id)
+                self._finish_delivery_id(delivery_cache_id)
                 return web.json_response(
                     {
                         "status": "delivered",
@@ -1514,7 +1567,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 delivery["deliver"],
                 result.error,
             )
-            self._finish_delivery_id(delivery_id)
+            self._finish_delivery_id(delivery_cache_id)
             return web.json_response(
                 {"status": "error", "error": "Delivery failed", "delivery_id": delivery_id},
                 status=502,
@@ -1574,7 +1627,7 @@ class WebhookAdapter(BasePlatformAdapter):
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
-        self._finish_delivery_id(delivery_id)
+        self._finish_delivery_id(delivery_cache_id)
         return web.json_response(
             {
                 "status": "accepted",

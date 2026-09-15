@@ -305,6 +305,46 @@ async def test_duplicate_event_id_does_not_reschedule_wake(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_late_supersession_revision_bypasses_only_generic_transport_dedupe(monkeypatch):
+    """A changed relationship is new evidence; its exact retry is not."""
+    db = _FakeSessionDB(
+        {ORIGIN: {"source": "desktop"}},
+        messages={ORIGIN: [{"content": f"started {MISSION}"}]},
+    )
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    wake = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    payload = {
+        "mission_id": MISSION, "status": "failed", "type": "failed",
+        "origin_session": ORIGIN, "event_id": "late-supersession",
+    }
+    assert (await adapter._handle_webhook(_mock_request(payload))).status == 202
+    successor = "22222222-2222-4222-8222-222222222222"
+    revised = {**payload, "tags": ["superseded_by:" + successor]}
+    assert (await adapter._handle_webhook(_mock_request(revised))).status == 202
+    other_successor = "33333333-3333-4333-8333-333333333333"
+    assert (await adapter._handle_webhook(_mock_request({
+        **payload, "tags": ["superseded_by:" + other_successor],
+    }))).status == 202
+    # A relationship can move back to an earlier successor; do not let its
+    # historical transport key hide the current revision.
+    assert (await adapter._handle_webhook(_mock_request(revised))).status == 202
+    if adapter._background_tasks:
+        await asyncio.gather(*list(adapter._background_tasks))
+    retry = await adapter._handle_webhook(_mock_request(revised))
+    assert retry.status == 200
+    assert any(
+        f"declared successor={successor}." in content
+        for _sid, _role, content in db.appended
+    )
+    assert wake.await_count == 4
+
+
+@pytest.mark.asyncio
 async def test_telegram_origin_wakes_telegram_adapter_not_api_server(monkeypatch):
     db = _FakeSessionDB(
         {

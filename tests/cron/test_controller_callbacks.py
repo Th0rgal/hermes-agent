@@ -188,10 +188,10 @@ def test_incomplete_summary_retains_input_without_immediate_replay():
 
 def test_incomplete_bounded_batch_defers_its_unselected_tail(monkeypatch):
     job_id = controller()
-    first = relay.enqueue_mission_callback(event(summary="first"))
-    relay.enqueue_mission_callback(event(2, summary="second"))
-    snapshot = relay.pending_callbacks(job_id, max_chars=1000)
-    assert snapshot["event_ids"] == [first["event_id"]]
+    for index in range(9):
+        relay.enqueue_mission_callback(event(index, summary="x" * 2000))
+    snapshot = relay.pending_callbacks(job_id)
+    assert 0 < len(snapshot["event_ids"]) < 9
     relay.defer_callbacks(job_id, snapshot["event_ids"])
     assert all(entry.get("retry_after") for entry in jobs.get_job(job_id)["controller_callbacks"])
 

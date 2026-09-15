@@ -1725,7 +1725,7 @@ def skill_view(
             if not e.get("optional")
             and not _is_env_var_persisted(e["name"], env_snapshot)
         ]
-        capture_result = ({"provided": [], "skipped": missing_required_env_vars}
+        capture_result = ({"missing_names": [e["name"] for e in missing_required_env_vars]}
                           if not capture_prerequisites else
                           _capture_required_environment_variables(
                               skill_name, missing_required_env_vars,

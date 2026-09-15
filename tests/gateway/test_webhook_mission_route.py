@@ -454,3 +454,29 @@ async def test_missing_wake_adapter_preserves_exact_retry(monkeypatch):
     response = await adapter._handle_webhook(_mock_request(payload))
     assert response.status == 200
     assert wake.await_count == 1 and len(db.appended) == 1
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_wake_failure_is_recorded_without_retry(monkeypatch):
+    db = _FakeSessionDB({ORIGIN: {"source": "desktop"}},
+                        messages={ORIGIN: [{"content": f"started {MISSION}"}]})
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    wake = AsyncMock(side_effect=TimeoutError("untrusted transport details"))
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    payload = {"mission_id": MISSION, "status": "completed", "type": "completed",
+               "origin_session": ORIGIN, "event_id": "ambiguous-wake"}
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 202
+    await asyncio.gather(*list(adapter._background_tasks))
+    assert "Delivery outcome is unknown" in db.appended[-1][2]
+    assert "untrusted transport details" not in db.appended[-1][2]
+    assert [row[1] for row in db.appended] == ["assistant", "user", "assistant"]
+    before = list(db.appended)
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 200
+    assert db.appended == before and wake.await_count == 1
+    assert payload["status"] == "completed"

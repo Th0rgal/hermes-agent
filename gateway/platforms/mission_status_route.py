@@ -534,6 +534,26 @@ def append_mission_callback(
     return live, True
 
 
+def append_mission_wake_failure(session_id: str, payload: dict, session_db: Any) -> None:
+    """Record ambiguous notification delivery without changing native status."""
+    session_db = sync_session_db(session_db)
+    live = resolve_live_session_id(session_id, session_db) or session_id
+    metadata = mission_callback_display_metadata(payload)
+    metadata["delivery_status"] = "unknown"
+    if _last_message_role(session_db, live) == "assistant":
+        _append_typed(session_db, session_id=live, role="user",
+                      content="Notification delivery receipt follows.",
+                      display_kind=MISSION_CALLBACK_SEPARATOR_DISPLAY_KIND,
+                      display_metadata=metadata)
+    _append_typed(
+        session_db, session_id=live, role="assistant",
+        content=("The mission callback evidence was saved, but its automatic notification "
+                 "did not confirm completion. Delivery outcome is unknown. Inspect this "
+                 "conversation before requesting another notice; no automatic retry was scheduled."),
+        display_kind="mission_callback_delivery", display_metadata=metadata,
+    )
+
+
 def _pending_callback_path(mission_id: str) -> Path:
     from hermes_constants import get_hermes_home
 

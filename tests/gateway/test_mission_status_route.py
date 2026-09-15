@@ -452,3 +452,15 @@ def test_replacement_timeout_is_bounded_and_does_not_queue_more_reads(monkeypatc
         finally:
             release.set()
     asyncio.run(check())
+
+
+def test_wake_failure_receipt_keeps_native_status_separate():
+    from gateway.platforms.mission_status_route import append_mission_wake_failure
+    db = _TypedDB(last_role="assistant")
+    append_mission_wake_failure("s", {"mission_id": "m", "status": "completed", "event_id": "e"}, db)
+    assert [row["role"] for row in db.appended] == ["user", "assistant"]
+    receipt = db.appended[-1]
+    assert receipt["display_kind"] == "mission_callback_delivery"
+    assert receipt["display_metadata"]["status"] == "completed"
+    assert receipt["display_metadata"]["delivery_status"] == "unknown"
+    assert "[CTRL:" not in receipt["content"]

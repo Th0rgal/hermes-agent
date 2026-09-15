@@ -246,3 +246,36 @@ def test_push_mission_notice_carries_execution_restriction():
         await deliver_wake(adapter, text="Normal wake", session_id="s", source=_source())
         assert not adapter.handled[1].notification_only
     asyncio.run(check())
+
+
+def test_mission_notice_timeout_does_not_repeat_accepted_request(monkeypatch):
+    from aiohttp import web
+    import gateway.wake as wake_module
+    monkeypatch.setattr(wake_module, "WAKE_TURN_TIMEOUT_SECONDS", 2)
+    monkeypatch.setattr(wake_module, "_RETRY_DELAYS_SECONDS", [0, 0])
+    async def check():
+        accepted = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+        async def handler(request):
+            calls.append(await request.json())
+            accepted.set()
+            await release.wait()
+            return web.json_response({"choices": []})
+        runner, port = await _serve(handler)
+        task = asyncio.create_task(deliver_wake(
+            ApiServerLikeAdapter(host="127.0.0.1", port=port), text="notice",
+            session_id="s", display_kind="mission_callback_wake",
+        ))
+        try:
+            await asyncio.wait_for(accepted.wait(), 5)
+            with pytest.raises(RuntimeError, match="outcome is unknown"):
+                await task
+            assert len(calls) == 1
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await runner.cleanup()
+    asyncio.run(check())

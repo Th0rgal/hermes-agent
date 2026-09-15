@@ -234,3 +234,28 @@ d750841f1254a9e1edd75b86edd457aa64a20d32): all non-success callbacks get three
 attempts and a 60-second reconciliation sweep without an age cutoff. Thus
 HTTP409 prevents autonomous Hermes ownership but does not bound producer lifetime
 retries. This concrete finding was sent to the active native counterpart.
+
+
+## Ambiguous notification outcomes
+
+Background wake exceptions are now observed. Hermes writes a role-safe delivery
+receipt to the same conversation (following its continuation), separate from
+native mission status and proof acceptance. The receipt says delivery outcome is
+unknown and asks for inspection before requesting another notice. It does not
+copy raw transport exception text into the conversation or automatically retry
+an operation that may already have run. Transport replay still produces one
+callback/wake, not a second model turn. No new project store or owner is created.
+
+This does not close the process-crash window, guarantee receipt persistence when
+the session store is unavailable, or establish an exactly-once wake protocol.
+Those remain explicit boundaries. Reusing the cron delivery queue wholesale
+would not solve them: that queue deliberately fences claimed uncertain sends as
+unknown rather than replaying them.
+
+Mission-notice self-posts also stop after ambiguous timeout/response loss; an
+explicit 429 capacity rejection or connector failure before sending retains its
+existing bounded retry. A local HTTP regression accepts the request and withholds
+the response, proving only one request is sent. The consolidated review suite
+passed 694 tests across 26 files (74.8s) before this final retry refinement; 23 focused
+wake/routing tests passed afterward. Logs: output/review-final-validation.log and
+output/ambiguous-wake-retry-tests.log.

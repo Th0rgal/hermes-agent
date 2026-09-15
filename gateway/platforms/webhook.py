@@ -904,6 +904,39 @@ class WebhookAdapter(BasePlatformAdapter):
             source = None
         return adapter, source
 
+    def _record_mission_wake_failure(self, session_id, payload, profile):
+        from gateway.platforms.mission_status_route import append_mission_wake_failure
+
+        _home, token = self._profile_home_token(profile)
+        db, owned = self._session_db_for_profile(profile)
+        try:
+            if db is None:
+                raise RuntimeError("Session store unavailable for notification receipt")
+            append_mission_wake_failure(session_id, payload, db)
+        finally:
+            if owned and db is not None:
+                db.close()
+            if token is not None:
+                from hermes_constants import reset_hermes_home_override
+                reset_hermes_home_override(token)
+
+    async def _deliver_mission_wake(self, adapter, wake_kwargs, payload, profile):
+        from gateway.wake import deliver_wake
+
+        try:
+            await deliver_wake(adapter, **wake_kwargs)
+        except Exception:
+            # A timeout can follow a completed model turn. Never blindly
+            # replay it, and never classify the native mission as failed.
+            logger.warning("[webhook] mission notification outcome unknown", exc_info=True)
+            try:
+                await asyncio.to_thread(
+                    self._record_mission_wake_failure,
+                    wake_kwargs["session_id"], payload, profile,
+                )
+            except Exception:
+                logger.exception("[webhook] could not persist notification failure receipt")
+
     async def _maybe_route_mission_status(
         self, payload: dict, *, profile: Optional[str] = None,
         controller_callback: bool = False,
@@ -1045,7 +1078,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 )
 
                 if adapter is not None:
-                    from gateway.wake import adapter_supports_push, deliver_wake
+                    from gateway.wake import adapter_supports_push
 
                     wake_kwargs = {
                         "text": MISSION_CALLBACK_WAKE_PROMPT,
@@ -1055,7 +1088,9 @@ class WebhookAdapter(BasePlatformAdapter):
                     }
                     if source is not None and adapter_supports_push(adapter):
                         wake_kwargs["source"] = source
-                    task = asyncio.create_task(deliver_wake(adapter, **wake_kwargs))
+                    task = asyncio.create_task(
+                        self._deliver_mission_wake(adapter, wake_kwargs, payload, profile)
+                    )
                     self._background_tasks.add(task)
                     task.add_done_callback(self._background_tasks.discard)
             except Exception:

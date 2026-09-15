@@ -744,3 +744,28 @@ def test_project_delivery_does_not_enroll_legacy_cron(explicit_null):
     assert not jobs.get_job(saved["id"]).get("controller_callbacks")
     with pytest.raises(ValueError, match="Existing controller job required"):
         export_repair(saved["id"])
+
+
+def test_explicit_legacy_prompt_repair_does_not_enroll_or_drop_authority():
+    from cron import jobs
+    from cron.controller_repair import export_repair, apply_repair
+    mandatory = "Core may supervise exactly its two authorized sandboxed-sh-dev support missions."
+    saved = jobs.create_job(mandatory + "x" * 24646, "every 10m", deliver="project:verity-core")
+    proposal = export_repair(saved["id"], legacy_prompt_only=True)
+    assert proposal["diagnostic"] and proposal["replacement_prompt"] == saved["prompt"]
+    with pytest.raises(ValueError, match="Existing controller job required"):
+        apply_repair({**proposal, "legacy_prompt_only": False})
+    with pytest.raises(ControllerScopeError):
+        apply_repair(proposal)
+    proposal["replacement_prompt"] = mandatory
+    jobs.update_job(saved["id"], {"name": "Latest operator version"})
+    with pytest.raises(ValueError, match="changed since export"):
+        apply_repair(proposal)
+    fresh = export_repair(saved["id"], legacy_prompt_only=True)
+    fresh["replacement_prompt"] = mandatory
+    repaired = apply_repair(fresh)
+    assert repaired["prompt"] == mandatory
+    assert repaired.get("controller") is None
+    assert repaired["deliver"] == saved["deliver"]
+    assert repaired["skills"] == saved["skills"]
+    assert repaired["name"] == "Latest operator version"

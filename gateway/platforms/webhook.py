@@ -957,9 +957,12 @@ class WebhookAdapter(BasePlatformAdapter):
                 is_routable_mission_status,
                 resolve_mission_delivery_session,
                 stash_unroutable_callback,
+                take_stashed_callback,
             )
         except Exception:
             logger.exception("[webhook] mission status router unavailable")
+            if payload.get("mission_id"):
+                return web.json_response({"status": "retry", "reason": "mission_router_unavailable"}, status=503)
             return None
 
         _home, token = self._profile_home_token(profile)
@@ -972,6 +975,8 @@ class WebhookAdapter(BasePlatformAdapter):
                     reset_hermes_home_override(token)
                 except Exception:
                     pass
+            if is_routable_mission_status(payload):
+                return web.json_response({"status": "retry", "reason": "session_store_unavailable"}, status=503)
             return None
         live = None
         appended = False
@@ -986,18 +991,18 @@ class WebhookAdapter(BasePlatformAdapter):
             )
             if not target:
                 mission_id = str(payload.get("mission_id") or "").strip()
+                if controller_callback:
+                    return None  # The explicit controller inbox already owns delivery.
                 if mission_id and is_routable_mission_status(payload) and extract_origin_session(payload):
-                    await asyncio.to_thread(
+                    stashed = await asyncio.to_thread(
                         stash_unroutable_callback, mission_id, payload
                     )
-                    if extract_origin_session(payload):
-                        return web.json_response(
-                            {
-                                "status": "pending_enrollment",
-                                "mission_id": mission_id,
-                            },
-                            status=202,
-                        )
+                    return web.json_response(
+                        {"status": "pending_enrollment", "mission_id": mission_id,
+                         "evidence_stashed": stashed,
+                         "action": "Confirm canonical ownership/enrollment, then resend this event."},
+                        status=503,
+                    )
                 return None
             from gateway.platforms.mission_status_route import should_wake_mission_callback
 
@@ -1032,6 +1037,13 @@ class WebhookAdapter(BasePlatformAdapter):
                 live, appended = result
             else:
                 live, appended = result, True
+            if live:
+                # The transcript now owns this exact evidence. Clear only a
+                # matching backup, never another event for the same mission.
+                await asyncio.to_thread(
+                    take_stashed_callback, str(payload.get("mission_id") or ""),
+                    expected_payload=payload,
+                )
             getter = getattr(session_db, "get_session", None)
             if callable(getter) and live:
                 try:
@@ -1041,6 +1053,8 @@ class WebhookAdapter(BasePlatformAdapter):
             wake = bool(appended and live and not controller_callback)
         except Exception:
             logger.exception("[webhook] failed to append routed mission callback")
+            if is_routable_mission_status(payload):
+                return web.json_response({"status": "retry", "reason": "mission_route_unavailable"}, status=503)
             return None
         finally:
             if owned:

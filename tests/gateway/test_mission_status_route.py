@@ -476,3 +476,17 @@ def test_callback_dedupe_requires_exact_identity_not_prefix_or_quoted_body():
         assert append_mission_callback("s", next_payload, db) == ("s", True)
         assert append_mission_callback("s", next_payload, db) == ("s", False)
     assert append_mission_callback("s", dict(payload, mission_id="mission-b"), db) == ("s", True)
+
+
+def test_early_callback_backup_is_bounded_and_preserves_existing_evidence(monkeypatch):
+    from gateway.platforms import mission_status_route as route
+    monkeypatch.setattr(route, "_PENDING_MAX_RECORDS", 1)
+    first = {"mission_id": "one", "event_id": "e1", "status": "failed"}
+    assert route.stash_unroutable_callback("one", first) is True
+    assert route.stash_unroutable_callback("one", first) is True
+    assert route.stash_unroutable_callback("one", dict(first, event_id="e2")) is False
+    assert route.take_stashed_callback("one", expected_payload=dict(first, event_id="e2")) is None
+    assert route.stash_unroutable_callback("two", {"event_id": "e2"}) is False
+    assert route.take_stashed_callback("one") == first
+    assert route.stash_unroutable_callback("two", {"body": "x" * 65536}) is False
+    assert route.stash_unroutable_callback("two", {"event_id": "e2"}) is True

@@ -291,11 +291,11 @@ controller enrollment or downstream dispatch/delivery. The source path is exact:
 | update_job | Relevant edits call validate_controller_job, but that returns immediately for scope=None. |
 | scheduler.run_job / _build_job_prompt | Binds no controller authority; adds no controller prefix; controller-specific 16K check receives None and is inactive. Other ordinary-cron/runtime limits may still apply. |
 | controller_callbacks.controller_project | Requires an object with callback_relay=true; null jobs are not selected as controller inbox owners. |
-| controller_repair export | Rejects jobs without controller metadata. This is an enrolled-controller prompt repair, not legacy discovery/enrollment. |
+| controller_repair export | Defaults to enrolled controllers; explicit --legacy-prompt-only supports missing/null metadata without enrollment. |
 
 The regression covers absent and explicit-null metadata, project delivery,
-creation/edit above 16K, no callback-inbox discovery, and rejection by the repair
-export. It deliberately preserves ordinary cron behavior. Therefore PR136 must
+creation/edit above 16K, no callback-inbox discovery, and rejection by the default
+repair export. Explicit legacy repair is described below. It deliberately preserves ordinary cron behavior. Therefore PR136 must
 not be represented as protecting the reported live Verity cron through its
 controller admission or authority checks. Conversation-level webhook safeguards
 are separate from this enrollment claim.
@@ -346,7 +346,58 @@ by this follow-up. Full durable/remote identities were not independently queried
 The operator/root's 3c552d7 plus 512-test receipt remains a valid historical
 checkpoint. At the start of this follow-up GitHub PR136 instead reported head
 a0f639c, with 696 local tests and green CI/Nix. These are later source checkpoints,
-not evidence of any production deployment. This follow-up changes documentation
-and regression coverage only; the live null-metadata gap remains explicit.
+not evidence of any production deployment. The enrollment-correction checkpoint changed documentation/tests only; the
+subsequent explicit legacy repair does not enroll live jobs.
 
 Follow-up validation: **134 passed, 0 failed**, two files in 14.2s via `scripts/run_tests.sh tests/cron/test_controller_scope.py tests/cron/test_controller_callbacks.py -j 2`. Log: output/legacy-enrollment-tests.log.
+
+
+## Continued implementation: bounded pending origins and legacy prompt repair
+
+Unverified explicit origins now receive HTTP503 pending_enrollment, including an
+explicit evidence_stashed boolean and an ownership/retry action. A failed backup
+is never acknowledged as 202. The existing early-enrollment backup is capped at
+128 records and 65,536 UTF-8 bytes per record; overflow, lock contention, malformed
+existing records and conflicting events are refused without overwriting evidence.
+Exact duplicate backup writes are harmless. A nonblocking cross-process mutation
+lock protects the capacity check and file replacement; a crash-held lock fails
+closed and requires reconciliation, not speculative ownership takeover.
+
+After an existing owner can prove the mission belongs in its conversation, the
+same delivery retries into that conversation once. Only an identical backup is
+removed after transcript acceptance. Explicit controller inbox owners keep their
+separate delivery path. No autonomous webhook owner, new project authority store,
+mission resume or compute dispatch is introduced. Producer lifetime retries and
+crash recovery still require the previously documented native-side work.
+
+Legacy oversized jobs now have an explicit source-side repair path:
+
+```sh
+python -m cron.controller_repair export JOB_ID proposal.json --legacy-prompt-only
+# Review the full original; edit replacement_prompt, preserving mandatory scope.
+python -m cron.controller_repair apply proposal.json
+```
+
+This mode only accepts missing/null controller metadata. It assembles the proposed
+prompt with ordinary cron framing and full skills in validation-only mode, under
+no controller scope, and refuses more than 16,000 characters. It does not execute
+runtime scripts or enroll the job. Apply checks the complete original snapshot
+atomically and changes only the reviewed prompt. Removing the explicit legacy
+flag cannot bypass the gate. Cross-project support instructions, tools, skills,
+job state and delivery remain intact. Tests retain the authorized dev-support
+instruction and reject stale operator snapshots. The source cannot prove semantic
+equivalence of arbitrary operator rewrites; it never generates/truncates them.
+
+This is repair-time static validation, not automatic discovery, permanent scope
+enrollment or a new runtime budget for all ordinary crons. Dynamic legacy input
+and later ordinary edits remain separate limits. Lido still requires its own
+fresh metadata readback before choosing enrolled versus legacy repair; no live
+record was changed. Verity's cross-project authority enrollment plan still applies.
+
+Routing lookup/import/store errors now return retryable 503 rather than a false
+missing-ownership 409. Targeted validation: 215 tests passed across six files; 135
+focused repair/backup guard tests passed after tightening explicit-mode handling;
+58 routing/adapter integration tests passed after separating infrastructure errors.
+These runs overlap. Logs: output/orphan-legacy-final-tests.log,
+output/orphan-legacy-guards-tests.log, output/orphan-routing-errors-tests.log.
+No CI polling, live enrollment, merge or deployment was performed for this work.

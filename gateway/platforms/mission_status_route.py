@@ -572,35 +572,73 @@ def _pending_callback_path(mission_id: str) -> Path:
     return get_hermes_home() / _PENDING_DIRNAME / f"{safe}.json"
 
 
-def stash_unroutable_callback(mission_id: str, payload: dict) -> None:
-    """Keep a terminal webhook that arrived before enroll/ownership proof."""
+# Existing early-enrollment evidence only: never project ownership. Refuse
+# overflow/conflicting events rather than silently replacing accepted evidence.
+_PENDING_MAX_RECORDS = 128
+_PENDING_MAX_BYTES = 65_536
+
+
+def stash_unroutable_callback(mission_id: str, payload: dict) -> bool:
+    """Bounded, fail-closed backup; HTTP acceptance must await a real owner."""
     mid = (mission_id or "").strip()
     if not mid or not isinstance(payload, dict):
-        return
+        return False
     path = _pending_callback_path(mid)
+    lock = path.parent / ".mutation-lock"
+    acquired = False
     try:
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if len(encoded) > _PENDING_MAX_BYTES:
+            return False
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic across processes, no blocking wait. A crash-held lock refuses
+        # backup writes until repaired; producers retain unaccepted events.
+        lock.mkdir()
+        acquired = True
+        if path.exists():
+            if path.stat().st_size > _PENDING_MAX_BYTES:
+                return False
+            return json.loads(path.read_text(encoding="utf-8")) == payload
+        if sum(1 for _ in path.parent.glob("*.json")) >= _PENDING_MAX_RECORDS:
+            return False
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        tmp.replace(path)
+        try:
+            tmp.write_bytes(encoded)
+            tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)
+        return True
     except Exception:
-        logger.debug("failed to stash pending mission callback %s", mid, exc_info=True)
+        logger.debug("pending callback backup refused for %s", mid, exc_info=True)
+        return False
+    finally:
+        if acquired:
+            lock.rmdir()
 
 
-def take_stashed_callback(mission_id: str) -> Optional[dict]:
-    """Pop a previously stashed terminal callback, or None."""
+def take_stashed_callback(mission_id: str, *, expected_payload: Optional[dict] = None) -> Optional[dict]:
+    """Pop existing early evidence under the same nonblocking mutation lock."""
     mid = (mission_id or "").strip()
     if not mid:
         return None
     path = _pending_callback_path(mid)
-    if not path.exists():
-        return None
+    lock = path.parent / ".mutation-lock"
+    acquired = False
     try:
+        lock.mkdir()
+        acquired = True
+        if not path.exists() or path.stat().st_size > _PENDING_MAX_BYTES:
+            return None
         data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        data = None
-    try:
+        if not isinstance(data, dict):
+            return None
+        if expected_payload is not None and data != expected_payload:
+            return None
         path.unlink()
+        return data
     except Exception:
-        pass
-    return data if isinstance(data, dict) else None
+        logger.debug("pending callback backup unavailable for %s", mid, exc_info=True)
+        return None
+    finally:
+        if acquired:
+            lock.rmdir()

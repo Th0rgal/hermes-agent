@@ -207,7 +207,9 @@ async def test_unrelated_origin_is_stashed_not_injected():
     # Origin present but no ownership proof — do not inject into that
     # session, and do not mint a throwaway webhook session either. Enroll
     # will fold if this was a beat-the-transcript race.
+    assert resp.status == 503
     assert body["status"] == "pending_enrollment"
+    assert body["evidence_stashed"] is True
     assert adapter.handle_message.await_count == 0
     assert db.appended == []
 
@@ -480,3 +482,65 @@ async def test_ambiguous_wake_failure_is_recorded_without_retry(monkeypatch):
     assert response.status == 200
     assert db.appended == before and wake.await_count == 1
     assert payload["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_pending_origin_retries_after_ownership_without_duplicate_wake(monkeypatch):
+    from gateway.platforms import mission_status_route as route
+    db = _FakeSessionDB({ORIGIN: {"source": "desktop"}}, messages={ORIGIN: []})
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    adapter.handle_message = AsyncMock()
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    wake = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    payload = {"mission_id": MISSION, "status": "failed", "type": "failed",
+               "origin_session": ORIGIN, "event_id": "late-ownership"}
+    for _ in range(2):
+        response = await adapter._handle_webhook(_mock_request(payload))
+        assert response.status == 503
+        assert json.loads(response.body)["evidence_stashed"] is True
+    assert not db.appended and adapter.handle_message.await_count == 0
+    # Existing owner records the mission; no new conversation/enrollment job.
+    db.messages[ORIGIN].append({"role": "user", "content": f"Started {MISSION}"})
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 202
+    await asyncio.gather(*list(adapter._background_tasks))
+    assert wake.await_count == 1 and len(db.appended) == 1
+    assert route.take_stashed_callback(MISSION) is None
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 200 and wake.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_origin_backup_failure_never_acknowledges_event(monkeypatch):
+    from gateway.platforms import mission_status_route as route
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(_FakeSessionDB({}, messages={}))
+    adapter.handle_message = AsyncMock()
+    monkeypatch.setattr(route, "stash_unroutable_callback", lambda *args: False)
+    response = await adapter._handle_webhook(_mock_request({
+        "mission_id": MISSION, "status": "failed", "type": "failed", "origin_session": ORIGIN,
+    }))
+    assert response.status == 503
+    assert json.loads(response.body)["evidence_stashed"] is False
+    assert adapter.handle_message.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_route_lookup_failure_is_not_classified_as_missing_ownership(monkeypatch):
+    from gateway.platforms import mission_status_route as route
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(_FakeSessionDB({}, messages={}))
+    adapter.handle_message = AsyncMock()
+    def unavailable(*args):
+        raise OSError("store unavailable")
+    monkeypatch.setattr(route, "resolve_mission_delivery_session", unavailable)
+    payload = {"mission_id": MISSION, "status": "failed", "type": "failed", "event_id": "lookup-failure"}
+    for _ in range(2):
+        response = await adapter._handle_webhook(_mock_request(payload))
+        assert response.status == 503
+        assert json.loads(response.body)["reason"] == "mission_route_unavailable"
+    assert adapter.handle_message.await_count == 0

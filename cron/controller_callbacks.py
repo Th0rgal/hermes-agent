@@ -101,7 +101,9 @@ def _wake(job: dict) -> None:
                 last_run = jobs._ensure_aware(datetime.fromisoformat(
                     job.get("last_controller_callback_boundary_at") or job["last_run_at"]
                 ))
-                if not any(jobs._ensure_aware(datetime.fromisoformat(entry["received_at"])) > last_run
+                if not any(jobs._ensure_aware(datetime.fromisoformat(
+                        entry.get("revised_at") or entry["received_at"]
+                    )) > last_run
                            for entry in ready):
                     return
             except (KeyError, TypeError, ValueError):
@@ -182,6 +184,7 @@ def enqueue_mission_callback(payload: dict[str, Any]) -> dict | None:
             # the controller must see the revised evidence on its next turn.
             if entry.get("superseded_by") != successor:
                 entry["superseded_by"] = successor
+                entry["revised_at"] = jobs._hermes_now().isoformat()
                 if entry.get("handled_at"):
                     entry.pop("handled_at", None)
                     entry.pop("retry_after", None)
@@ -284,9 +287,22 @@ def defer_callbacks(job_id: str, event_ids: list[str]) -> None:
         retry_at = jobs.compute_next_run(job["schedule"], jobs._hermes_now().isoformat())
         if retry_at is None:
             return
+        # A callback that arrived after the input snapshot was taken is fresh
+        # evidence, not part of the incomplete batch.  Let it retain the
+        # immediate wake marker; otherwise an incomplete turn delays work it
+        # never saw until the ordinary schedule.
+        boundary = job.get("controller_callback_boundary_at")
+        selected_ids = set(event_ids)
         for entry in _pending(job):
             # The model saw only a bounded prefix.  Holding back only that
             # prefix leaves an unselected tail ready, which wakes every tick
             # and repeatedly replays the same incomplete batch.
-            entry["retry_after"] = retry_at
+            try:
+                captured = boundary and jobs._ensure_aware(
+                    datetime.fromisoformat(entry["received_at"])
+                ) <= jobs._ensure_aware(datetime.fromisoformat(boundary))
+            except (KeyError, TypeError, ValueError):
+                captured = entry["id"] in selected_ids
+            if captured:
+                entry["retry_after"] = retry_at
         jobs.save_jobs(records)

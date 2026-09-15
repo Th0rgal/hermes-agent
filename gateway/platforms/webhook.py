@@ -1291,6 +1291,14 @@ class WebhookAdapter(BasePlatformAdapter):
                 }
             )
 
+        # Mission callbacks use a dedicated route (the established
+        # ``mission-complete`` name or an explicit opt-in).  Generic webhooks
+        # must never be sent through mission storage/routing merely because a
+        # third-party payload has familiar field names.
+        mission_status_route = route_config.get(
+            "mission_status", route_name == "mission-complete"
+        ) is True
+
         # ── Mission-backed delegation fold ──────────────────────────────────
         # A sandboxed.sh mission started via delegate_task(backend="mission")
         # reports its terminal transition here. If this payload's mission_id
@@ -1304,19 +1312,21 @@ class WebhookAdapter(BasePlatformAdapter):
         # One durable handoff before either completion path and before the
         # transport dedupe claim. Paused controllers retain input without
         # being re-enabled; a failed conversation route cannot lose this work.
-        try:
-            from cron.controller_callbacks import enqueue_mission_callback
+        _controller_callback = None
+        if mission_status_route:
+            try:
+                from cron.controller_callbacks import enqueue_mission_callback
 
-            with self._profile_scope(profile):
-                _controller_callback = await asyncio.to_thread(
-                    enqueue_mission_callback, payload
-                )
-        except Exception:
-            logger.exception("[webhook] controller callback handoff failed; retry required")
-            return web.json_response({"status": "retry", "reason": "controller_inbox"}, status=503)
-        _folded = self._maybe_fold_mission_delegation(payload, profile=request_profile)
-        if _folded is not None:
-            return _folded
+                with self._profile_scope(profile):
+                    _controller_callback = await asyncio.to_thread(
+                        enqueue_mission_callback, payload
+                    )
+            except Exception:
+                logger.exception("[webhook] controller callback handoff failed; retry required")
+                return web.json_response({"status": "retry", "reason": "controller_inbox"}, status=503)
+            _folded = self._maybe_fold_mission_delegation(payload, profile=request_profile)
+            if _folded is not None:
+                return _folded
 
         # The route script, prompt render and skill lookup below read the
         # profile's home (skills/, config). The runner only enters the routed
@@ -1419,10 +1429,12 @@ class WebhookAdapter(BasePlatformAdapter):
 
         # Route sandboxed.sh mission-status events into the dedicated
         # conversation before minting a throwaway webhook session.
-        _routed = await self._maybe_route_mission_status(
-            payload, profile=request_profile,
-            controller_callback=_controller_callback is not None,
-        )
+        _routed = None
+        if mission_status_route:
+            _routed = await self._maybe_route_mission_status(
+                payload, profile=request_profile,
+                controller_callback=_controller_callback is not None,
+            )
         if _routed is not None:
             if _routed.status >= 500:
                 # No accepted route handoff: allow the authenticated producer
@@ -1437,14 +1449,6 @@ class WebhookAdapter(BasePlatformAdapter):
             return web.json_response({"status": "controller_queued", **_controller_callback}, status=202)
 
         from gateway.platforms.mission_status_route import is_routable_mission_status
-        # A generic authenticated webhook is not thereby a mission-status
-        # producer.  Preserve its configured delivery/agent path when a
-        # coincidental payload has mission_id + a terminal-looking status.
-        # ``mission-complete`` is the established dedicated route; custom
-        # names opt in explicitly.
-        mission_status_route = route_config.get(
-            "mission_status", route_name == "mission-complete"
-        ) is True
         if mission_status_route and is_routable_mission_status(payload):
             # No durable owner accepted this event. Permit replay after repair.
             self._seen_deliveries.pop(delivery_id, None)

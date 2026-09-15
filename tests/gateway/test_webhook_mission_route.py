@@ -433,6 +433,21 @@ async def test_orphan_callback_rejected_without_autonomous_owner(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_generic_route_with_mission_looking_payload_skips_mission_router(monkeypatch):
+    adapter = _make_adapter()
+    adapter._routes["mission-complete"]["mission_status"] = False
+    adapter.handle_message = AsyncMock()
+    router = AsyncMock(side_effect=AssertionError("generic route must not route missions"))
+    monkeypatch.setattr(adapter, "_maybe_route_mission_status", router)
+    payload = {"mission_id": MISSION, "status": "completed", "type": "completed",
+               "event_id": "generic-mission-shaped"}
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 202
+    assert router.await_count == 0
+    await asyncio.gather(*list(adapter._background_tasks))
+
+
+@pytest.mark.asyncio
 async def test_missing_wake_adapter_preserves_exact_retry(monkeypatch):
     db = _FakeSessionDB({ORIGIN: {"source": "desktop"}},
                         messages={ORIGIN: [{"content": f"started {MISSION}"}]})

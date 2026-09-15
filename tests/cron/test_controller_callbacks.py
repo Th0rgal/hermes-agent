@@ -196,6 +196,44 @@ def test_incomplete_bounded_batch_defers_its_unselected_tail(monkeypatch):
     assert all(entry.get("retry_after") for entry in jobs.get_job(job_id)["controller_callbacks"])
 
 
+def test_incomplete_batch_does_not_defer_input_after_its_snapshot(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    first = relay.enqueue_mission_callback(event())
+    now += timedelta(seconds=1)
+    snapshot = relay.pending_callbacks(job_id)
+    now += timedelta(seconds=1)
+    fresh = relay.enqueue_mission_callback(event(2))
+    relay.defer_callbacks(job_id, snapshot["event_ids"])
+    entries = {entry["id"]: entry for entry in jobs.get_job(job_id)["controller_callbacks"]}
+    assert entries[first["event_id"]].get("retry_after")
+    assert not entries[fresh["event_id"]].get("retry_after")
+
+
+def test_revised_supersession_wakes_after_a_later_failed_run(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    first = relay.enqueue_mission_callback(event())
+    relay.acknowledge_callbacks(job_id, [first["event_id"]], success=True)
+    now += timedelta(seconds=1)
+    relay.begin_callback_run(job_id)
+    now += timedelta(seconds=1)
+    jobs.mark_job_run(job_id, success=False, error="failed")
+    retry_at = jobs.get_job(job_id)["next_run_at"]
+    now += timedelta(seconds=1)
+    successor = "f43e7dec-7143-4902-8b00-968a2b715dae"
+    relay.enqueue_mission_callback(event(tags=["superseded_by:" + successor]))
+    row = jobs.get_job(job_id)
+    assert row["controller_callbacks"][0].get("revised_at") == now.isoformat()
+    assert row["next_run_at"] < retry_at
+
+
 def test_alias_callback_matches_canonical_job(monkeypatch):
     import hermes_cli.projects_db as projects
     monkeypatch.setattr(projects, "_project_alias_map", lambda: {"lido": "verity-lido"})
@@ -303,7 +341,7 @@ def test_arrival_during_failed_run_wakes_from_input_boundary(monkeypatch, snapsh
     assert jobs.get_job(job_id)["next_run_at"] == retry_at
 
 
-def test_deferred_fresh_input_does_not_authorize_replayed_early_wake(monkeypatch):
+def test_fresh_input_after_snapshot_authorizes_an_early_wake(monkeypatch):
     from datetime import datetime, timedelta, timezone
 
     now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
@@ -319,7 +357,7 @@ def test_deferred_fresh_input_does_not_authorize_replayed_early_wake(monkeypatch
     jobs.mark_job_run(job_id, success=False, error="failed")
     retry_at = jobs.get_job(job_id)["next_run_at"]
     relay.wake_pending_controllers()
-    assert jobs.get_job(job_id)["next_run_at"] == retry_at
+    assert jobs.get_job(job_id)["next_run_at"] < retry_at
 
 
 def test_completion_without_new_boundary_does_not_reuse_previous_run(monkeypatch):

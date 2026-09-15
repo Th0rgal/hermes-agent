@@ -233,9 +233,14 @@ def _load_skill_payload(
     skill_identifier: str,
     task_id: str | None = None,
     *,
-    capture_prerequisites: bool = True,
+    validation_only: bool = False,
 ) -> tuple[dict[str, Any], Path | None, str] | None:
-    """Load a skill by name/path and return (loaded_payload, skill_dir, display_name)."""
+    """Load a skill by name/path and return (loaded_payload, skill_dir, display_name).
+
+    Admission validates durable instructions only.  It must never prompt for
+    missing credentials or register environment/credential passthrough while
+    loading a bundle member.
+    """
     raw_identifier = (skill_identifier or "").strip()
     if not raw_identifier:
         return None
@@ -251,7 +256,7 @@ def _load_skill_payload(
                 normalized,
                 task_id=task_id,
                 preprocess=False,
-                capture_prerequisites=capture_prerequisites,
+                capture_prerequisites=not validation_only,
             )
         )
     except Exception:

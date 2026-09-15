@@ -193,17 +193,17 @@ class TestBuildBundleInvocationMessage:
         real_load = skill_commands._load_skill_payload
         calls = []
 
-        def capture_load(identifier, task_id=None, *, capture_prerequisites=True):
-            calls.append(capture_prerequisites)
+        def capture_load(identifier, task_id=None, *, validation_only=False):
+            calls.append(validation_only)
             return real_load(
                 identifier,
                 task_id=task_id,
-                capture_prerequisites=capture_prerequisites,
+                validation_only=validation_only,
             )
 
         monkeypatch.setattr(skill_commands, "_load_skill_payload", capture_load)
         assert build_bundle_invocation_message("/combo", validation_only=True) is not None
-        assert calls == [False]
+        assert calls == [True]
 
     def test_skips_missing_skills(self, bundles_env):
         bundles_dir, skills_dir = bundles_env

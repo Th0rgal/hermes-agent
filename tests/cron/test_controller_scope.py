@@ -383,6 +383,57 @@ def test_admission_counts_bundle_members_without_inline_shell(tmp_path, monkeypa
     assert usage_calls == []
 
 
+def test_locked_admission_bundle_never_captures_or_registers_prerequisites(tmp_path, monkeypatch):
+    """Bundle members must stay read-only during controller admission.
+
+    This deliberately holds the jobs lock to prove a controller edit cannot
+    prompt for a missing secret or mutate execution passthrough state through
+    its bundle members.
+    """
+    from cron import jobs
+    from cron.controller_scope import validate_controller_job
+    from agent import skill_bundles
+    import tools.credential_files as credential_files
+    import tools.env_passthrough as env_passthrough
+    import tools.skills_tool as skills_tool
+
+    skills_dir = tmp_path / "skills"
+    skill = skills_dir / "credentialed-member" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    credential_file = tmp_path / "available-credential.json"
+    credential_file.write_text("{}")
+    skill.write_text(
+        "---\n"
+        "name: credentialed-member\n"
+        "description: Inspect receipts.\n"
+        "required_environment_variables:\n"
+        "  - name: ADMISSION_MISSING_SECRET\n"
+        "    prompt: Enter the admission secret\n"
+        "  - name: ADMISSION_AVAILABLE_TOKEN\n"
+        "    prompt: Enter the available token\n"
+        "required_credential_files:\n"
+        f"  - {credential_file}\n"
+        "---\n"
+        "Inspect durable receipts only.\n"
+    )
+    monkeypatch.setattr(skills_tool, "SKILLS_DIR", skills_dir)
+    monkeypatch.setenv("HERMES_BUNDLES_DIR", str(tmp_path / "bundles"))
+    monkeypatch.delenv("ADMISSION_MISSING_SECRET", raising=False)
+    monkeypatch.setenv("ADMISSION_AVAILABLE_TOKEN", "available")
+    skill_bundles.save_bundle("credentialed-controller", ["credentialed-member"])
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Controller admission must not capture or register prerequisites")
+
+    monkeypatch.setattr(skills_tool, "_secret_capture_callback", forbidden)
+    monkeypatch.setattr(env_passthrough, "register_env_passthrough", forbidden)
+    monkeypatch.setattr(credential_files, "register_credential_files", forbidden)
+
+    with jobs._jobs_lock():
+        assert getattr(jobs._jobs_lock_state, "depth", 0) > 0
+        validate_controller_job(job(skills=["credentialed-controller"]))
+
+
 @pytest.fixture
 def local_scheduler(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))

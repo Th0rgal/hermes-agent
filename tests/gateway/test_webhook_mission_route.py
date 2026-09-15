@@ -449,9 +449,14 @@ def test_mission_revision_claim_fences_stale_completion():
     first, first_token = adapter._record_mission_delivery_revision(
         "receipt", first_successor, 100.0
     )
+    assert adapter._record_mission_delivery_revision(
+        "receipt", other_successor, 100.5
+    )[0] == "inflight"
+    adapter._finish_delivery_id(first_token)
     second, _second_token = adapter._record_mission_delivery_revision(
         "receipt", other_successor, 101.0
     )
+    adapter._finish_delivery_id(_second_token)
     third, third_token = adapter._record_mission_delivery_revision(
         "receipt", first_successor, 102.0
     )
@@ -464,6 +469,96 @@ def test_mission_revision_claim_fences_stale_completion():
     )
     assert retry == "inflight"
     assert retry_token == third_token
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_controller", [True, False])
+async def test_overlapping_revision_cannot_overtake_readback_or_controller(monkeypatch, with_controller):
+    from contextlib import nullcontext
+    from copy import deepcopy
+    from cron import jobs, controller_callbacks as relay
+    from gateway.platforms import mission_status_route as route
+
+    records = [{"id": "owner", "controller": {"project": "example", "callback_relay": True},
+                "schedule": {"kind": "interval", "minutes": 10}}]
+    if not with_controller:
+        records.clear()
+    monkeypatch.setattr(jobs, "_jobs_lock", nullcontext)
+    monkeypatch.setattr(jobs, "load_jobs", lambda: deepcopy(records))
+    monkeypatch.setattr(jobs, "save_jobs", lambda rows: records.__setitem__(slice(None), deepcopy(rows)))
+    monkeypatch.setattr(relay, "_eligible", lambda job: True)
+    db = _FakeSessionDB({ORIGIN: {"source": "desktop"}},
+                        {ORIGIN: [{"content": f"started {MISSION}"}]})
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    monkeypatch.setattr(adapter, "_maybe_fold_mission_delegation", lambda *a, **kw: None)
+    api = MagicMock(supports_async_delivery=False)
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    wake = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    a, b = "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"
+    entered, release = asyncio.Event(), asyncio.Event()
+    reads = []
+
+    async def read(payload):
+        successor = route.extract_superseded_by(payload)
+        reads.append(successor)
+        if len(reads) == 1:
+            entered.set()
+            await release.wait()
+        return None
+
+    monkeypatch.setattr(route, "bounded_replacement_evidence", read)
+    base = {"mission_id": MISSION, "status": "failed", "type": "failed",
+            "origin_session": ORIGIN, "event_id": "serial", "project": "example"}
+    payload = lambda successor: {**base, "tags": [f"superseded_by:{successor}"]}
+    first = asyncio.create_task(adapter._handle_webhook(_mock_request(payload(a))))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        # B's read would return immediately and overtake A without admission
+        # serialization. Rejection must also precede controller mutation.
+        assert (await adapter._handle_webhook(_mock_request(payload(b)))).status == 503
+        assert reads == [a]
+        if with_controller:
+            assert records[0]["controller_callbacks"][0]["superseded_by"] == a
+        assert not db.appended
+        release.set()
+        assert (await first).status == 202
+        assert (await adapter._handle_webhook(_mock_request(payload(b)))).status == 202
+        assert (await adapter._handle_webhook(_mock_request(payload(a)))).status == 202
+        notices = [content for _, _, content in db.appended if content.startswith("[Mission callback:")]
+        assert [text.splitlines()[1].split("superseded_by=")[1] for text in notices] == [a, b, a]
+        await asyncio.gather(*list(adapter._background_tasks))
+        if with_controller:
+            assert records[0]["controller_callbacks"][0]["superseded_by"] == a
+        assert wake.await_count == (0 if with_controller else 3)
+    finally:
+        release.set()
+        await first
+
+
+@pytest.mark.asyncio
+async def test_successor_clear_and_restore_reaches_transcript_and_wakes(monkeypatch):
+    from gateway.platforms import mission_status_route as route
+    db = _FakeSessionDB({ORIGIN: {"source": "desktop"}},
+                        {ORIGIN: [{"content": f"started {MISSION}"}]})
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = MagicMock(supports_async_delivery=False)
+    wake = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    monkeypatch.setattr(route, "bounded_replacement_evidence", AsyncMock(return_value=None))
+    base = {"mission_id": MISSION, "status": "failed", "type": "failed",
+            "origin_session": ORIGIN, "event_id": "clear"}
+    successor = "22222222-2222-4222-8222-222222222222"
+    linked = {**base, "tags": [f"superseded_by:{successor}"]}
+    for payload in (linked, base, base, linked):
+        assert (await adapter._handle_webhook(_mock_request(payload))).status in (200, 202)
+        await asyncio.gather(*list(adapter._background_tasks))
+    notices = [text for _, _, text in db.appended if text.startswith("[Mission callback:")]
+    assert len(notices) == wake.await_count == 3
+    assert "superseded_by=" not in notices[1].splitlines()[1]
+    assert all(f"superseded_by={successor}" in notices[i] for i in (0, 2))
 
 
 @pytest.mark.asyncio

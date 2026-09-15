@@ -197,7 +197,9 @@ def enqueue_mission_callback(payload: dict[str, Any]) -> dict | None:
                 "dispatch_idempotency_key": f"controller:{job['id']}:{event_id}",
             })
         successor = extract_superseded_by(payload)
-        if successor:
+        # Removing a relationship is a revision too: reopen the same receipt
+        # and invalidate snapshot acknowledgements just as for A -> B.
+        if duplicate or successor:
             # Native retries may carry newer relationship metadata for the same
             # terminal receipt. Preserve its identity and original receive time.
             entry = next(entry for entry in inbox if entry["id"] == event_id)

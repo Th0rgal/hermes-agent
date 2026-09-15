@@ -56,7 +56,7 @@ class CaptureQueuedNativeImageAgent:
         self.tools = []
         self.tool_progress_callback = kwargs.get("tool_progress_callback")
 
-    def run_conversation(self, message, conversation_history=None, task_id=None):
+    def run_conversation(self, message, conversation_history=None, task_id=None, **kwargs):
         type(self).calls.append(message)
         return {
             "final_response": f"done-{len(type(self).calls)}",
@@ -88,6 +88,38 @@ def _make_runner(adapter):
     runner._base_url = None
     runner._decide_image_input_mode = lambda **_kw: "native"
     return runner
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("notification_first", [True, False])
+async def test_runner_leaves_typed_followup_for_full_event_dispatch(monkeypatch, tmp_path, notification_first):
+    CaptureQueuedNativeImageAgent.calls = []
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = CaptureQueuedNativeImageAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+    adapter = CaptureAdapter()
+    runner = _make_runner(adapter)
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="42", chat_type="dm")
+    key = "agent:main:telegram:dm:42"
+    pending = MessageEvent(
+        text="ordinary" if notification_first else "notification",
+        source=source, internal=not notification_first,
+        notification_only=not notification_first,
+        allow_gateway_control=notification_first,
+    )
+    adapter._pending_messages[key] = pending
+    result = await runner._run_agent(
+        message="notification" if notification_first else "ordinary",
+        context_prompt="", history=[], source=source, session_id="typed-drain",
+        session_key=key,
+        persist_user_display_kind="mission_callback_wake" if notification_first else None,
+    )
+    assert result["final_response"] == "done-1"
+    assert len(CaptureQueuedNativeImageAgent.calls) == 1
+    assert adapter._pending_messages[key] is pending
 
 
 @pytest.mark.asyncio

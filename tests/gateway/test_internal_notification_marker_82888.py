@@ -17,6 +17,7 @@ Covered:
    and the marker is stripped from provider-bound payload copies.
 """
 
+import asyncio
 import sys
 import types
 from datetime import datetime
@@ -25,8 +26,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import gateway.run as gateway_run
-from gateway.config import GatewayConfig, Platform
-from gateway.platforms.base import MessageEvent
+from gateway.config import GatewayConfig, Platform, PlatformConfig
+from gateway.platforms.base import BasePlatformAdapter, MessageEvent
 from gateway.session import SessionEntry, SessionSource
 
 SESSION_KEY = "agent:main:telegram:group:-1001:12345"
@@ -110,6 +111,112 @@ def _user_entries(calls):
         and isinstance(call.args[1], dict)
         and call.args[1].get("role") == "user"
     ]
+
+
+class _DrainAdapter(BasePlatformAdapter):
+    async def connect(self):
+        return True
+
+    async def disconnect(self):
+        pass
+
+    async def send(self, *args, **kwargs):
+        return None
+
+    async def get_chat_info(self, chat_id):
+        return {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operator_text", ["operator request", "/some-skill operator request"])
+async def test_operator_arriving_during_notice_is_not_steered_into_notice(operator_text):
+    adapter = _DrainAdapter(PlatformConfig(enabled=True), Platform.TELEGRAM)
+    adapter.send_typing = AsyncMock()
+    adapter.stop_typing = AsyncMock()
+    busy = AsyncMock(return_value=True)
+    adapter.set_busy_session_handler(busy)
+    entered, release = asyncio.Event(), asyncio.Event()
+    seen = []
+
+    async def handler(event):
+        seen.append((event.text, event.internal, event.notification_only))
+        if event.notification_only:
+            entered.set()
+            await release.wait()
+
+    adapter.set_message_handler(handler)
+    notice = _event(internal=True, text="notice")
+    notice.notification_only = True
+    notice.allow_gateway_control = False
+    await adapter.handle_message(notice)
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await adapter.handle_message(_event(internal=False, text=operator_text))
+        busy.assert_not_awaited()
+        release.set()
+        while adapter._background_tasks:
+            await asyncio.wait_for(asyncio.gather(*list(adapter._background_tasks)), 5)
+        assert seen == [("notice", True, True), (operator_text, False, False)]
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("notification_first", [True, False])
+async def test_handle_message_drains_notification_and_user_as_separate_turns(
+    monkeypatch, tmp_path, notification_first,
+):
+    runner = _bootstrap(monkeypatch, tmp_path)
+    runner._run_agent = AsyncMock(return_value={
+        "final_response": None, "messages": [], "tools": [],
+        "history_offset": 0, "last_prompt_tokens": 0,
+    })
+    adapter = _DrainAdapter(PlatformConfig(enabled=True), Platform.TELEGRAM)
+    runner.adapters[Platform.TELEGRAM] = adapter
+    adapter.send_typing = AsyncMock()
+    adapter.stop_typing = AsyncMock()
+    adapter._send_with_retry = AsyncMock()
+    busy_handler = AsyncMock(return_value=False)
+    adapter.set_busy_session_handler(busy_handler)
+    entered, release = asyncio.Event(), asyncio.Event()
+    processed = []
+
+    async def handle(event):
+        if event.text == "active turn":
+            entered.set()
+            await release.wait()
+            return None
+        processed.append((event.text, event.internal, event.notification_only,
+                          event.allow_gateway_control))
+        try:
+            return await runner._handle_message_with_agent(event, event.source, SESSION_KEY, 1)
+        finally:
+            # The public runner dispatch normally releases this lease around
+            # _handle_message_with_agent; our adapter harness owns that wrapper.
+            runner._release_turn_lease(SESSION_KEY, 1)
+
+    adapter.set_message_handler(handle)
+    await adapter.handle_message(_event(internal=False, text="active turn"))
+    await asyncio.wait_for(entered.wait(), 5)
+    notification = _event(internal=True, text="mission evidence")
+    notification.notification_only = True
+    notification.allow_gateway_control = False
+    operator = _event(internal=False, text="real operator request")
+    ordered = [notification, operator] if notification_first else [operator, notification]
+    for event in ordered:
+        await adapter.handle_message(event)
+    release.set()
+    while adapter._background_tasks:
+        await asyncio.wait_for(asyncio.gather(*list(adapter._background_tasks)), 5)
+
+    assert processed == [(e.text, e.internal, e.notification_only,
+                          e.allow_gateway_control) for e in ordered]
+    assert [c.kwargs["persist_user_display_kind"] for c in runner._run_agent.call_args_list] == [
+        "mission_callback_wake" if e.notification_only else None for e in ordered
+    ]
+    assert not adapter._pending_messages
+    # Notifications never enter the interrupt/steer/approval busy handler.
+    assert all(not c.args[0].notification_only for c in busy_handler.call_args_list)
 
 
 # ── 1+2: the marker is threaded to the agent run for internal events only ──

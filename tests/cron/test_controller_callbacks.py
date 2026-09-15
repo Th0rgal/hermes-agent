@@ -158,6 +158,39 @@ def test_replayed_receipt_absorbs_native_supersession_without_second_dispatch_id
     assert successor in relay.pending_callbacks(job_id)["prompt"]
 
 
+@pytest.mark.parametrize("acknowledged", [False, True])
+def test_cleared_successor_reopens_and_fences_snapshot_ack(acknowledged):
+    job_id = controller()
+    successor = "22222222-2222-4222-8222-222222222222"
+    payload = event(tags=[f"superseded_by:{successor}"])
+    receipt = relay.enqueue_mission_callback(payload)
+    snapshot = relay.pending_callbacks(job_id)
+    if acknowledged:
+        relay.acknowledge_callbacks(job_id, snapshot["event_ids"], success=True,
+                                    event_versions=snapshot["event_versions"])
+    else:
+        relay.defer_callbacks(job_id, snapshot["event_ids"],
+                              captured_versions=snapshot["captured_versions"])
+    relay.enqueue_mission_callback(event())
+    cleared = jobs.get_job(job_id)["controller_callbacks"][0]
+    assert cleared["superseded_by"] is None
+    assert not cleared.get("handled_at") and not cleared.get("retry_after")
+    assert cleared["revision"] > snapshot["event_versions"][receipt["event_id"]]
+    relay.acknowledge_callbacks(job_id, snapshot["event_ids"], success=True,
+                                event_versions=snapshot["event_versions"])
+    assert relay.pending_callbacks(job_id)["event_ids"] == [receipt["event_id"]]
+    relay.enqueue_mission_callback(event())
+    assert jobs.get_job(job_id)["controller_callbacks"][0]["revision"] == cleared["revision"]
+    cleared_snapshot = relay.pending_callbacks(job_id)
+    relay.enqueue_mission_callback(payload)
+    relay.acknowledge_callbacks(job_id, cleared_snapshot["event_ids"], success=True,
+                                event_versions=cleared_snapshot["event_versions"])
+    restored = jobs.get_job(job_id)["controller_callbacks"][0]
+    assert restored["superseded_by"] == successor
+    assert restored["revision"] > cleared["revision"]
+    assert not restored.get("handled_at")
+
+
 def test_late_supersession_reopens_an_acknowledged_receipt():
     job_id = controller()
     first = relay.enqueue_mission_callback(event())

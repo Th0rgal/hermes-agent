@@ -439,14 +439,15 @@ class WebhookAdapter(BasePlatformAdapter):
         if now < self._seen_deliveries_next_prune_at:
             return
         cutoff = now - self._idempotency_ttl
-        stale = [k for k, t in self._seen_deliveries.items() if t < cutoff]
+        stale = [k for k, t in self._seen_deliveries.items()
+                 if t < cutoff and k not in self._inflight_deliveries]
         for k in stale:
             self._seen_deliveries.pop(k, None)
         stale_revisions = [
             delivery_id
             for delivery_id, (_successor, _cache_id, recorded_at, _verified, _refresh_available)
             in self._mission_delivery_revisions.items()
-            if recorded_at < cutoff
+            if recorded_at < cutoff and _cache_id not in self._inflight_deliveries
         ]
         for delivery_id in stale_revisions:
             self._mission_delivery_revisions.pop(delivery_id, None)
@@ -495,6 +496,11 @@ class WebhookAdapter(BasePlatformAdapter):
         bypass.
         """
         previous = self._mission_delivery_revisions.get(delivery_id)
+        # One receipt owns the entire admission (controller, readback, append).
+        # Reject overlapping revisions for retry, including across cache TTL.
+        # Otherwise a slower older read can append after a newer successor.
+        if previous and previous[1] in self._inflight_deliveries:
+            return "inflight", previous[1]
         if previous and now - previous[2] >= self._idempotency_ttl:
             self._mission_delivery_revisions.pop(delivery_id, None)
             previous = None
@@ -1410,25 +1416,6 @@ class WebhookAdapter(BasePlatformAdapter):
         # (the auth anchor). Unknown / non-delegated missions fall through to the
         # normal webhook path untouched.
         request_profile = profile if isinstance(profile, str) else None
-        # One durable handoff before either completion path and before the
-        # transport dedupe claim. Paused controllers retain input without
-        # being re-enabled; a failed conversation route cannot lose this work.
-        _controller_callback = None
-        if mission_status_route:
-            try:
-                from cron.controller_callbacks import enqueue_mission_callback
-
-                with self._profile_scope(profile):
-                    _controller_callback = await asyncio.to_thread(
-                        enqueue_mission_callback, payload
-                    )
-            except Exception:
-                logger.exception("[webhook] controller callback handoff failed; retry required")
-                return web.json_response({"status": "retry", "reason": "controller_inbox"}, status=503)
-            _folded = self._maybe_fold_mission_delegation(payload, profile=request_profile)
-            if _folded is not None:
-                return _folded
-
         # The route script, prompt render and skill lookup below read the
         # profile's home (skills/, config). The runner only enters the routed
         # profile's scope later, around handle_message, so without this they
@@ -1545,6 +1532,33 @@ class WebhookAdapter(BasePlatformAdapter):
                 # first attempt can still fail a transient routing gate.
                 status=503 if delivery_claim == "inflight" else 200,
             )
+
+        # Serialize every owner under the same receipt claim. A rejected
+        # overlapping revision must not update the controller before retrying
+        # its conversation append, or the two owners would observe different
+        # orders. Persist controller input before the conversation handoff.
+        _controller_callback = None
+        if mission_status_route:
+            try:
+                from cron.controller_callbacks import enqueue_mission_callback
+
+                with self._profile_scope(profile):
+                    _controller_callback = await asyncio.to_thread(
+                        enqueue_mission_callback, payload
+                    )
+                _folded = self._maybe_fold_mission_delegation(payload, profile=request_profile)
+            except Exception:
+                self._seen_deliveries.pop(delivery_cache_id, None)
+                self._discard_mission_delivery_revision(delivery_id, delivery_cache_id)
+                self._finish_delivery_id(delivery_cache_id)
+                logger.exception("[webhook] controller callback handoff failed; retry required")
+                return web.json_response({"status": "retry", "reason": "controller_inbox"}, status=503)
+            if _folded is not None:
+                if _folded.status >= 500:
+                    self._seen_deliveries.pop(delivery_cache_id, None)
+                    self._discard_mission_delivery_revision(delivery_id, delivery_cache_id)
+                self._finish_delivery_id(delivery_cache_id)
+                return _folded
 
         # Route sandboxed.sh mission-status events into the dedicated
         # conversation before minting a throwaway webhook session.

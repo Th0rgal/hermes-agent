@@ -241,16 +241,16 @@ retries. This concrete finding was sent to the active native counterpart.
 
 ## Ambiguous notification outcomes
 
-Background wake exceptions are now observed. Hermes writes a role-safe delivery
-receipt to the same conversation (following its continuation), separate from
-native mission status and proof acceptance. The receipt says delivery outcome is
-unknown and asks for inspection before requesting another notice. It does not
-copy raw transport exception text into the conversation or automatically retry
-an operation that may already have run. Transport replay still produces one
-callback/wake, not a second model turn. No new project store or owner is created.
+Background wake exceptions are observed in gateway logs. Despite its name,
+`append_mission_wake_failure()` logs the ambiguous outcome and appends nothing
+to the conversation: the timed-out model turn may still be writing there.
+Operators must inspect those logs and the original turn before requesting
+another notice. The callback transcript is not a durable receipt of wake
+success or failure. An ambiguous outcome does not change native mission status
+or proof acceptance, and does not trigger an automatic replay.
 
-This does not close the process-crash window, guarantee receipt persistence when
-the session store is unavailable, or establish an exactly-once wake protocol.
+This does not close the process-crash window, provide a same-conversation
+failure receipt, or establish an exactly-once wake protocol.
 Those remain explicit boundaries. Reusing the cron delivery queue wholesale
 would not solve them: that queue deliberately fences claimed uncertain sends as
 unknown rather than replaying them.

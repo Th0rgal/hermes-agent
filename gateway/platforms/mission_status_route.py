@@ -623,7 +623,7 @@ def append_mission_callback(
                         successor_match.group(1) if successor_match else None
                     )
                     latest_verified = " replacement_verified=1" in revision_suffix
-                    if not successor or (
+                    if (
                         successor == latest_successor
                         and (not verified_now or latest_verified)
                     ):

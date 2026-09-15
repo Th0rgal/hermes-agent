@@ -94,12 +94,15 @@ def _wake(job: dict) -> None:
             return
         # Replayed failed input must not turn a ten-minute controller into a
         # per-tick failure loop. Keep the normal scheduled retry unless genuinely
-        # new evidence arrived after the failed run. Do not pause/cancel work.
+        # new ready evidence arrived after that run captured its input.
+        # Do not pause/cancel work.
         if job.get("failure_streak") and job.get("last_run_at"):
             try:
-                last_run = jobs._ensure_aware(datetime.fromisoformat(job["last_run_at"]))
+                last_run = jobs._ensure_aware(datetime.fromisoformat(
+                    job.get("last_controller_callback_boundary_at") or job["last_run_at"]
+                ))
                 if not any(jobs._ensure_aware(datetime.fromisoformat(entry["received_at"])) > last_run
-                           for entry in _pending(job)):
+                           for entry in ready):
                     return
             except (KeyError, TypeError, ValueError):
                 return  # Unknown age is not evidence authorizing an early retry.
@@ -198,10 +201,24 @@ def wake_pending_controllers() -> int:
         return count
 
 
+def begin_callback_run(job_id: str) -> None:
+    """Persist a fallback boundary before assembly can reject an oversized job."""
+    with jobs._jobs_lock():
+        records = jobs.load_jobs()
+        job = next((j for j in records if j["id"] == job_id), None)
+        if job and _eligible(job):
+            job["controller_callback_boundary_at"] = jobs._hermes_now().isoformat()
+            jobs.save_jobs(records)
+
+
 def pending_callbacks(job_id: str, *, max_chars: int = 6000) -> dict:
     """Capture, do not consume. Arrivals after this snapshot belong to next run."""
     with jobs._jobs_lock():
-        job = next((j for j in jobs.load_jobs() if j["id"] == job_id), None)
+        records = jobs.load_jobs()
+        job = next((j for j in records if j["id"] == job_id), None)
+        if job and _eligible(job):
+            job["controller_callback_boundary_at"] = jobs._hermes_now().isoformat()
+            jobs.save_jobs(records)
         entries = _pending(job) if job and _eligible(job) else []
         if not entries:
             return {"event_ids": [], "prompt": ""}

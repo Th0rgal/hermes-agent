@@ -3201,6 +3201,11 @@ def _mark_job_run_locked(
                         return False
                 now = _hermes_now().isoformat()
                 job["last_run_at"] = now
+                # Completion must not hide input arriving after the run snapshot.
+                # Consume the active boundary to avoid reusing an older run.
+                callback_boundary = job.pop("controller_callback_boundary_at", None)
+                if callback_boundary is not None or "last_controller_callback_boundary_at" in job:
+                    job["last_controller_callback_boundary_at"] = callback_boundary or now
                 job.pop("manual_run_at", None)
                 # The transient manual-run context is single-fire: whatever
                 # run just completed consumed it (or superseded it).

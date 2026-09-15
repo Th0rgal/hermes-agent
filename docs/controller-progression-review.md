@@ -401,3 +401,34 @@ focused repair/backup guard tests passed after tightening explicit-mode handling
 These runs overlap. Logs: output/orphan-legacy-final-tests.log,
 output/orphan-legacy-guards-tests.log, output/orphan-routing-errors-tests.log.
 No CI polling, live enrollment, merge or deployment was performed for this work.
+
+
+## Independent review corrections: input freshness and successor wording
+
+The operator supplied a BLOCKED review by 845c55bd (gpt-5.6-sol, not Fable)
+against 80218c71ee4b08e1597dabd17fc1e8fd23d3b219. Both P2 findings have source
+fixes and regressions for rereview; this is not an independent approval.
+
+Callback freshness now uses a durable input boundary: run start before prompt
+assembly, advanced under the job lock when input is snapshotted. Completion
+retains that boundary rather than moving it to completion time. Thus evidence
+arriving during a subsequently failed run can wake early, including a run that
+fails oversized-prompt assembly before snapshotting. The next run captures the
+input anew, so replay does not create a per-tick failure loop. Only ready input
+can authorize early wake; deferred fresh input cannot wake replayed old evidence.
+Completion consumes the active boundary; a later completion without a new boundary
+falls back conservatively to completion time instead of reusing stale history.
+These fields are scheduling metadata in the existing job store, not project truth.
+
+Replacement verification language is now emitted only when a successor exists.
+Ordinary failed/completed callbacks retain attempt evidence without inventing a
+replacement claim. Declared successors still fail closed without native readback.
+
+Validation: 327 tests passed, zero failures, seven files, 24.7 seconds via the
+canonical two-worker runner; no flaky retries. Log: output/review-p2-final-tests.log.
+Coverage includes scope/repair, durable callback timing, jobs, scheduler claims,
+project delivery, bounded readback, compression retries and orphan routing.
+Lint and whitespace checks passed. CI was not polled; previous green CI remains
+historical evidence for a0f639c only. The legacy enrollment, native retry lifetime,
+backup crash-window and live Lido metadata boundaries above remain unresolved.
+No merge, deployment or live job mutation.

@@ -6116,6 +6116,10 @@ def run_job(
     except ControllerScopeError as exc:
         return False, f"Controller configuration rejected: {exc}", "", str(exc)
     with bind_controller_scope(scope):
+        if scope is not None:
+            from cron.controller_callbacks import begin_callback_run
+
+            begin_callback_run(job["id"])
         success, output, final_response, error = _run_job(
             job, defer_agent_teardown=defer_agent_teardown,
             extra_prompt=extra_prompt, cancel_event=cancel_event,

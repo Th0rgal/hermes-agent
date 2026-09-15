@@ -138,7 +138,7 @@ def test_callback_records_attempt_failure_without_mutating_project_state():
     assert "[CTRL:" not in text
     assert "[STATE_SIGNATURE:" not in text
     assert "[DECISION:" not in text
-    assert "replacement execution is not verified" in text
+    assert "replacement execution is not verified" not in text
 
 
 def test_superseded_failure_keeps_diagnostics_and_does_not_claim_live_replacement():
@@ -490,3 +490,12 @@ def test_early_callback_backup_is_bounded_and_preserves_existing_evidence(monkey
     assert route.take_stashed_callback("one") == first
     assert route.stash_unroutable_callback("two", {"body": "x" * 65536}) is False
     assert route.stash_unroutable_callback("two", {"event_id": "e2"}) is True
+
+
+def test_ordinary_completed_callback_has_no_replacement_claim():
+    text = format_mission_callback({
+        "mission_id": "ordinary", "status": "completed", "summary": "finished",
+    })
+    assert "status=completed" in text
+    assert "replacement execution" not in text.lower()
+    assert "Superseded attempt" not in text

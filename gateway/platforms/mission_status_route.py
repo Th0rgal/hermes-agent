@@ -379,14 +379,14 @@ def format_mission_callback(payload: dict, *, replacement_evidence: dict | None 
     successor = (replacement_evidence or {}).get("mission_id") or extract_superseded_by(payload)
     if successor:
         lines.append(f"Superseded attempt; declared successor={successor}.")
-    if replacement_evidence and replacement_evidence.get("verified_live") is True:
-        lines.append(
-            f"Replacement execution verified live at {replacement_evidence['observed_at']}: "
-            f"mission={successor} run={replacement_evidence['run_id']} state={replacement_evidence['state']}. "
-            "This observation does not accept project evidence or resolve unrelated failures."
-        )
-    else:
-        lines.append("Current replacement execution is not verified.")
+        if replacement_evidence and replacement_evidence.get("verified_live") is True:
+            lines.append(
+                f"Replacement execution verified live at {replacement_evidence['observed_at']}: "
+                f"mission={successor} run={replacement_evidence['run_id']} state={replacement_evidence['state']}. "
+                "This observation does not accept project evidence or resolve unrelated failures."
+            )
+        else:
+            lines.append("Current replacement execution is not verified.")
     lines.append(
         f"Attempt evidence for project={project}. "
         "The controller must check current native execution and evidence before claiming recovery "

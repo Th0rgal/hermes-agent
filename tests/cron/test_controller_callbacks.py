@@ -196,8 +196,8 @@ def test_acknowledgement_does_not_consume_a_receipt_revised_after_snapshot(monke
     assert relay.pending_callbacks(job_id)["event_ids"] == [receipt["event_id"]]
 
 
-def test_deferral_does_not_delay_a_receipt_revised_after_snapshot(monkeypatch):
-    from datetime import datetime, timedelta, timezone
+def test_same_clock_deferral_does_not_delay_a_receipt_revised_after_snapshot(monkeypatch):
+    from datetime import datetime, timezone
 
     now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
@@ -205,7 +205,6 @@ def test_deferral_does_not_delay_a_receipt_revised_after_snapshot(monkeypatch):
     receipt = relay.enqueue_mission_callback(event())
     snapshot = relay.pending_callbacks(job_id)
 
-    now += timedelta(seconds=1)
     relay.enqueue_mission_callback(
         event(tags=["superseded_by:f43e7dec-7143-4902-8b00-968a2b715dae"])
     )

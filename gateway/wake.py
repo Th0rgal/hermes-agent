@@ -97,6 +97,8 @@ async def deliver_wake(
             message_type=MessageType.TEXT,
             source=source,
             internal=True,
+            notification_only=display_kind == "mission_callback_wake",
+            allow_gateway_control=False,
         )
         await adapter.handle_message(synth_event)
         return
@@ -310,6 +312,10 @@ async def _self_post_chat_completion(
                     )
                     return
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            if display_kind == "mission_callback_wake" and not isinstance(exc, aiohttp.ClientConnectorError):
+                # The request may have run before the response was lost. A
+                # second notice is not justified by an observation timeout.
+                raise RuntimeError("Mission notification delivery outcome is unknown; not retried") from exc
             last_err = exc
             logger.warning(
                 "wake self-post transient failure for session %s "

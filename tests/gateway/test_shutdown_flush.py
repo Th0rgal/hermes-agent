@@ -66,6 +66,34 @@ def test_flush_writes_message_event_to_file(tmp_path, monkeypatch):
     assert payload["data"]["session_id"] == "20260728_120000_abc"
 
 
+def test_flush_preserves_each_typed_pending_entry(tmp_path, monkeypatch):
+    from gateway.config import Platform
+    from gateway.platforms.base import MessageEvent, merge_pending_message_event
+    from gateway.session import SessionSource
+
+    flush_dir = _make_flush_dir(tmp_path)
+    monkeypatch.setattr("gateway.shutdown_flush._get_flush_dir", lambda: flush_dir)
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="42", chat_type="dm")
+    pending = {}
+    for text, internal in [("notice", True), ("operator", False), ("notice two", True)]:
+        event = MessageEvent(text=text, source=source, internal=internal,
+                             notification_only=internal, allow_gateway_control=not internal)
+        event.session_id = "typed-session"
+        merge_pending_message_event(pending, "session-key", event, merge_text=True)
+    assert flush_pending_to_file(pending) == 1
+    payloads = [json.loads(path.read_text()) for path in flush_dir.glob("*.json")]
+    payloads.sort(key=lambda payload: payload["seq"])
+    assert [p["data"]["text"] for p in payloads] == ["notice", "operator", "notice two"]
+    assert [p["data"].get("display_kind") for p in payloads] == [
+        "mission_callback_wake", None, "mission_callback_wake",
+    ]
+    db = MagicMock()
+    assert recover_pending_to_db(db) == 3
+    assert {c.kwargs["content"]: c.kwargs.get("display_kind") for c in db.append_message.call_args_list} == {
+        "notice": "mission_callback_wake", "operator": None, "notice two": "mission_callback_wake",
+    }
+
+
 def test_recover_inserts_via_append_message_and_deletes_file(tmp_path, monkeypatch):
     flush_dir = _make_flush_dir(tmp_path)
     monkeypatch.setattr(

@@ -245,6 +245,23 @@ def check_prompt_budget(scope: ControllerScope | None, prompt: str) -> str:
     return prompt
 
 
+def validate_controller_job(job: dict) -> None:
+    """Reject invalid stored controller instructions before committing a job.
+
+    Use the runtime assembler for framing and full skill/bundle contents, but
+    never run scripts, expand inline shell, consume callback input or register
+    cache boundaries during an edit. Dynamic inputs are checked again at fire
+    time; validation does not truncate or rewrite mandatory instructions.
+    """
+    scope = scope_from_job(job)
+    if scope is None:
+        return
+    from cron.scheduler import _build_job_prompt
+
+    with bind_controller_scope(scope):
+        _build_job_prompt(job, validation_only=True)
+
+
 def _readback_object(result: object) -> dict:
     # Registry MCP handlers wrap JSON text as {"result": "..."}. This lookup
     # occurs before model-facing untrusted-result framing, so no HTML stripping.

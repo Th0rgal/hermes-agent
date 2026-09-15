@@ -434,6 +434,39 @@ class TestSkillView:
 
 
 class TestSkillViewSecureSetupOnLoad:
+    def test_validation_view_does_not_capture_or_register_prerequisites(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("READ_ONLY_PRESENT_KEY", "available")
+        monkeypatch.delenv("READ_ONLY_MISSING_KEY", raising=False)
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("validation-only skill view must not mutate prerequisite state")
+
+        monkeypatch.setattr(skills_tool_module, "_capture_required_environment_variables", forbidden)
+        monkeypatch.setattr("tools.env_passthrough.register_env_passthrough", forbidden)
+        monkeypatch.setattr("tools.credential_files.register_credential_files", forbidden)
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(
+                tmp_path,
+                "read-only-validation",
+                frontmatter_extra=(
+                    "required_environment_variables:\n"
+                    "  - name: READ_ONLY_PRESENT_KEY\n"
+                    "  - name: READ_ONLY_MISSING_KEY\n"
+                    "required_credential_files:\n"
+                    "  - test-token.json\n"
+                ),
+            )
+            raw = skill_view(
+                "read-only-validation",
+                preprocess=False,
+                capture_prerequisites=False,
+            )
+
+        result = json.loads(raw)
+        assert result["success"] is True, raw
+        assert result["missing_required_environment_variables"] == ["READ_ONLY_MISSING_KEY"], raw
+
     def test_requests_missing_required_env_and_continues(self, tmp_path, monkeypatch):
         monkeypatch.delenv("TENOR_API_KEY", raising=False)
         calls = []

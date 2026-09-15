@@ -597,6 +597,17 @@ def _run_agent_tool_execution_middleware(
     authorization_gate: _ConcurrentToolAuthorizationGate | None = None,
 ) -> _ManagedToolResult:
     """Run Relay rewrites before Hermes policy and dispatch exactly once."""
+    if getattr(agent, "_notification_only_turn", False) is True:
+        if begin_execution is not None:
+            begin_execution()
+        result = json.dumps({"error": "Tools are disabled for this mission notification turn."})
+        _emit_terminal_post_tool_call(
+            agent, function_name=function_name, function_args=function_args,
+            result=result, effective_task_id=effective_task_id, tool_call_id=tool_call_id,
+            status="blocked", error_type="notification_only_block",
+        )
+        return _ManagedToolResult(result=result, args=function_args,
+                                  middleware_trace=[], blocked=True, dispatched=False)
     from agent import relay_tools
     from hermes_cli.middleware import (
         apply_tool_request_middleware,

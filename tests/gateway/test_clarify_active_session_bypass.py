@@ -56,7 +56,8 @@ def _clear_clarify_state():
 
 
 @pytest.mark.asyncio
-async def test_active_session_routes_typed_choice_clarify_reply_to_runner_not_busy_queue():
+@pytest.mark.parametrize("queued_notice", [False, True])
+async def test_active_session_routes_typed_choice_clarify_reply_to_runner_not_busy_queue(queued_notice):
     """Typed text must resolve a pending choice clarify even while the agent is busy.
 
     Telegram button clarifies keep the adapter session active while the agent
@@ -79,12 +80,17 @@ async def test_active_session_routes_typed_choice_clarify_reply_to_runner_not_bu
     )
     adapter._active_sessions[session_key] = asyncio.Event()
     cm.register("clarify-1", session_key, "Pick one", ["A", "B"])
+    if queued_notice:
+        notice = MessageEvent(text="mission evidence", source=event.source,
+                              internal=True, notification_only=True)
+        await adapter.handle_message(notice)
+        adapter._message_handler.assert_not_awaited()
 
     await adapter.handle_message(event)
 
     adapter._message_handler.assert_awaited_once_with(event)
     adapter._busy_session_handler.assert_not_awaited()
-    assert adapter._pending_messages == {}
+    assert adapter._pending_messages == ({session_key: notice} if queued_notice else {})
 
 
 @pytest.mark.asyncio
@@ -138,5 +144,4 @@ async def test_active_session_bypass_uses_profile_namespaced_key_under_multiplex
     adapter._message_handler.assert_awaited_once_with(event)
     adapter._busy_session_handler.assert_not_awaited()
     assert adapter._pending_messages == {}
-
 

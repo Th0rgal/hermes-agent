@@ -255,6 +255,7 @@ def build_bundle_invocation_message(
     user_instruction: str = "",
     task_id: str | None = None,
     platform: str | None = None,
+    validation_only: bool = False,
 ) -> Optional[Tuple[str, List[str], List[str]]]:
     """Build the user message content for a bundle slash command invocation.
 
@@ -307,7 +308,11 @@ def build_bundle_invocation_message(
             continue
         seen.add(identifier)
 
-        loaded = _load_skill_payload(identifier, task_id=task_id)
+        loaded = _load_skill_payload(
+            identifier,
+            task_id=task_id,
+            validation_only=validation_only,
+        )
         if not loaded:
             missing.append(identifier)
             continue
@@ -321,7 +326,8 @@ def build_bundle_invocation_message(
 
         try:
             from tools.skill_usage import bump_use
-            bump_use(skill_name, task_id=task_id)
+            if not validation_only:
+                bump_use(skill_name, task_id=task_id)
         except Exception:
             pass
 
@@ -334,6 +340,7 @@ def build_bundle_invocation_message(
                 skill_dir,
                 activation_note,
                 session_id=task_id,
+                preprocess=not validation_only,
             )
         )
         loaded_names.append(skill_name)

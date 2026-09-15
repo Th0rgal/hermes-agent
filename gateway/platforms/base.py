@@ -2588,6 +2588,8 @@ class MessageEvent:
     # Internal flag — set for synthetic events (e.g. background process
     # completion notifications) that must bypass user authorization checks.
     internal: bool = False
+    # Internal mission evidence notice: may summarize but cannot execute tools.
+    notification_only: bool = False
 
     # Free-form per-event metadata.  Adapters may set platform-specific
     # signals here (e.g. WhatsApp sets ``whatsapp_from_owner=True`` when
@@ -2604,6 +2606,9 @@ class MessageEvent:
     # Proactive plugin events set this to False so untrusted payload text
     # remains conversational input.
     allow_gateway_control: bool = True
+    # Pending entries with distinct execution/display authority must retain
+    # their own turn. Kept with the head so all queue owners share one chain.
+    pending_followups: List["MessageEvent"] = field(default_factory=list, repr=False)
     
     def is_command(self) -> bool:
         """Check if this is a command message (e.g., /new, /reset)."""
@@ -2913,6 +2918,30 @@ def _invalidate_pending_stt_cache(event: MessageEvent) -> None:
             delattr(event, attr)
 
 
+def pending_event_context(event: MessageEvent) -> tuple:
+    """Authority that must never be inherited from a different queued event."""
+    return (
+        event.internal, event.notification_only, event.allow_gateway_control,
+        *((event.metadata or {}).get(key) for key in (
+            "hermes_plugin_id", "hermes_plugin_injection", "gateway_session_key",
+            "gateway_session_id", "gateway_session_strict",
+        )),
+    )
+
+
+def pop_pending_message_event(
+    pending_messages: Dict[str, MessageEvent], session_key: str,
+) -> Optional[MessageEvent]:
+    """Take one typed turn and promote its next entry without merging flags."""
+    event = pending_messages.pop(session_key, None)
+    if event is not None and event.pending_followups:
+        following, *tail = event.pending_followups
+        event.pending_followups = []
+        following.pending_followups.extend(tail)
+        pending_messages[session_key] = following
+    return event
+
+
 def merge_pending_message_event(
     pending_messages: Dict[str, MessageEvent],
     session_key: str,
@@ -2933,6 +2962,19 @@ def merge_pending_message_event(
     """
     existing = pending_messages.get(session_key)
     if existing:
+        if existing.pending_followups:
+            # Only coalesce adjacent entries of the same authority; never
+            # merge across a notification queued between two user messages.
+            following = existing.pending_followups
+            while following[-1].pending_followups:
+                following = following[-1].pending_followups
+            tail = {session_key: following[-1]}
+            merge_pending_message_event(tail, session_key, event, merge_text=merge_text)
+            following[-1] = tail[session_key]
+            return
+        if pending_event_context(existing) != pending_event_context(event):
+            existing.pending_followups.append(event)
+            return
         existing_is_photo = getattr(existing, "message_type", None) == MessageType.PHOTO
         incoming_is_photo = event.message_type == MessageType.PHOTO
         existing_has_media = bool(existing.media_urls)
@@ -6000,6 +6042,9 @@ class BasePlatformAdapter(ABC):
     def _can_merge_text_debounce_events(self, existing: MessageEvent, event: MessageEvent) -> bool:
         """Return True when two text debounce events came from the same sender."""
 
+        if pending_event_context(existing) != pending_event_context(event):
+            return False
+
         def _identity(candidate: MessageEvent) -> tuple[str, ...] | None:
             source = getattr(candidate, "source", None)
             if source is None:
@@ -6106,6 +6151,7 @@ class BasePlatformAdapter(ABC):
         existing_pending = self._pending_messages.get(session_key)
         if (
             existing_pending is not None
+            and pending_event_context(existing_pending) == pending_event_context(state.event)
             and not self._can_merge_text_debounce_events(existing_pending, state.event)
         ):
             return False
@@ -6214,6 +6260,7 @@ class BasePlatformAdapter(ABC):
         session lock.
         """
         guard = interrupt_event or asyncio.Event()
+        guard.notification_only = event.notification_only
         self._active_sessions[session_key] = guard
 
         task = asyncio.create_task(self._process_message_background(event, session_key))
@@ -6294,7 +6341,7 @@ class BasePlatformAdapter(ABC):
         command was running — spawns a fresh processing task for it.
         """
         await self._flush_text_debounce_now(session_key)
-        pending_event = self._pending_messages.pop(session_key, None)
+        pending_event = pop_pending_message_event(self._pending_messages, session_key)
         self._release_session_guard(session_key, guard=command_guard)
         if pending_event is None:
             return
@@ -6429,6 +6476,25 @@ class BasePlatformAdapter(ABC):
 
         # Check if there's already an active handler for this session
         if session_key in self._active_sessions:
+            cmd = event.get_command()
+            from hermes_cli.commands import (
+                is_interrupt_then_dispatch,
+                should_bypass_active_session,
+            )
+
+            if (
+                event.notification_only
+                or (getattr(self._active_sessions[session_key], "notification_only", False)
+                    and not should_bypass_active_session(cmd))
+            ):
+                # Notifications are standalone turns, never steering input or
+                # answers to the active operator's control prompts. Likewise a
+                # real user cannot be injected into a notification-only turn.
+                await self._flush_text_debounce_now(session_key)
+                merge_pending_message_event(
+                    self._pending_messages, session_key, event, merge_text=True,
+                )
+                return
             # Certain commands must bypass the active-session guard and be
             # dispatched directly to the gateway runner.  Without this, they
             # are queued as pending messages and either:
@@ -6439,12 +6505,6 @@ class BasePlatformAdapter(ABC):
             # response.  Do NOT use _process_message_background — it manages
             # session lifecycle and its cleanup races with the running task
             # (see PR #4926).
-            cmd = event.get_command()
-            from hermes_cli.commands import (
-                is_interrupt_then_dispatch,
-                should_bypass_active_session,
-            )
-
             if should_bypass_active_session(cmd):
                 # /stop, /new, /reset must cancel the in-flight adapter task
                 # and preserve ordering of queued follow-ups.  Route those
@@ -6639,6 +6699,7 @@ class BasePlatformAdapter(ABC):
         # the session active before spawning this task to prevent races).
         # Fall back to a new Event only if the entry was removed externally.
         interrupt_event = self._active_sessions.get(session_key) or asyncio.Event()
+        interrupt_event.notification_only = event.notification_only
         self._active_sessions[session_key] = interrupt_event
         
         # Start continuous typing indicator (refreshes every 2 seconds).
@@ -7195,7 +7256,7 @@ class BasePlatformAdapter(ABC):
 
             # Check if there's a pending message that was queued during our processing
             if session_key in self._pending_messages:
-                pending_event = self._pending_messages.pop(session_key)
+                pending_event = pop_pending_message_event(self._pending_messages, session_key)
                 logger.debug("[%s] Processing queued follow-up message", self.name)
                 # Keep the _active_sessions entry live across the turn chain
                 # and only CLEAR the interrupt Event — do NOT delete the entry.
@@ -7209,6 +7270,7 @@ class BasePlatformAdapter(ABC):
                 _active = self._active_sessions.get(session_key)
                 if _active is not None:
                     _active.clear()
+                    _active.notification_only = pending_event.notification_only
                 await _stop_typing_task()
                 # Spawn a fresh task for the pending message instead of
                 # recursing.  Issue #17758: `await
@@ -7326,7 +7388,7 @@ class BasePlatformAdapter(ABC):
             # busy-handler path.  Without this block, we would delete the
             # active-session entry and the queued message would be silently
             # dropped (user never gets a reply).
-            late_pending = self._pending_messages.pop(session_key, None)
+            late_pending = self._pending_messages.get(session_key)
             if late_pending is not None:
                 current_task = asyncio.current_task()
                 existing_task = self._session_tasks.get(session_key)
@@ -7342,8 +7404,9 @@ class BasePlatformAdapter(ABC):
                     # (#17758 follow-up: prevents the create_task path
                     # from racing with itself across the in-band/finally
                     # boundary).
-                    self._pending_messages[session_key] = late_pending
+                    pass  # Leave the whole typed queue with its current owner.
                 else:
+                    late_pending = pop_pending_message_event(self._pending_messages, session_key)
                     logger.debug(
                         "[%s] Late-arrival pending message during cleanup — spawning drain task",
                         self.name,
@@ -7351,6 +7414,7 @@ class BasePlatformAdapter(ABC):
                     _active = self._active_sessions.get(session_key)
                     if _active is not None:
                         _active.clear()
+                        _active.notification_only = late_pending.notification_only
                     drain_task = asyncio.create_task(
                         self._process_message_background(late_pending, session_key)
                     )
@@ -7474,7 +7538,7 @@ class BasePlatformAdapter(ABC):
     
     def get_pending_message(self, session_key: str) -> Optional[MessageEvent]:
         """Get and clear any pending message for a session."""
-        return self._pending_messages.pop(session_key, None)
+        return pop_pending_message_event(self._pending_messages, session_key)
     
     def build_source(
         self,

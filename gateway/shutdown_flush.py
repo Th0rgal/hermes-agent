@@ -115,6 +115,17 @@ def flush_pending_to_file(
         if value is None:
             continue
         try:
+            if isinstance(getattr(value, "pending_followups", None), list) and value.pending_followups:
+                # Preserve every typed entry, not just the head's text.
+                events = []
+                stack = [value]
+                while stack:
+                    event = stack.pop()
+                    events.append(event)
+                    stack.extend(reversed(event.pending_followups))
+                if flush_overflow_to_file({session_key: events}, reason=reason):
+                    flushed += 1
+                continue
             serialised = _serialise_value(value)
             if serialised is None:
                 continue
@@ -319,6 +330,11 @@ def _serialise_value(value: Any) -> Optional[dict]:
     # MessageEvent objects have a .text attribute and other fields
     if hasattr(value, "text"):
         result: Dict[str, Any] = {"text": getattr(value, "text", "")}
+        if getattr(value, "internal", False):
+            result["display_kind"] = (
+                "mission_callback_wake" if getattr(value, "notification_only", False)
+                else "internal_notification"
+            )
         # Preserve additional fields if present
         for attr in ("session_id", "platform", "sender_id", "sender_name",
                       "reply_to", "media", "raw_event"):
@@ -455,6 +471,7 @@ def recover_pending_to_db(
                 role="user",
                 content=text,
                 timestamp=payload.get("ts", int(time.time())),
+                **({"display_kind": data["display_kind"]} if data.get("display_kind") else {}),
             )
             recovered += 1
             path.unlink(missing_ok=True)

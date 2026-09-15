@@ -1088,6 +1088,7 @@ def skill_view(
     file_path: str = None,
     task_id: str = None,
     preprocess: bool = True,
+    capture_prerequisites: bool = True,
 ) -> str:
     """
     View the content of a skill or a specific file within a skill directory.
@@ -1100,6 +1101,9 @@ def skill_view(
         preprocess: Apply configured SKILL.md template and inline shell rendering
             to main skill content. Internal slash/preload callers disable this
             because they render the skill message themselves.
+        capture_prerequisites: Prompt for missing requirements and register
+            available requirements for execution. Validation callers disable
+            this to inspect skill readiness without changing session state.
 
     Returns:
         JSON string with skill content or error message
@@ -1724,10 +1728,14 @@ def skill_view(
             if not e.get("optional")
             and not _is_env_var_persisted(e["name"], env_snapshot)
         ]
-        capture_result = _capture_required_environment_variables(
-            skill_name,
-            missing_required_env_vars,
-        )
+        capture_result = ({
+            "missing_names": [e["name"] for e in missing_required_env_vars],
+            "setup_skipped": False,
+            "gateway_setup_hint": None,
+        } if not capture_prerequisites else
+                          _capture_required_environment_variables(
+                              skill_name, missing_required_env_vars,
+                          ))
         if missing_required_env_vars:
             env_snapshot = load_env()
         remaining_missing_required_envs = _remaining_required_environment_names(
@@ -1745,7 +1753,7 @@ def skill_view(
             for e in required_env_vars
             if e["name"] not in remaining_missing_required_envs
         ]
-        if available_env_names:
+        if capture_prerequisites and available_env_names:
             try:
                 from tools.env_passthrough import register_env_passthrough
 
@@ -1764,7 +1772,7 @@ def skill_view(
         if not isinstance(required_cred_files_raw, list):
             required_cred_files_raw = []
         missing_cred_files: list = []
-        if required_cred_files_raw:
+        if capture_prerequisites and required_cred_files_raw:
             try:
                 from tools.credential_files import register_credential_files
 

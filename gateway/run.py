@@ -3790,6 +3790,21 @@ def _dequeue_pending_event(adapter, session_key: str) -> MessageEvent | None:
     return adapter.get_pending_message(session_key)
 
 
+def _pending_needs_full_dispatch(adapter, session_key: str, display_kind=None) -> bool:
+    """Typed turns must re-enter event dispatch to derive their own policy.
+
+    The in-band _run_agent recursion carries text/media, not the original
+    event's authority and display flags. Leave typed queues to the adapter.
+    """
+    event = getattr(adapter, "_pending_messages", {}).get(session_key)
+    return bool(
+        display_kind
+        or (event is not None and (
+            event.internal or event.notification_only or event.pending_followups
+        ))
+    )
+
+
 _INTERRUPT_REASON_STOP = "Stop requested"
 _INTERRUPT_REASON_RESET = "Session reset requested"
 _INTERRUPT_REASON_TIMEOUT = "Execution timed out (inactivity)"
@@ -10004,6 +10019,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         overflow = _q_state.conversation.queued_events if _q_state else None
         if not overflow:
             return pending_event
+        staged = getattr(adapter, "_pending_messages", {}).get(session_key)
+        if staged is not None and staged is not pending_event:
+            # The adapter promoted a separate typed entry. Preserve it ahead
+            # of runner overflow rather than overwriting that turn.
+            return pending_event
         next_queued = overflow.pop(0)
         if pending_event is None:
             return next_queued
@@ -11200,6 +11220,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
         same_security_context = existing is not None and (
             getattr(existing, "internal", False) == getattr(event, "internal", False)
+            and getattr(existing, "notification_only", False)
+            == getattr(event, "notification_only", False)
             and getattr(existing, "allow_gateway_control", True)
             == getattr(event, "allow_gateway_control", True)
             and all(
@@ -19381,6 +19403,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # fresh session; /status then correctly shows 代理运行中: 否 before the
         # heal and a live turn after.
         if self._is_session_running(_quick_key):
+            if event.notification_only:
+                self._queue_or_replace_pending_event(_quick_key, event)
+                return None
             try:
                 _reap_store = getattr(self, "session_store", None)
                 # Use the public, lock-held accessors: peek_session_id resolves
@@ -21430,6 +21455,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         persist_user_display_kind = (
             "internal_notification" if getattr(event, "internal", False) else None
         )
+        if getattr(event, "internal", False) and getattr(event, "notification_only", False):
+            persist_user_display_kind = "mission_callback_wake"
+
         try:
             _pcfg = _load_gateway_config()
             _redact_pii = bool((_pcfg.get("privacy") or {}).get("redact_pii", False))
@@ -32057,7 +32085,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Must use session_key (build_session_key output) — NOT
                     # source.chat_id — because the adapter stores interrupt events
                     # under the full session key.
-                    if hasattr(_adapter, 'has_pending_interrupt') and _adapter.has_pending_interrupt(session_key):
+                    if (hasattr(_adapter, 'has_pending_interrupt')
+                            and _adapter.has_pending_interrupt(session_key)
+                            and not _pending_needs_full_dispatch(
+                                _adapter, session_key, persist_user_display_kind
+                            )):
                         agent = agent_holder[0]
                         if agent:
                             # Peek at the pending message text WITHOUT consuming it.
@@ -32356,7 +32388,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _backup_agent = agent_holder[0]
                         if (_backup_adapter and _backup_agent
                                 and hasattr(_backup_adapter, 'has_pending_interrupt')
-                                and _backup_adapter.has_pending_interrupt(session_key)):
+                                and _backup_adapter.has_pending_interrupt(session_key)
+                                and not _pending_needs_full_dispatch(
+                                    _backup_adapter, session_key, persist_user_display_kind
+                                )):
                             _bp_event = _backup_adapter._pending_messages.get(session_key)
                             _bp_text = _bp_event.text if _bp_event else None
                             if _bp_event is not None:
@@ -32458,7 +32493,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _backup_agent = agent_holder[0]
                         if (_backup_adapter and _backup_agent
                                 and hasattr(_backup_adapter, 'has_pending_interrupt')
-                                and _backup_adapter.has_pending_interrupt(session_key)):
+                                and _backup_adapter.has_pending_interrupt(session_key)
+                                and not _pending_needs_full_dispatch(
+                                    _backup_adapter, session_key, persist_user_display_kind
+                                )):
                             _bp_event = _backup_adapter._pending_messages.get(session_key)
                             _bp_text = _bp_event.text if _bp_event else None
                             if _bp_event is not None:
@@ -32621,7 +32659,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Use session_key (not source.chat_id) to match adapter's storage keys.
             pending_event = None
             pending = None
-            if result and adapter and session_key:
+            if (result and adapter and session_key
+                    and _pending_needs_full_dispatch(
+                        adapter, session_key, persist_user_display_kind
+                    ) and not adapter._pending_messages.get(session_key)):
+                # A typed turn can finish with only /queue overflow remaining.
+                # Stage it for adapter dispatch even though text-only recursion
+                # is forbidden; otherwise that FIFO would be orphaned.
+                staged = self._promote_queued_event(session_key, adapter, None)
+                if staged is not None:
+                    adapter._pending_messages[session_key] = staged
+            if (result and adapter and session_key
+                    and not _pending_needs_full_dispatch(
+                        adapter, session_key, persist_user_display_kind
+                    )):
                 pending_event = _dequeue_pending_event(adapter, session_key)
                 # /queue overflow: after consuming the adapter's "next-up"
                 # slot, promote the next queued event into it so the
@@ -32630,7 +32681,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # order, and (b) causes any mid-chain /queue to correctly
                 # route to overflow rather than jumping the queue.
                 pending_event = self._promote_queued_event(session_key, adapter, pending_event)
-                if result.get("interrupted") and not pending_event and result.get("interrupt_message"):
+                deferred_typed_event = pending_event is not None and (
+                    pending_event.internal or pending_event.notification_only
+                )
+                if deferred_typed_event:
+                    # A typed event may also come from runner FIFO overflow.
+                    # Put it back at the head for complete event dispatch.
+                    staged = adapter._pending_messages.pop(session_key, None)
+                    if staged is not None:
+                        pending_event.pending_followups.append(staged)
+                    adapter._pending_messages[session_key] = pending_event
+                    pending_event = None
+                if (not deferred_typed_event and result.get("interrupted")
+                        and not pending_event and result.get("interrupt_message")):
                     interrupt_message = result.get("interrupt_message")
                     if _is_control_interrupt_message(interrupt_message):
                         logger.info(

@@ -3,7 +3,7 @@
 HMAC already authenticated the payload. origin_session is still a hint:
 the session must exist (continuations followed). If it does not, the
 explicit project route is the only fallback. An unroutable payload returns
-None so the webhook adapter can keep its isolated-session behaviour.
+None so the webhook adapter can reject delivery without an owner.
 """
 
 from __future__ import annotations
@@ -11,8 +11,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Any, Optional, Tuple
+from uuid import UUID, uuid4
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +48,118 @@ MISSION_CALLBACK_SEPARATOR_DISPLAY_KIND = "hidden"
 
 MISSION_CALLBACK_WAKE_PROMPT = (
     "A routed mission-complete callback was just appended to this conversation. "
-    "In one or two sentences, tell the operator what finished and whether they "
-    "need to act. Do not inspect the mission, do not run tools, and do not "
-    "continue the work in this chat — the project controller owns follow-up."
+    "In one or two sentences, report the attempt outcome and any verified follow-up. "
+    "Only when the callback declares a successor, distinguish a superseded attempt "
+    "from that replacement. A supersession tag does not prove it is executing: name "
+    "a live replacement only with current native execution evidence already available "
+    "in this conversation; otherwise say that declared replacement is unverified. "
+    "Do not mention replacement execution when no successor is declared. Never promise rerouting "
+    "or say no action is needed merely because a controller exists. Preserve "
+    "actionable failures and unresolved questions. Do not inspect the mission, "
+    "do not run tools, and do not dispatch or continue project work in this notice."
 )
+
+
+def extract_superseded_by(payload: dict) -> str | None:
+    """Native mission_horizon tag: relationship evidence, never liveness proof."""
+    tags = payload.get("tags")
+    if not isinstance(tags, list):
+        return None
+    # Match the producer's last valid tag precedence.
+    for tag in reversed(tags):
+        if isinstance(tag, str) and tag.startswith("superseded_by:"):
+            try:
+                successor = str(UUID(tag.split(":", 1)[1].strip()))
+            except ValueError:
+                continue
+            if successor != str(payload.get("mission_id", "")).strip():
+                return successor
+    return None
+
+
+# A wedged connection can outlive the deadline. Bound outstanding reads too.
+_REPLACEMENT_READ_SLOT = threading.BoundedSemaphore(1)
+_REPLACEMENT_READ_TIMEOUT = 5.0
+
+
+async def bounded_replacement_evidence(payload: dict) -> dict | None:
+    import asyncio
+
+    if not _REPLACEMENT_READ_SLOT.acquire(blocking=False):
+        return None
+
+    def read():
+        try:
+            return read_replacement_evidence(payload)
+        finally:
+            _REPLACEMENT_READ_SLOT.release()
+
+    task = asyncio.create_task(asyncio.to_thread(read))
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), _REPLACEMENT_READ_TIMEOUT)
+    except Exception:
+        return None
+
+
+def read_replacement_evidence(payload: dict) -> dict | None:
+    """Read current native identity/execution through the existing MCP server.
+
+    No server name, project authority or verified result comes from callback
+    prose. Missing tools/readback preserve the explicit unverified notice.
+    """
+    from tools.registry import registry
+    from tools.mission_delegation import _MCP_SERVER_NAME
+    from cron.controller_scope import _readback_object
+
+    name = f"mcp__{_MCP_SERVER_NAME}__get_mission_digest"
+    if registry.get_entry(name) is None:
+        return None
+    try:
+        from tools.mcp_tool import _make_tool_handler
+
+        read = _make_tool_handler(_MCP_SERVER_NAME, "get_mission_digest", 5.0)
+        mission_id = str(UUID(str(payload.get("mission_id") or "")))
+        project = extract_project_slug(payload)
+        if not project:
+            return None
+
+        def verified_identity(mid):
+            row = _readback_object(read({"mission_id": mid}))
+            if (row.get("id") or row.get("mission_id")) != mid or extract_project_slug(row) != project:
+                raise ValueError("Native replacement identity/project mismatch")
+            return row
+
+        prior = verified_identity(mission_id)
+        tags = prior.get("tags")
+        if tags is None and isinstance(prior.get("project"), dict):
+            tags = prior["project"].get("tags")
+        successor = extract_superseded_by({"mission_id": mission_id, "tags": tags})
+        if not successor:
+            return None
+        replacement = verified_identity(successor)
+        result = {"mission_id": successor, "verified_live": False}
+        execution = replacement.get("execution")
+        if not isinstance(execution, dict):
+            return result
+        # Queued/starting/status=active alone do not prove execution. These
+        # states are the native durable runner's executing states. A stale
+        # heartbeat is unknown, never proof of termination or permission to
+        # dispatch another writer.
+        state = execution.get("state")
+        run_id = execution.get("run_id")
+        try:
+            heartbeat = datetime.fromisoformat(execution.get("heartbeat_at") or "")
+        except (TypeError, ValueError):
+            return result
+        if heartbeat.tzinfo is None:
+            return result
+        now = datetime.now(timezone.utc)
+        if state in {"running", "waiting_tool"} and run_id and 0 <= (now - heartbeat).total_seconds() <= 60:
+            result.update(verified_live=True, run_id=str(run_id), state=state, observed_at=now.isoformat())
+        return result
+    except Exception:
+        logger.debug("Native replacement readback unavailable", exc_info=True)
+        return None
 
 
 def extract_origin_session(payload: dict) -> str:
@@ -184,6 +295,33 @@ def extract_event_id(payload: dict) -> str:
     return str(payload.get("event_id") or payload.get("delivery_id") or "").strip()
 
 
+def _identity_line_value(value: object) -> str:
+    """Keep externally supplied callback identity fields on one header line."""
+    return " ".join(str(value or "").split())
+
+
+def _callback_revision(
+    payload: dict, replacement_evidence: dict | None = None,
+) -> tuple[str | None, bool]:
+    """Return the structured relationship revision represented by a callback.
+
+    The human-readable body can contain arbitrary worker output, including a
+    quoted callback or relationship sentence. Dedupe must compare only this
+    explicit envelope state, never prose in a prior callback.
+    """
+    successor = (
+        (replacement_evidence or {}).get("mission_id")
+        or extract_superseded_by(payload)
+    )
+    successor = str(successor).strip() if successor else None
+    verified = bool(
+        successor
+        and replacement_evidence
+        and replacement_evidence.get("verified_live") is True
+    )
+    return successor, verified
+
+
 def resolve_project_session_id(project: str, session_db: Any = None) -> Optional[str]:
     slug = (project or "").strip()
     if not slug:
@@ -243,13 +381,16 @@ def resolve_mission_delivery_session(payload: dict, session_db: Any) -> Optional
     return None
 
 
-def format_mission_callback(payload: dict) -> str:
+def format_mission_callback(payload: dict, *, replacement_evidence: dict | None = None) -> str:
     """Human + machine trailer written into the dedicated session."""
-    mission_id = str(payload.get("mission_id") or "").strip()
-    status = extract_status(payload)
-    title = str(payload.get("title") or "mission").strip()
+    mission_id = _identity_line_value(payload.get("mission_id"))
+    status = _identity_line_value(extract_status(payload))
+    # This line is part of the machine-readable callback envelope.  A title
+    # comes from an external producer, so it must not be allowed to split the
+    # header and defeat exact event-id deduplication.
+    title = _identity_line_value(payload.get("title") or "mission")
     project = extract_project_slug(payload) or "unknown"
-    workspace = str(payload.get("workspace_name") or "").strip()
+    workspace = _identity_line_value(payload.get("workspace_name"))
     bits = [
         payload.get("result_summary"),
         payload.get("short_description"),
@@ -257,28 +398,46 @@ def format_mission_callback(payload: dict) -> str:
         payload.get("terminal_evidence") if status != "completed" else None,
     ]
     body = "\n".join(str(b).strip() for b in bits if b and str(b).strip())
-    mode = "active" if status == "completed" else "blocked"
-    event_id = extract_event_id(payload)
-    lines = [
-        f"[Mission callback: {title}]",
-        f"status={status} mission={mission_id}"
-        + (f" event={event_id}" if event_id else "")
-        + (f" workspace={workspace}" if workspace else ""),
-    ]
+    event_id = _identity_line_value(extract_event_id(payload))
+    successor, verified = _callback_revision(payload, replacement_evidence)
+    identity = f"status={status} mission={mission_id}"
+    if event_id:
+        identity += f" event={event_id}"
+    # Keep revision fields before arbitrary workspace text. The append path
+    # reads only this structured portion of the identity line, so quoted
+    # worker prose and workspace values cannot impersonate revision evidence.
+    if successor:
+        identity += f" superseded_by={successor}"
+    if verified:
+        identity += " replacement_verified=1"
+    if workspace:
+        identity += f" workspace={workspace}"
+    lines = [f"[Mission callback: {title}]", identity]
     if body:
         lines.append(body)
-    if status != "completed":
-        lines.append(
-            "If this is infra (missing CLI, auth, workspace), fix or "
-            "[DECISION:] — do not stay silent in another session."
-        )
+    if successor:
+        lines.append(f"Superseded attempt; declared successor={successor}.")
+        if verified:
+            lines.append(
+                f"Replacement execution verified live at {replacement_evidence['observed_at']}: "
+                f"mission={successor} run={replacement_evidence['run_id']} state={replacement_evidence['state']}. "
+                "This observation does not accept project evidence or resolve unrelated failures."
+            )
+        else:
+            lines.append("Current replacement execution is not verified.")
     lines.append(
-        f"[CTRL: {project} | mode={mode} | wait=0 | next=inspect {mission_id}]"
+        f"Attempt evidence for project={project}. "
+        "The controller must check current native execution and evidence before claiming recovery "
+        "or dispatching more work. Retain actionable failures until resolved."
     )
-    lines.append(
-        f"[STATE_SIGNATURE: {project}|mission-callback|{mission_id}|{status}|inspect]"
+    # Callbacks are attempt evidence. They must not write project mode/decisions
+    # through the native transcript ingestor, including markers quoted by a
+    # worker's result. Only subsequent controller judgment owns that action.
+    return re.sub(
+        r"\[(CTRL|STATE_SIGNATURE|DECISION|Cron delivery)\s*:",
+        lambda match: "[Mission evidence " + match[1] + ":",
+        "\n".join(lines), flags=re.IGNORECASE,
     )
-    return "\n".join(lines)
 
 
 def mission_callback_display_metadata(payload: dict) -> dict:
@@ -315,7 +474,37 @@ def _append_typed(session_db: Any, **kwargs: Any) -> None:
     except TypeError:
         kwargs.pop("display_kind", None)
         kwargs.pop("display_metadata", None)
+        kwargs.pop("turn_lease_holder", None)
         session_db.append_message(**kwargs)
+
+
+class MissionCallbackTurnActive(RuntimeError):
+    """A live agent turn owns the transcript; webhook delivery must retry."""
+
+
+def _acquire_callback_turn_lease(session_db: Any, session_id: str) -> str | None:
+    """Fence callback transcript writes behind a live agent turn when supported.
+
+    Older DB shims lack durable turn leases and retain their existing behaviour.
+    On the real SessionDB, failing to acquire means a turn is actively loading
+    or flushing this conversation, so callers must leave native delivery
+    unacknowledged rather than inserting a callback into its transcript.
+    """
+    acquire = getattr(session_db, "try_acquire_session_turn_lease", None)
+    if not callable(acquire):
+        return None
+    holder = f"mission-callback:{uuid4().hex}"
+    if not acquire(session_id, holder, ttl_seconds=30.0, patience_s=0.5):
+        raise MissionCallbackTurnActive(session_id)
+    return holder
+
+
+def _release_callback_turn_lease(session_db: Any, session_id: str, holder: str | None) -> None:
+    if not holder:
+        return
+    release = getattr(session_db, "release_session_turn_lease", None)
+    if callable(release):
+        release(session_id, holder)
 
 
 def _last_message_role(session_db: Any, session_id: str) -> Optional[str]:
@@ -360,7 +549,7 @@ def should_wake_mission_callback(session_db: Any, live_id: str) -> bool:
 
 
 def append_mission_callback(
-    session_id: str, payload: dict, session_db: Any
+    session_id: str, payload: dict, session_db: Any, *, replacement_evidence: dict | None = None,
 ) -> Tuple[str, bool]:
     """Persist the callback on the live session.
 
@@ -379,38 +568,107 @@ def append_mission_callback(
     """
     session_db = sync_session_db(session_db)
     live = resolve_live_session_id(session_id, session_db) or session_id
-    event_id = extract_event_id(payload)
-    if event_id:
-        texts = _recent_message_texts(session_db, live)
-        if texts is not None:
-            marker = f" event={event_id}"
-            if any("[Mission callback" in t and marker in t for t in texts):
-                logger.info(
-                    "duplicate mission callback event %s for %s — skipping append",
-                    event_id,
-                    live,
+    lease_holder = _acquire_callback_turn_lease(session_db, live)
+    try:
+        event_id = extract_event_id(payload)
+        if event_id:
+            texts = _recent_message_texts(session_db, live)
+            if texts is not None:
+                mission_id = _identity_line_value(payload.get("mission_id"))
+                event_id = _identity_line_value(event_id)
+                identity_prefix = re.compile(
+                    rf"status=\S+ mission={re.escape(mission_id)} event={re.escape(event_id)}"
                 )
-                return live, False
-    content = format_mission_callback(payload)
-    metadata = mission_callback_display_metadata(payload)
-    if _last_message_role(session_db, live) == "assistant":
+                header = re.compile(
+                    rf"status=\S+ mission={re.escape(mission_id)} event={re.escape(event_id)}"
+                    r"(?: superseded_by=[0-9a-f-]{36})?(?: replacement_verified=1)?"
+                    r"(?: workspace=.*)?"
+                )
+                # Match the producer identity line, never a prefix or quoted
+                # evidence further down the callback body.
+                def matches(text):
+                    lines = text.splitlines()
+                    return (len(lines) >= 2 and lines[0].startswith("[Mission callback:")
+                            and header.fullmatch(lines[1]) is not None)
+
+                existing_headers = [text.splitlines()[1] for text in texts if matches(text)]
+                if existing_headers:
+                    # Native retry delivery may enrich a terminal event with its
+                    # supersession relationship after the original callback was
+                    # stored.  Keep unchanged retries idempotent, but append the
+                    # new attempt evidence so the owning conversation is woken
+                    # with the same revision the controller inbox receives.
+                    successor, verified_now = _callback_revision(
+                        payload, replacement_evidence
+                    )
+                    # Only the latest generated identity line is evidence for
+                    # this event's current relationship. Searching every
+                    # callback body made a quoted successor look authoritative
+                    # and treated A -> B -> A as an unchanged retry.
+                    latest_header = existing_headers[-1]
+                    # The matched event ID is externally supplied text. Parse
+                    # revision fields only from the suffix after that exact
+                    # identity, otherwise an event ID containing
+                    # "superseded_by=..." can impersonate a real revision.
+                    prefix_match = identity_prefix.match(latest_header)
+                    revision_suffix = (
+                        latest_header[prefix_match.end():] if prefix_match else ""
+                    )
+                    revision_suffix = revision_suffix.split(" workspace=", 1)[0]
+                    successor_match = re.match(
+                        r" superseded_by=([0-9a-f-]{36})(?: |$)",
+                        revision_suffix,
+                    )
+                    latest_successor = (
+                        successor_match.group(1) if successor_match else None
+                    )
+                    latest_verified = " replacement_verified=1" in revision_suffix
+                    if (
+                        successor == latest_successor
+                        and (not verified_now or latest_verified)
+                    ):
+                        logger.info(
+                            "duplicate mission callback event %s for %s — skipping append",
+                            event_id,
+                            live,
+                        )
+                        return live, False
+        content = format_mission_callback(payload, replacement_evidence=replacement_evidence)
+        metadata = mission_callback_display_metadata(payload)
+        if _last_message_role(session_db, live) == "assistant":
+            _append_typed(
+                session_db,
+                session_id=live,
+                role="user",
+                content="A mission you started has finished. The result follows.",
+                display_kind=MISSION_CALLBACK_SEPARATOR_DISPLAY_KIND,
+                display_metadata=metadata,
+                turn_lease_holder=lease_holder,
+            )
         _append_typed(
             session_db,
             session_id=live,
-            role="user",
-            content="A mission you started has finished. The result follows.",
-            display_kind=MISSION_CALLBACK_SEPARATOR_DISPLAY_KIND,
+            role="assistant",
+            content=content,
+            display_kind=MISSION_CALLBACK_DISPLAY_KIND,
             display_metadata=metadata,
+            turn_lease_holder=lease_holder,
         )
-    _append_typed(
-        session_db,
-        session_id=live,
-        role="assistant",
-        content=content,
-        display_kind=MISSION_CALLBACK_DISPLAY_KIND,
-        display_metadata=metadata,
-    )
-    return live, True
+        return live, True
+    finally:
+        _release_callback_turn_lease(session_db, live, lease_holder)
+
+
+def append_mission_wake_failure(session_id: str, payload: dict, session_db: Any) -> None:
+    """Do not write an ambiguous wake receipt into a live conversation.
+
+    A self-post timeout does not cancel the underlying model turn.  Appending
+    an assistant receipt here can race that turn's final assistant message and
+    corrupt strict role alternation.  The callback itself is already durable;
+    retain the ambiguity in logs until the turn has a terminal receipt.
+    """
+    logger.warning("mission wake delivery outcome unknown for %s event=%s; no transcript receipt appended",
+                   session_id, extract_event_id(payload))
 
 
 def _pending_callback_path(mission_id: str) -> Path:
@@ -420,35 +678,103 @@ def _pending_callback_path(mission_id: str) -> Path:
     return get_hermes_home() / _PENDING_DIRNAME / f"{safe}.json"
 
 
-def stash_unroutable_callback(mission_id: str, payload: dict) -> None:
-    """Keep a terminal webhook that arrived before enroll/ownership proof."""
+# Existing early-enrollment evidence only: never project ownership. Refuse
+# overflow/conflicting events rather than silently replacing accepted evidence.
+_PENDING_MAX_RECORDS = 128
+_PENDING_MAX_BYTES = 65_536
+
+
+def stash_unroutable_callback(mission_id: str, payload: dict) -> bool:
+    """Bounded, fail-closed backup; HTTP acceptance must await a real owner."""
     mid = (mission_id or "").strip()
     if not mid or not isinstance(payload, dict):
-        return
+        return False
     path = _pending_callback_path(mid)
+    lock = path.parent / ".mutation-lock"
+    acquired = False
+    handle = None
     try:
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if len(encoded) > _PENDING_MAX_BYTES:
+            return False
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Keep the lock inode: the OS releases ownership even on process death.
+        # A legacy directory at this path fails closed; never steal its lock.
+        from gateway.status import _try_acquire_file_lock
+
+        handle = lock.open("a+", encoding="utf-8")
+        acquired = _try_acquire_file_lock(handle)
+        if not acquired:
+            return False
+        if path.exists():
+            if path.stat().st_size > _PENDING_MAX_BYTES:
+                return False
+            return json.loads(path.read_text(encoding="utf-8")) == payload
+        if sum(1 for _ in path.parent.glob("*.json")) >= _PENDING_MAX_RECORDS:
+            return False
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        tmp.replace(path)
+        try:
+            tmp.write_bytes(encoded)
+            tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)
+        return True
     except Exception:
-        logger.debug("failed to stash pending mission callback %s", mid, exc_info=True)
+        logger.debug("pending callback backup refused for %s", mid, exc_info=True)
+        return False
+    finally:
+        if handle is not None:
+            if acquired:
+                from gateway.status import _release_file_lock
+
+                _release_file_lock(handle)
+            handle.close()
 
 
-def take_stashed_callback(mission_id: str) -> Optional[dict]:
-    """Pop a previously stashed terminal callback, or None."""
+def peek_stashed_callback(mission_id: str) -> Optional[dict]:
+    """Read backup evidence without consuming it before durable reconciliation."""
+    return _read_stashed_callback(mission_id, consume=False)
+
+
+def take_stashed_callback(mission_id: str, *, expected_payload: Optional[dict] = None) -> Optional[dict]:
+    """Pop only the accepted evidence under the nonblocking mutation lock."""
+    return _read_stashed_callback(mission_id, consume=True, expected_payload=expected_payload)
+
+
+def _read_stashed_callback(
+    mission_id: str, *, consume: bool, expected_payload: Optional[dict] = None,
+) -> Optional[dict]:
     mid = (mission_id or "").strip()
     if not mid:
         return None
     path = _pending_callback_path(mid)
-    if not path.exists():
-        return None
+    lock = path.parent / ".mutation-lock"
+    acquired = False
+    handle = None
     try:
+        from gateway.status import _try_acquire_file_lock
+
+        handle = lock.open("a+", encoding="utf-8")
+        acquired = _try_acquire_file_lock(handle)
+        if not acquired:
+            return None
+        if not path.exists() or path.stat().st_size > _PENDING_MAX_BYTES:
+            return None
         data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+        if expected_payload is not None and data != expected_payload:
+            return None
+        if consume:
+            path.unlink()
+        return data
     except Exception:
-        data = None
-    try:
-        path.unlink()
-    except Exception:
-        pass
-    return data if isinstance(data, dict) else None
+        logger.debug("pending callback backup unavailable for %s", mid, exc_info=True)
+        return None
+    finally:
+        if handle is not None:
+            if acquired:
+                from gateway.status import _release_file_lock
+
+                _release_file_lock(handle)
+            handle.close()

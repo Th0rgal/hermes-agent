@@ -2351,6 +2351,7 @@ def create_job(
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     failure_deliver: Optional[str] = None,
+    controller: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -2358,6 +2359,8 @@ def create_job(
     Args:
         prompt: The prompt to run (must be self-contained, or a task instruction when skill is set).
                 Ignored when ``no_agent=True`` except as an optional name hint.
+        controller: Optional explicit project authority. Its stored prompt and
+                full skill preload must pass admission before persistence.
         schedule: Schedule string (see parse_schedule)
         name: Optional friendly name
         repeat: How many times to run (None = forever, 1 = once)
@@ -2589,6 +2592,12 @@ def create_job(
     if normalized_failure_deliver is not None:
         job["failure_deliver"] = normalized_failure_deliver
 
+    if controller is not None:
+        job["controller"] = controller
+        from cron.controller_scope import validate_controller_job
+
+        validate_controller_job(job)
+
     with _jobs_lock():
         jobs = load_jobs()
         jobs.append(job)
@@ -2660,7 +2669,7 @@ def list_jobs(include_disabled: bool = False) -> List[Dict[str, Any]]:
     return jobs
 
 
-def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def update_job(job_id: str, updates: Dict[str, Any], *, expected_job: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """Update a job by ID, refreshing derived schedule fields when needed."""
     # Block mutation of immutable fields. ``id`` in particular is a filesystem
     # path component under OUTPUT_DIR — letting an update change it leaks
@@ -2671,11 +2680,41 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
             f"Cron job field(s) cannot be updated: {', '.join(sorted(bad_fields))}"
         )
 
+    # Controller admission can load a qualified plugin skill.  That path may
+    # wait for discovery or initialize plugin code, so it must never run while
+    # holding the process-wide jobs lock.  Take an optimistic record snapshot,
+    # validate its merged controller definition outside the lock, then require
+    # the same snapshot at persistence below.  A concurrent edit gets a clear
+    # retry instead of being overwritten after a potentially long validation.
+    controller_validation_fields = {
+        "controller", "prompt", "skills", "skill", "deliver", "no_agent",
+    }
+    validation_snapshot: Optional[Dict[str, Any]] = None
+    if controller_validation_fields.intersection(updates):
+        with _jobs_lock():
+            records = load_jobs()
+            current = next((record for record in records if record["id"] == job_id), None)
+            if current is None:
+                return None
+            if expected_job is not None and current != expected_job:
+                raise ValueError("Job changed since export; export again and reconcile latest owner instructions")
+            validation_snapshot = dict(current)
+
+        validation_candidate = _apply_skill_fields({**validation_snapshot, **updates})
+        from cron.controller_scope import validate_controller_job
+
+        validate_controller_job(validation_candidate)
+
     with _jobs_lock():
         jobs = load_jobs()
         for i, job in enumerate(jobs):
             if job["id"] != job_id:
                 continue
+
+            if expected_job is not None and job != expected_job:
+                raise ValueError("Job changed since export; export again and reconcile latest owner instructions")
+            if validation_snapshot is not None and job != validation_snapshot:
+                raise ValueError("Job changed during controller validation; retry the update")
 
             # Validate / normalize workdir if present in updates.  Empty string
             # or None both mean "clear the field" (restore old behaviour).
@@ -3182,6 +3221,23 @@ def _mark_job_run_locked(
                         return False
                 now = _hermes_now().isoformat()
                 job["last_run_at"] = now
+                # Completion must not hide input arriving after the run snapshot.
+                # Consume the active boundary to avoid reusing an older run.
+                callback_boundary = job.pop("controller_callback_boundary_at", None)
+                if callback_boundary is not None or "last_controller_callback_boundary_at" in job:
+                    job["last_controller_callback_boundary_at"] = callback_boundary or now
+                captured_versions = job.pop(
+                    "controller_callback_captured_versions", None
+                )
+                if not success and isinstance(captured_versions, dict):
+                    # An incomplete callback turn supplies an exact capture
+                    # map. Retain it for early-wake admission so same-clock or
+                    # backwards-clock arrivals are not mistaken for replay.
+                    job["last_controller_callback_captured_versions"] = captured_versions
+                else:
+                    # A successful/no-snapshot run must fall back to the
+                    # ordinary timestamp boundary; never reuse an older map.
+                    job.pop("last_controller_callback_captured_versions", None)
                 job.pop("manual_run_at", None)
                 # The transient manual-run context is single-fire: whatever
                 # run just completed consumed it (or superseded it).

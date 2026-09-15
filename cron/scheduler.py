@@ -5094,6 +5094,8 @@ def _build_job_prompt(
     job: dict,
     prerun_script: Optional[tuple] = None,
     extra_prompt: Optional[str] = None,
+    *,
+    validation_only: bool = False,
 ) -> str:
     """Build the effective prompt for a cron job, optionally loading one or more skills first.
 
@@ -5108,6 +5110,10 @@ def _build_job_prompt(
             #57331 — salvaged from #57342 by @liuhao1024). Appended to the
             stored prompt under a ``## Run Context`` header for this single
             fire only — never persisted to the job definition.
+        validation_only: Assemble stored instructions and unexpanded skills for
+            admission. Do not run scripts, read volatile context/notepad data,
+            record skill usage, or register a conversation cache boundary.
+            Dynamic expansions remain subject to the runtime budget check.
     """
     from cron.controller_scope import check_prompt_budget, current_controller_scope, scope_from_job
 
@@ -5129,7 +5135,7 @@ def _build_job_prompt(
 
     # Run data-collection script if configured, inject output as context.
     script_path = job.get("script")
-    if script_path:
+    if script_path and not validation_only:
         if prerun_script is not None:
             success, script_output = prerun_script
         else:
@@ -5158,7 +5164,7 @@ def _build_job_prompt(
 
     # Inject output from referenced cron jobs as context.
     context_from = job.get("context_from")
-    if context_from:
+    if context_from and not validation_only:
         from cron.jobs import get_cron_output_dir
         output_dir = get_cron_output_dir()
         if isinstance(context_from, str):
@@ -5231,7 +5237,8 @@ def _build_job_prompt(
     # use the feature get a byte-identical prompt.
     from cron import notepad as cron_notepad
 
-    notepad_section = cron_notepad.render_notepad_section(str(job.get("id") or ""))
+    notepad_section = (cron_notepad.render_notepad_section(str(job.get("id") or ""))
+                       if not validation_only else "")
     if notepad_section:
         prompt = f"{notepad_section}{prompt}"
         has_injected_data = True
@@ -5285,6 +5292,7 @@ def _build_job_prompt(
                 bundle_key,
                 user_instruction="",
                 task_id=str(job.get("id") or "") or None,
+                **({"validation_only": True} if validation_only else {}),
             )
             if bundle_payload:
                 bundle_message, _loaded_bundle_skills, _missing_bundle_skills = bundle_payload
@@ -5301,7 +5309,11 @@ def _build_job_prompt(
             continue
 
         try:
-            loaded = json.loads(skill_view(normalize_skill_lookup_name(skill_name)))
+            loaded = json.loads(skill_view(
+                normalize_skill_lookup_name(skill_name),
+                **({"preprocess": False, "capture_prerequisites": False}
+                   if validation_only else {}),
+            ))
         except (json.JSONDecodeError, TypeError):
             logger.warning("Cron job '%s': skill '%s' returned invalid JSON, skipping", job.get("name", job.get("id")), skill_name)
             skipped.append(skill_name)
@@ -5314,7 +5326,8 @@ def _build_job_prompt(
 
         # Bump usage so the curator sees this skill as actively used.
         try:
-            bump_use(skill_name, task_id=str(job.get("id") or "") or None)
+            if not validation_only:
+                bump_use(skill_name, task_id=str(job.get("id") or "") or None)
         except Exception:
             logger.debug("Cron job: failed to bump skill usage for '%s'", skill_name, exc_info=True)
 
@@ -5350,7 +5363,7 @@ def _build_job_prompt(
         stable_prefix = append_user_instruction(parts, prompt)
     assembled = _scan_assembled_cron_prompt("\n".join(parts), job, has_skills=True)
     check_prompt_budget(controller_scope, assembled)
-    if stable_prefix and len(assembled) > len(stable_prefix) and assembled.startswith(stable_prefix):
+    if not validation_only and stable_prefix and len(assembled) > len(stable_prefix) and assembled.startswith(stable_prefix):
         # Guarded because the injection scanner may sanitize (mutate) the
         # assembled bytes; a mismatch simply falls back to whole-message
         # caching.
@@ -6104,6 +6117,10 @@ def run_job(
     except ControllerScopeError as exc:
         return False, f"Controller configuration rejected: {exc}", "", str(exc)
     with bind_controller_scope(scope):
+        if scope is not None:
+            from cron.controller_callbacks import begin_callback_run
+
+            begin_callback_run(job["id"])
         success, output, final_response, error = _run_job(
             job, defer_agent_teardown=defer_agent_teardown,
             extra_prompt=extra_prompt, cancel_event=cancel_event,
@@ -6402,18 +6419,32 @@ def _run_job(
             return True, silent_doc, SILENT_MARKER, None
 
     callback_event_ids = []
+    callback_event_versions = {}
+    callback_captured_versions = {}
     try:
-        if (job.get("controller") or {}).get("callback_relay") is True:
-            from cron.controller_callbacks import pending_callbacks
-
-            snapshot = pending_callbacks(job_id)
-            callback_event_ids = snapshot["event_ids"]
-            callback_prompt = snapshot["prompt"]
-            if callback_prompt:
-                extra_prompt = "\n\n".join(part for part in (extra_prompt, callback_prompt) if part)
         prompt = _build_job_prompt(
             job, prerun_script=prerun_script, extra_prompt=extra_prompt
         )
+        if prompt is not None and (job.get("controller") or {}).get("callback_relay") is True:
+            from cron.controller_callbacks import pending_callbacks
+            from cron.controller_scope import CONTROLLER_PROMPT_MAX_CHARS, check_prompt_budget, current_controller_scope
+
+            # Assemble mandatory instructions once; script and skill expansion
+            # must not run again while fitting a callback burst. Append only a
+            # complete snapshot, leaving every unselected entry durable.
+            callback_header = "\n\n## Native callback evidence\n"
+            snapshot = pending_callbacks(
+                job_id, max_chars=min(6000, CONTROLLER_PROMPT_MAX_CHARS - len(prompt) - len(callback_header)),
+            )
+            callback_event_ids = snapshot["event_ids"]
+            callback_event_versions = snapshot.get("event_versions", {})
+            callback_captured_versions = snapshot.get("captured_versions", {})
+            callback_prompt = snapshot["prompt"]
+            if callback_prompt:
+                callback_prompt = _scan_assembled_cron_prompt(
+                    callback_prompt, job, has_injected_data=True,
+                )
+                prompt = check_prompt_budget(current_controller_scope(), prompt + callback_header + callback_prompt)
     except CronPromptInjectionBlocked as block_exc:
         # Assembled prompt (user prompt + loaded skill content) tripped the
         # injection scanner. Refuse to run the agent this tick and surface
@@ -7424,7 +7455,13 @@ def _run_job(
         if callback_event_ids and result.get("completed") is True and final_response.strip():
             from cron.controller_callbacks import acknowledge_callbacks
 
-            acknowledge_callbacks(job_id, callback_event_ids, success=True)
+            acknowledge_callbacks(job_id, callback_event_ids, success=True,
+                                  event_versions=callback_event_versions)
+        elif callback_event_ids:
+            from cron.controller_callbacks import defer_callbacks
+
+            defer_callbacks(job_id, callback_event_ids,
+                            captured_versions=callback_captured_versions)
         return True, output, final_response, None
 
     except Exception as e:

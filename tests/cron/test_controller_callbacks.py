@@ -109,6 +109,319 @@ def test_large_callback_burst_is_batched_without_acknowledging_unsent_entries():
     assert len(remaining) == 9 - len(snapshot["event_ids"])
 
 
+def test_callback_snapshot_fits_actual_remaining_prompt_budget():
+    job_id = controller()
+    for index in range(3):
+        relay.enqueue_mission_callback(event(index, summary="x" * 2000))
+    snapshot = relay.pending_callbacks(job_id, max_chars=3200)
+    assert len(snapshot["prompt"]) <= 3200
+    assert len(snapshot["event_ids"]) == 1
+    assert len(relay.pending_callbacks(job_id)["event_ids"]) > 1
+
+
+def test_callback_that_cannot_fit_is_explicit_and_remains_pending():
+    job_id = controller()
+    receipt = relay.enqueue_mission_callback(event(summary="x" * 2000))
+    with pytest.raises(ValueError, match="callback.*budget"):
+        relay.pending_callbacks(job_id, max_chars=100)
+    assert relay.pending_callbacks(job_id)["event_ids"] == [receipt["event_id"]]
+
+
+def test_failed_controller_callback_replay_preserves_scheduled_retry():
+    job_id = controller()
+    relay.enqueue_mission_callback(event())
+    jobs.mark_job_run(job_id, success=False, error="Controller prompt exceeds budget")
+    retry_at = jobs.get_job(job_id)["next_run_at"]
+    for _ in range(3):
+        relay.wake_pending_controllers()
+        relay.enqueue_mission_callback(event())
+        assert jobs.get_job(job_id)["next_run_at"] == retry_at
+    assert relay.pending_callbacks(job_id)["event_ids"]
+    # Fresh native evidence can wake the controller; replay cannot.
+    relay.enqueue_mission_callback(event(2))
+    assert jobs.get_job(job_id)["next_run_at"] < retry_at
+
+
+def test_replayed_receipt_absorbs_native_supersession_without_second_dispatch_identity():
+    job_id = controller()
+    first = relay.enqueue_mission_callback(event())
+    before = jobs.get_job(job_id)["controller_callbacks"][0]
+    successor = "f43e7dec-7143-4902-8b00-968a2b715dae"
+    replay = relay.enqueue_mission_callback(event(tags=["superseded_by:" + successor]))
+    assert replay["duplicate"]
+    assert replay["event_id"] == first["event_id"]
+    entries = jobs.get_job(job_id)["controller_callbacks"]
+    assert len(entries) == 1
+    assert entries[0]["superseded_by"] == successor
+    assert entries[0]["received_at"] == before["received_at"]
+    assert entries[0]["dispatch_idempotency_key"] == before["dispatch_idempotency_key"]
+    assert successor in relay.pending_callbacks(job_id)["prompt"]
+
+
+@pytest.mark.parametrize("acknowledged", [False, True])
+def test_cleared_successor_reopens_and_fences_snapshot_ack(acknowledged):
+    job_id = controller()
+    successor = "22222222-2222-4222-8222-222222222222"
+    payload = event(tags=[f"superseded_by:{successor}"])
+    receipt = relay.enqueue_mission_callback(payload)
+    snapshot = relay.pending_callbacks(job_id)
+    if acknowledged:
+        relay.acknowledge_callbacks(job_id, snapshot["event_ids"], success=True,
+                                    event_versions=snapshot["event_versions"])
+    else:
+        relay.defer_callbacks(job_id, snapshot["event_ids"],
+                              captured_versions=snapshot["captured_versions"])
+    relay.enqueue_mission_callback(event())
+    cleared = jobs.get_job(job_id)["controller_callbacks"][0]
+    assert cleared["superseded_by"] is None
+    assert not cleared.get("handled_at") and not cleared.get("retry_after")
+    assert cleared["revision"] > snapshot["event_versions"][receipt["event_id"]]
+    relay.acknowledge_callbacks(job_id, snapshot["event_ids"], success=True,
+                                event_versions=snapshot["event_versions"])
+    assert relay.pending_callbacks(job_id)["event_ids"] == [receipt["event_id"]]
+    relay.enqueue_mission_callback(event())
+    assert jobs.get_job(job_id)["controller_callbacks"][0]["revision"] == cleared["revision"]
+    cleared_snapshot = relay.pending_callbacks(job_id)
+    relay.enqueue_mission_callback(payload)
+    relay.acknowledge_callbacks(job_id, cleared_snapshot["event_ids"], success=True,
+                                event_versions=cleared_snapshot["event_versions"])
+    restored = jobs.get_job(job_id)["controller_callbacks"][0]
+    assert restored["superseded_by"] == successor
+    assert restored["revision"] > cleared["revision"]
+    assert not restored.get("handled_at")
+
+
+def test_late_supersession_reopens_an_acknowledged_receipt():
+    job_id = controller()
+    first = relay.enqueue_mission_callback(event())
+    relay.acknowledge_callbacks(job_id, [first["event_id"]], success=True)
+    dispatch_key = jobs.get_job(job_id)["controller_callbacks"][0]["dispatch_idempotency_key"]
+    successor = "f43e7dec-7143-4902-8b00-968a2b715dae"
+    relay.enqueue_mission_callback(event(tags=["superseded_by:" + successor]))
+    entry = jobs.get_job(job_id)["controller_callbacks"][0]
+    assert not entry.get("handled_at")
+    assert entry["dispatch_idempotency_key"] == dispatch_key
+    assert successor in relay.pending_callbacks(job_id)["prompt"]
+
+
+def test_acknowledgement_does_not_consume_a_receipt_revised_after_snapshot(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    receipt = relay.enqueue_mission_callback(event())
+    snapshot = relay.pending_callbacks(job_id)
+
+    now += timedelta(seconds=1)
+    successor = "f43e7dec-7143-4902-8b00-968a2b715dae"
+    relay.enqueue_mission_callback(event(tags=["superseded_by:" + successor]))
+    relay.acknowledge_callbacks(
+        job_id,
+        snapshot["event_ids"],
+        success=True,
+        event_versions=snapshot["event_versions"],
+    )
+
+    entry = jobs.get_job(job_id)["controller_callbacks"][0]
+    assert entry["id"] == receipt["event_id"]
+    assert not entry.get("handled_at")
+    assert relay.pending_callbacks(job_id)["event_ids"] == [receipt["event_id"]]
+
+
+def test_same_clock_deferral_does_not_delay_a_receipt_revised_after_snapshot(monkeypatch):
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    receipt = relay.enqueue_mission_callback(event())
+    snapshot = relay.pending_callbacks(job_id)
+
+    relay.enqueue_mission_callback(
+        event(tags=["superseded_by:f43e7dec-7143-4902-8b00-968a2b715dae"])
+    )
+    relay.defer_callbacks(
+        job_id,
+        snapshot["event_ids"],
+        captured_versions=snapshot["captured_versions"],
+    )
+
+    entry = jobs.get_job(job_id)["controller_callbacks"][0]
+    assert entry["id"] == receipt["event_id"]
+    assert not entry.get("retry_after")
+
+
+def test_revised_receipt_clears_an_existing_callback_deferral(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    relay.enqueue_mission_callback(event())
+    snapshot = relay.pending_callbacks(job_id)
+    relay.defer_callbacks(
+        job_id,
+        snapshot["event_ids"],
+        captured_versions=snapshot["captured_versions"],
+    )
+    assert jobs.get_job(job_id)["controller_callbacks"][0].get("retry_after")
+
+    now += timedelta(seconds=1)
+    relay.enqueue_mission_callback(
+        event(tags=["superseded_by:f43e7dec-7143-4902-8b00-968a2b715dae"])
+    )
+    assert not jobs.get_job(job_id)["controller_callbacks"][0].get("retry_after")
+
+
+def test_early_wake_snapshots_fresh_callbacks_before_deferred_backlog(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    for index in range(3):
+        relay.enqueue_mission_callback(event(index, summary="x" * 2000))
+    backlog = relay.pending_callbacks(job_id, max_chars=3200)
+    relay.defer_callbacks(
+        job_id,
+        backlog["event_ids"],
+        captured_versions=backlog["captured_versions"],
+    )
+
+    now += timedelta(seconds=1)
+    fresh = relay.enqueue_mission_callback(event(9, summary="fresh evidence"))
+    early_snapshot = relay.pending_callbacks(job_id, max_chars=3200)
+    assert early_snapshot["event_ids"][0] == fresh["event_id"]
+
+
+def test_incomplete_summary_retains_input_without_immediate_replay():
+    job_id = controller()
+    relay.enqueue_mission_callback(event())
+    snapshot = relay.pending_callbacks(job_id)
+    relay.defer_callbacks(job_id, snapshot["event_ids"])
+    # A max-iteration summary is still deliverable, so outer status is success.
+    jobs.mark_job_run(job_id, success=True)
+    retry_at = jobs.get_job(job_id)["next_run_at"]
+    relay.wake_pending_controllers()
+    assert jobs.get_job(job_id)["next_run_at"] == retry_at
+    assert relay.pending_callbacks(job_id)["event_ids"] == snapshot["event_ids"]
+    relay.enqueue_mission_callback(event(2))
+    assert jobs.get_job(job_id)["next_run_at"] < retry_at
+
+
+def test_incomplete_bounded_batch_defers_its_unselected_tail(monkeypatch):
+    job_id = controller()
+    for index in range(9):
+        relay.enqueue_mission_callback(event(index, summary="x" * 2000))
+    snapshot = relay.pending_callbacks(job_id)
+    assert 0 < len(snapshot["event_ids"]) < 9
+    relay.defer_callbacks(job_id, snapshot["event_ids"])
+    assert all(entry.get("retry_after") for entry in jobs.get_job(job_id)["controller_callbacks"])
+
+
+def test_incomplete_batch_does_not_defer_input_after_its_snapshot(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    first = relay.enqueue_mission_callback(event())
+    now += timedelta(seconds=1)
+    snapshot = relay.pending_callbacks(job_id)
+    now += timedelta(seconds=1)
+    fresh = relay.enqueue_mission_callback(event(2))
+    relay.defer_callbacks(job_id, snapshot["event_ids"])
+    entries = {entry["id"]: entry for entry in jobs.get_job(job_id)["controller_callbacks"]}
+    assert entries[first["event_id"]].get("retry_after")
+    assert not entries[fresh["event_id"]].get("retry_after")
+
+
+@pytest.mark.parametrize("arrival_offset", [0, -1], ids=["same-clock", "backwards-clock"])
+def test_version_snapshot_never_defers_an_uncaptured_callback(monkeypatch, arrival_offset):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    captured = relay.enqueue_mission_callback(event())
+    snapshot = relay.pending_callbacks(job_id)
+    now += timedelta(seconds=arrival_offset)
+    unseen = relay.enqueue_mission_callback(event(2))
+
+    relay.defer_callbacks(
+        job_id, snapshot["event_ids"], captured_versions=snapshot["captured_versions"]
+    )
+
+    entries = {entry["id"]: entry for entry in jobs.get_job(job_id)["controller_callbacks"]}
+    assert entries[captured["event_id"]].get("retry_after")
+    assert not entries[unseen["event_id"]].get("retry_after")
+
+
+@pytest.mark.parametrize("arrival_offset", [0, -1], ids=["same-clock", "backwards-clock"])
+def test_uncaptured_version_snapshot_callback_authorizes_early_wake(monkeypatch, arrival_offset):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    relay.enqueue_mission_callback(event())
+    snapshot = relay.pending_callbacks(job_id)
+    now += timedelta(seconds=arrival_offset)
+    relay.enqueue_mission_callback(event(2))
+    relay.defer_callbacks(
+        job_id, snapshot["event_ids"], captured_versions=snapshot["captured_versions"]
+    )
+    jobs.mark_job_run(job_id, success=False, error="incomplete callback turn")
+    retry_at = jobs.get_job(job_id)["next_run_at"]
+
+    relay.wake_pending_controllers()
+
+    assert jobs.get_job(job_id)["next_run_at"] < retry_at
+
+
+@pytest.mark.parametrize("arrival_offset", [0, -1], ids=["same-clock", "backwards-clock"])
+def test_pending_snapshot_alone_preserves_uncaptured_early_wake(monkeypatch, arrival_offset):
+    """Pre-dispatch failures can mark a run without calling defer_callbacks()."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    relay.enqueue_mission_callback(event())
+    relay.pending_callbacks(job_id)
+    now += timedelta(seconds=arrival_offset)
+    relay.enqueue_mission_callback(event(2))
+    now += timedelta(seconds=30)
+    jobs.mark_job_run(job_id, success=False, error="pre-dispatch callback failure")
+    retry_at = jobs.get_job(job_id)["next_run_at"]
+
+    relay.wake_pending_controllers()
+
+    assert jobs.get_job(job_id)["next_run_at"] < retry_at
+
+
+def test_revised_supersession_wakes_after_a_later_failed_run(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    first = relay.enqueue_mission_callback(event())
+    relay.acknowledge_callbacks(job_id, [first["event_id"]], success=True)
+    now += timedelta(seconds=1)
+    relay.begin_callback_run(job_id)
+    now += timedelta(seconds=1)
+    jobs.mark_job_run(job_id, success=False, error="failed")
+    retry_at = jobs.get_job(job_id)["next_run_at"]
+    now += timedelta(seconds=1)
+    successor = "f43e7dec-7143-4902-8b00-968a2b715dae"
+    relay.enqueue_mission_callback(event(tags=["superseded_by:" + successor]))
+    row = jobs.get_job(job_id)
+    assert row["controller_callbacks"][0].get("revised_at") == now.isoformat()
+    assert row["next_run_at"] < retry_at
+
+
 def test_alias_callback_matches_canonical_job(monkeypatch):
     import hermes_cli.projects_db as projects
     monkeypatch.setattr(projects, "_project_alias_map", lambda: {"lido": "verity-lido"})
@@ -173,3 +486,81 @@ def test_native_execution_fallback_preserves_legacy_identity(execution, legacy, 
                "execution": execution, **legacy}
     relay.enqueue_mission_callback(payload)
     assert jobs.load_jobs()[0]["controller_callbacks"][0]["run_id"] == expected
+
+
+@pytest.mark.parametrize("snapshot", [True, False])
+def test_arrival_during_failed_run_wakes_from_input_boundary(monkeypatch, snapshot):
+    from datetime import datetime, timedelta, timezone
+    from cron import scheduler
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    old = relay.enqueue_mission_callback(event())
+    now += timedelta(seconds=1)
+
+    def failed_run(*args, **kwargs):
+        nonlocal now
+        if snapshot:
+            assert relay.pending_callbacks(job_id)["event_ids"] == [old["event_id"]]
+        now += timedelta(seconds=1)
+        relay.enqueue_mission_callback(event(2))
+        now += timedelta(seconds=1)
+        return False, "", "", "oversized prompt" if not snapshot else "model failed"
+
+    monkeypatch.setattr(scheduler, "_run_job", failed_run)
+    assert scheduler.run_job(jobs.get_job(job_id))[0] is False
+    jobs.mark_job_run(job_id, success=False, error="failed")
+    retry_at = jobs.get_job(job_id)["next_run_at"]
+    importlib.reload(relay).wake_pending_controllers()
+    assert jobs.get_job(job_id)["next_run_at"] < retry_at
+    assert relay.enqueue_mission_callback(event(2))["duplicate"]
+    assert len(jobs.get_job(job_id)["controller_callbacks"]) == 2
+
+    # The next failed snapshot has seen both inputs: neither replay wakes it.
+    now += timedelta(seconds=1)
+    relay.begin_callback_run(job_id)
+    relay.pending_callbacks(job_id)
+    now += timedelta(seconds=1)
+    jobs.mark_job_run(job_id, success=False, error="failed again")
+    retry_at = jobs.get_job(job_id)["next_run_at"]
+    relay.enqueue_mission_callback(event(2))
+    relay.wake_pending_controllers()
+    assert jobs.get_job(job_id)["next_run_at"] == retry_at
+
+
+def test_fresh_input_after_snapshot_authorizes_an_early_wake(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    relay.enqueue_mission_callback(event())
+    now += timedelta(seconds=1)
+    relay.pending_callbacks(job_id)
+    now += timedelta(seconds=1)
+    fresh = relay.enqueue_mission_callback(event(2))
+    relay.defer_callbacks(job_id, [fresh["event_id"]])
+    now += timedelta(seconds=1)
+    jobs.mark_job_run(job_id, success=False, error="failed")
+    retry_at = jobs.get_job(job_id)["next_run_at"]
+    relay.wake_pending_controllers()
+    assert jobs.get_job(job_id)["next_run_at"] < retry_at
+
+
+def test_completion_without_new_boundary_does_not_reuse_previous_run(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    relay.begin_callback_run(job_id)
+    now += timedelta(seconds=1)
+    jobs.mark_job_run(job_id, success=False, error="failed")
+    now += timedelta(seconds=1)
+    relay.enqueue_mission_callback(event())
+    now += timedelta(seconds=1)
+    jobs.mark_job_run(job_id, success=False, error="pre-dispatch rejection")
+    retry_at = jobs.get_job(job_id)["next_run_at"]
+    relay.wake_pending_controllers()
+    assert jobs.get_job(job_id)["next_run_at"] == retry_at

@@ -94,13 +94,70 @@ MISSION = "498546da-14b7-48af-afd5-db16a14f5900"
 
 
 @pytest.mark.asyncio
-async def test_mission_complete_routes_into_origin_and_skips_throwaway():
+async def test_compression_defers_callback_without_consuming_retry(monkeypatch):
+    db = _FakeSessionDB(
+        {ORIGIN: {"source": "desktop"}},
+        messages={ORIGIN: [{"content": f"started {MISSION}"}]},
+    )
+    locked = True
+    db.get_compression_lock_holder = lambda sid: "compressor" if locked else None
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    wake = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    payload = {"mission_id": MISSION, "status": "completed", "type": "completed",
+               "origin_session": ORIGIN, "event_id": "compression-retry"}
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 503
+    assert db.appended == []
+    locked = False
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 202
+    await asyncio.gather(*adapter._background_tasks)
+    assert wake.await_count == 1
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 200
+    assert wake.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_routed_notice_uses_trusted_replacement_readback(monkeypatch):
+    db = _FakeSessionDB({ORIGIN: {"source": "desktop"}},
+                        messages={ORIGIN: [{"content": f"started {MISSION}"}]})
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    monkeypatch.setattr("gateway.wake.deliver_wake", AsyncMock())
+    evidence = {"mission_id": "22222222-2222-4222-8222-222222222222", "verified_live": True,
+                "run_id": "run-2", "state": "running", "observed_at": "2026-09-15T10:00:00+00:00"}
+    monkeypatch.setattr("gateway.platforms.mission_status_route.read_replacement_evidence", lambda payload: evidence)
+    response = await adapter._handle_webhook(_mock_request({
+        "mission_id": MISSION, "status": "failed", "type": "failed", "origin_session": ORIGIN,
+        "terminal_evidence": "old attempt failed", "event_id": "verified-replacement",
+    }))
+    assert response.status == 202
+    text = db.appended[-1][2]
+    assert "Replacement execution verified live" in text
+    assert evidence["mission_id"] in text and "old attempt failed" in text
+
+
+@pytest.mark.asyncio
+async def test_mission_complete_routes_into_origin_and_skips_throwaway(monkeypatch):
     db = _FakeSessionDB(
         {ORIGIN: {"source": "desktop"}},
         messages={ORIGIN: [{"content": f"started {MISSION}"}]},
     )
     adapter = _make_adapter()
     adapter.gateway_runner = _FakeRunner(db)
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    monkeypatch.setattr("gateway.wake.deliver_wake", AsyncMock())
     adapter.handle_message = AsyncMock()
 
     payload = {
@@ -150,7 +207,9 @@ async def test_unrelated_origin_is_stashed_not_injected():
     # Origin present but no ownership proof — do not inject into that
     # session, and do not mint a throwaway webhook session either. Enroll
     # will fold if this was a beat-the-transcript race.
+    assert resp.status == 503
     assert body["status"] == "pending_enrollment"
+    assert body["evidence_stashed"] is True
     assert adapter.handle_message.await_count == 0
     assert db.appended == []
 
@@ -243,6 +302,263 @@ async def test_duplicate_event_id_does_not_reschedule_wake(monkeypatch):
     assert len(wakes) == 1
     assert wakes[0][0] is api
     assert len(db.appended) == 1
+
+
+@pytest.mark.asyncio
+async def test_late_supersession_revision_bypasses_only_generic_transport_dedupe(monkeypatch):
+    """A changed relationship is new evidence; its exact retry is not."""
+    db = _FakeSessionDB(
+        {ORIGIN: {"source": "desktop"}},
+        messages={ORIGIN: [{"content": f"started {MISSION}"}]},
+    )
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    wake = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    payload = {
+        "mission_id": MISSION, "status": "failed", "type": "failed",
+        "origin_session": ORIGIN, "event_id": "late-supersession",
+    }
+    assert (await adapter._handle_webhook(_mock_request(payload))).status == 202
+    successor = "22222222-2222-4222-8222-222222222222"
+    revised = {**payload, "tags": ["superseded_by:" + successor]}
+    assert (await adapter._handle_webhook(_mock_request(revised))).status == 202
+    other_successor = "33333333-3333-4333-8333-333333333333"
+    assert (await adapter._handle_webhook(_mock_request({
+        **payload, "tags": ["superseded_by:" + other_successor],
+    }))).status == 202
+    # A relationship can move back to an earlier successor; do not let its
+    # historical transport key hide the current revision.
+    assert (await adapter._handle_webhook(_mock_request(revised))).status == 202
+    if adapter._background_tasks:
+        await asyncio.gather(*list(adapter._background_tasks))
+    retry = await adapter._handle_webhook(_mock_request(revised))
+    assert retry.status == 200
+    assert any(
+        f"declared successor={successor}." in content
+        for _sid, _role, content in db.appended
+    )
+    assert wake.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_unverified_successor_retry_refreshes_native_evidence_once(monkeypatch):
+    """A settled unverified receipt may upgrade, then becomes an exact retry."""
+    db = _FakeSessionDB(
+        {ORIGIN: {"source": "desktop"}},
+        messages={ORIGIN: [{"content": f"started {MISSION}"}]},
+    )
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    wake = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    successor = "22222222-2222-4222-8222-222222222222"
+    verified = {
+        "mission_id": successor, "verified_live": True,
+        "run_id": "run-2", "state": "running",
+        "observed_at": "2026-09-15T10:00:00+00:00",
+    }
+    native_read = AsyncMock(side_effect=[None, verified])
+    monkeypatch.setattr(
+        "gateway.platforms.mission_status_route.bounded_replacement_evidence",
+        native_read,
+    )
+    payload = {
+        "mission_id": MISSION, "status": "failed", "type": "failed",
+        "origin_session": ORIGIN, "event_id": "upgrade-retry",
+        "tags": [f"superseded_by:{successor}"],
+    }
+
+    assert (await adapter._handle_webhook(_mock_request(payload))).status == 202
+    assert (await adapter._handle_webhook(_mock_request(payload))).status == 202
+    assert (await adapter._handle_webhook(_mock_request(payload))).status == 200
+    await asyncio.gather(*list(adapter._background_tasks))
+
+    assert native_read.await_count == 2
+    assert wake.await_count == 2
+    assert sum("Replacement execution verified live" in content
+               for _sid, _role, content in db.appended) == 1
+
+
+@pytest.mark.asyncio
+async def test_unverified_successor_refresh_stays_inflight_when_readback_unknown(monkeypatch):
+    """An unknown native read never turns a concurrent retry into seen/200."""
+    db = _FakeSessionDB(
+        {ORIGIN: {"source": "desktop"}},
+        messages={ORIGIN: [{"content": f"started {MISSION}"}]},
+    )
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    wake = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    reads = 0
+
+    async def unknown_readback(_payload):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return None
+        entered.set()
+        await release.wait()
+        return None
+
+    monkeypatch.setattr(
+        "gateway.platforms.mission_status_route.bounded_replacement_evidence",
+        unknown_readback,
+    )
+    successor = "22222222-2222-4222-8222-222222222222"
+    payload = {
+        "mission_id": MISSION, "status": "failed", "type": "failed",
+        "origin_session": ORIGIN, "event_id": "unknown-refresh",
+        "tags": [f"superseded_by:{successor}"],
+    }
+
+    # The initial successor is durable but unverified. Its subsequent retry
+    # owns the one permitted refresh admission.
+    assert (await adapter._handle_webhook(_mock_request(payload))).status == 202
+    refresh = asyncio.create_task(adapter._handle_webhook(_mock_request(payload)))
+    await asyncio.wait_for(entered.wait(), 5)
+    assert (await adapter._handle_webhook(_mock_request(payload))).status == 503
+    release.set()
+    assert (await refresh).status == 202
+    # An unknown refresh is not fabricated into proof, but it also must not
+    # turn every retry into another native read-through admission.
+    assert (await adapter._handle_webhook(_mock_request(payload))).status == 200
+    await asyncio.gather(*list(adapter._background_tasks))
+
+    assert reads == 2
+    assert wake.await_count == 1
+
+
+def test_mission_revision_claim_fences_stale_completion():
+    """A stale A completion cannot release a later A reversal's claim."""
+    adapter = _make_adapter()
+    first_successor = "22222222-2222-4222-8222-222222222222"
+    other_successor = "33333333-3333-4333-8333-333333333333"
+    first, first_token = adapter._record_mission_delivery_revision(
+        "receipt", first_successor, 100.0
+    )
+    assert adapter._record_mission_delivery_revision(
+        "receipt", other_successor, 100.5
+    )[0] == "inflight"
+    adapter._finish_delivery_id(first_token)
+    second, _second_token = adapter._record_mission_delivery_revision(
+        "receipt", other_successor, 101.0
+    )
+    adapter._finish_delivery_id(_second_token)
+    third, third_token = adapter._record_mission_delivery_revision(
+        "receipt", first_successor, 102.0
+    )
+    assert first == second == third == "new"
+    assert first_token != third_token
+
+    adapter._finish_delivery_id(first_token)
+    retry, retry_token = adapter._record_mission_delivery_revision(
+        "receipt", first_successor, 103.0
+    )
+    assert retry == "inflight"
+    assert retry_token == third_token
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_controller", [True, False])
+async def test_overlapping_revision_cannot_overtake_readback_or_controller(monkeypatch, with_controller):
+    from contextlib import nullcontext
+    from copy import deepcopy
+    from cron import jobs, controller_callbacks as relay
+    from gateway.platforms import mission_status_route as route
+
+    records = [{"id": "owner", "controller": {"project": "example", "callback_relay": True},
+                "schedule": {"kind": "interval", "minutes": 10}}]
+    if not with_controller:
+        records.clear()
+    monkeypatch.setattr(jobs, "_jobs_lock", nullcontext)
+    monkeypatch.setattr(jobs, "load_jobs", lambda: deepcopy(records))
+    monkeypatch.setattr(jobs, "save_jobs", lambda rows: records.__setitem__(slice(None), deepcopy(rows)))
+    monkeypatch.setattr(relay, "_eligible", lambda job: True)
+    db = _FakeSessionDB({ORIGIN: {"source": "desktop"}},
+                        {ORIGIN: [{"content": f"started {MISSION}"}]})
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    monkeypatch.setattr(adapter, "_maybe_fold_mission_delegation", lambda *a, **kw: None)
+    api = MagicMock(supports_async_delivery=False)
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    wake = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    a, b = "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"
+    entered, release = asyncio.Event(), asyncio.Event()
+    reads = []
+
+    async def read(payload):
+        successor = route.extract_superseded_by(payload)
+        reads.append(successor)
+        if len(reads) == 1:
+            entered.set()
+            await release.wait()
+        return None
+
+    monkeypatch.setattr(route, "bounded_replacement_evidence", read)
+    base = {"mission_id": MISSION, "status": "failed", "type": "failed",
+            "origin_session": ORIGIN, "event_id": "serial", "project": "example"}
+    payload = lambda successor: {**base, "tags": [f"superseded_by:{successor}"]}
+    first = asyncio.create_task(adapter._handle_webhook(_mock_request(payload(a))))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        # B's read would return immediately and overtake A without admission
+        # serialization. Rejection must also precede controller mutation.
+        assert (await adapter._handle_webhook(_mock_request(payload(b)))).status == 503
+        assert reads == [a]
+        if with_controller:
+            assert records[0]["controller_callbacks"][0]["superseded_by"] == a
+        assert not db.appended
+        release.set()
+        assert (await first).status == 202
+        assert (await adapter._handle_webhook(_mock_request(payload(b)))).status == 202
+        assert (await adapter._handle_webhook(_mock_request(payload(a)))).status == 202
+        notices = [content for _, _, content in db.appended if content.startswith("[Mission callback:")]
+        assert [text.splitlines()[1].split("superseded_by=")[1] for text in notices] == [a, b, a]
+        await asyncio.gather(*list(adapter._background_tasks))
+        if with_controller:
+            assert records[0]["controller_callbacks"][0]["superseded_by"] == a
+        assert wake.await_count == (0 if with_controller else 3)
+    finally:
+        release.set()
+        await first
+
+
+@pytest.mark.asyncio
+async def test_successor_clear_and_restore_reaches_transcript_and_wakes(monkeypatch):
+    from gateway.platforms import mission_status_route as route
+    db = _FakeSessionDB({ORIGIN: {"source": "desktop"}},
+                        {ORIGIN: [{"content": f"started {MISSION}"}]})
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = MagicMock(supports_async_delivery=False)
+    wake = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    monkeypatch.setattr(route, "bounded_replacement_evidence", AsyncMock(return_value=None))
+    base = {"mission_id": MISSION, "status": "failed", "type": "failed",
+            "origin_session": ORIGIN, "event_id": "clear"}
+    successor = "22222222-2222-4222-8222-222222222222"
+    linked = {**base, "tags": [f"superseded_by:{successor}"]}
+    for payload in (linked, base, base, linked):
+        assert (await adapter._handle_webhook(_mock_request(payload))).status in (200, 202)
+        await asyncio.gather(*list(adapter._background_tasks))
+    notices = [text for _, _, text in db.appended if text.startswith("[Mission callback:")]
+    assert len(notices) == wake.await_count == 3
+    assert "superseded_by=" not in notices[1].splitlines()[1]
+    assert all(f"superseded_by={successor}" in notices[i] for i in (0, 2))
 
 
 @pytest.mark.asyncio
@@ -356,4 +672,149 @@ async def test_controller_inbox_failure_is_retryable_before_transport_dedupe(mon
     response = await adapter._handle_webhook(_mock_request(payload))
     assert response.status == 202
     assert json.loads(response.body)["status"] == "controller_queued"
+    assert adapter.handle_message.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_orphan_callback_rejected_without_autonomous_owner(monkeypatch):
+    adapter = _make_adapter()
+    adapter.handle_message = AsyncMock()
+    payload = {"mission_id": MISSION, "status": "failed", "type": "failed",
+               "project": "sandboxed-sh-dev", "event_id": "orphan"}
+    for _ in range(3):
+        response = await adapter._handle_webhook(_mock_request(payload))
+        assert response.status == 409
+        assert json.loads(response.body)["reason"] == "missing_conversation_binding"
+    assert adapter.handle_message.await_count == 0
+    assert not adapter._background_tasks
+
+
+@pytest.mark.asyncio
+async def test_generic_route_with_mission_looking_payload_skips_mission_router(monkeypatch):
+    adapter = _make_adapter()
+    adapter._routes["mission-complete"]["mission_status"] = False
+    adapter.handle_message = AsyncMock()
+    router = AsyncMock(side_effect=AssertionError("generic route must not route missions"))
+    monkeypatch.setattr(adapter, "_maybe_route_mission_status", router)
+    payload = {"mission_id": MISSION, "status": "completed", "type": "completed",
+               "event_id": "generic-mission-shaped"}
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 202
+    assert router.await_count == 0
+    await asyncio.gather(*list(adapter._background_tasks))
+
+
+@pytest.mark.asyncio
+async def test_missing_wake_adapter_preserves_exact_retry(monkeypatch):
+    db = _FakeSessionDB({ORIGIN: {"source": "desktop"}},
+                        messages={ORIGIN: [{"content": f"started {MISSION}"}]})
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    payload = {"mission_id": MISSION, "status": "failed", "type": "failed",
+               "origin_session": ORIGIN, "event_id": "adapter-retry"}
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 503
+    assert json.loads(response.body)["reason"] == "wake_adapter_unavailable"
+    assert db.appended == []
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    wake = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 202
+    await asyncio.gather(*list(adapter._background_tasks))
+    assert wake.await_count == 1 and len(db.appended) == 1
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 200
+    assert wake.await_count == 1 and len(db.appended) == 1
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_wake_failure_is_recorded_without_retry(monkeypatch):
+    db = _FakeSessionDB({ORIGIN: {"source": "desktop"}},
+                        messages={ORIGIN: [{"content": f"started {MISSION}"}]})
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    wake = AsyncMock(side_effect=TimeoutError("untrusted transport details"))
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    payload = {"mission_id": MISSION, "status": "completed", "type": "completed",
+               "origin_session": ORIGIN, "event_id": "ambiguous-wake"}
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 202
+    await asyncio.gather(*list(adapter._background_tasks))
+    # A timeout can leave the self-posted model turn running.  No assistant
+    # receipt may be appended beside it, or the eventual final races role
+    # alternation; the callback evidence itself remains durable.
+    assert len(db.appended) == 1
+    assert "Delivery outcome is unknown" not in db.appended[-1][2]
+    before = list(db.appended)
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 200
+    assert db.appended == before and wake.await_count == 1
+    assert payload["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_pending_origin_retries_after_ownership_without_duplicate_wake(monkeypatch):
+    from gateway.platforms import mission_status_route as route
+    db = _FakeSessionDB({ORIGIN: {"source": "desktop"}}, messages={ORIGIN: []})
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    adapter.handle_message = AsyncMock()
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    wake = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    payload = {"mission_id": MISSION, "status": "failed", "type": "failed",
+               "origin_session": ORIGIN, "event_id": "late-ownership"}
+    for _ in range(2):
+        response = await adapter._handle_webhook(_mock_request(payload))
+        assert response.status == 503
+        assert json.loads(response.body)["evidence_stashed"] is True
+    assert not db.appended and adapter.handle_message.await_count == 0
+    # Existing owner records the mission; no new conversation/enrollment job.
+    db.messages[ORIGIN].append({"role": "user", "content": f"Started {MISSION}"})
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 202
+    await asyncio.gather(*list(adapter._background_tasks))
+    assert wake.await_count == 1 and len(db.appended) == 1
+    assert route.take_stashed_callback(MISSION) is None
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 200 and wake.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_origin_backup_failure_never_acknowledges_event(monkeypatch):
+    from gateway.platforms import mission_status_route as route
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(_FakeSessionDB({}, messages={}))
+    adapter.handle_message = AsyncMock()
+    monkeypatch.setattr(route, "stash_unroutable_callback", lambda *args: False)
+    response = await adapter._handle_webhook(_mock_request({
+        "mission_id": MISSION, "status": "failed", "type": "failed", "origin_session": ORIGIN,
+    }))
+    assert response.status == 503
+    assert json.loads(response.body)["evidence_stashed"] is False
+    assert adapter.handle_message.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_route_lookup_failure_is_not_classified_as_missing_ownership(monkeypatch):
+    from gateway.platforms import mission_status_route as route
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(_FakeSessionDB({}, messages={}))
+    adapter.handle_message = AsyncMock()
+    def unavailable(*args):
+        raise OSError("store unavailable")
+    monkeypatch.setattr(route, "resolve_mission_delivery_session", unavailable)
+    payload = {"mission_id": MISSION, "status": "failed", "type": "failed", "event_id": "lookup-failure"}
+    for _ in range(2):
+        response = await adapter._handle_webhook(_mock_request(payload))
+        assert response.status == 503
+        assert json.loads(response.body)["reason"] == "mission_route_unavailable"
     assert adapter.handle_message.await_count == 0

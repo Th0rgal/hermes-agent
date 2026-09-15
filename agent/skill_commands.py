@@ -229,8 +229,18 @@ def _resolve_skill_commands_home() -> str:
     return str(get_hermes_home())
 
 
-def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tuple[dict[str, Any], Path | None, str] | None:
-    """Load a skill by name/path and return (loaded_payload, skill_dir, display_name)."""
+def _load_skill_payload(
+    skill_identifier: str,
+    task_id: str | None = None,
+    *,
+    validation_only: bool = False,
+) -> tuple[dict[str, Any], Path | None, str] | None:
+    """Load a skill by name/path and return (loaded_payload, skill_dir, display_name).
+
+    Admission validates durable instructions only.  It must never prompt for
+    missing credentials or register environment/credential passthrough while
+    loading a bundle member.
+    """
     raw_identifier = (skill_identifier or "").strip()
     if not raw_identifier:
         return None
@@ -242,7 +252,12 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
         normalized = normalize_skill_lookup_name(raw_identifier)
 
         loaded_skill = json.loads(
-            skill_view(normalized, task_id=task_id, preprocess=False)
+            skill_view(
+                normalized,
+                task_id=task_id,
+                preprocess=False,
+                capture_prerequisites=not validation_only,
+            )
         )
     except Exception:
         return None
@@ -315,6 +330,7 @@ def _build_skill_message(
     user_instruction: str = "",
     runtime_note: str = "",
     session_id: str | None = None,
+    preprocess: bool = True,
 ) -> str:
     """Format a loaded skill into a user/system message payload."""
     from tools.skills_tool import _skills_dir
@@ -325,9 +341,9 @@ def _build_skill_message(
     # Done before anything else so downstream blocks (setup notes,
     # supporting-file hints) see the expanded content.
     skills_cfg = _load_skills_config()
-    if skills_cfg.get("template_vars", True):
+    if preprocess and skills_cfg.get("template_vars", True):
         content = _substitute_template_vars(content, skill_dir, session_id)
-    if skills_cfg.get("inline_shell", False):
+    if preprocess and skills_cfg.get("inline_shell", False):
         timeout = int(skills_cfg.get("inline_shell_timeout", 10) or 10)
         content = _expand_inline_shell(content, skill_dir, timeout)
 

@@ -141,3 +141,26 @@ def test_enroll_folds_callback_that_beat_the_ledger(ad, tmp_path, monkeypatch):
     assert ad._captured[-1]["results"][0]["summary"] == "finished first"
     row = ad.find_delegation_by_mission_id("m-race")
     assert row["delivery_state"] != "pending" or ad._captured
+
+
+def test_early_reconciliation_retains_backup_until_fold_receipt(ad, tmp_path, monkeypatch):
+    from gateway.platforms.mission_status_route import peek_stashed_callback, stash_unroutable_callback
+    from tools.mission_delegation import _reconcile_early_callback
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    payload = {"mission_id": "m-durable", "status": "completed", "summary": "evidence"}
+    assert stash_unroutable_callback("m-durable", payload)
+
+    def interrupted(**kwargs):
+        assert peek_stashed_callback("m-durable") == payload
+        raise RuntimeError("fold failed before durable receipt")
+
+    monkeypatch.setattr(ad, "fold_mission_completion", interrupted)
+    _reconcile_early_callback("m-durable")
+    assert peek_stashed_callback("m-durable") == payload
+    for outcome in ("awaiting_enrollment", "reconciliation_required", "identity_mismatch", "unknown"):
+        monkeypatch.setattr(ad, "fold_mission_completion", lambda **kwargs: outcome)
+        _reconcile_early_callback("m-durable")
+        assert peek_stashed_callback("m-durable") == payload
+    monkeypatch.setattr(ad, "fold_mission_completion", lambda **kwargs: "duplicate")
+    _reconcile_early_callback("m-durable")
+    assert peek_stashed_callback("m-durable") is None

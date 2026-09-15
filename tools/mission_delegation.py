@@ -506,12 +506,13 @@ def _reconcile_early_callback(mission_id: str) -> None:
     try:
         from gateway.platforms.mission_status_route import (
             extract_status,
+            peek_stashed_callback,
             take_stashed_callback,
         )
         from tools.async_delegation import fold_mission_completion
     except Exception:
         return
-    pending = take_stashed_callback(mission_id)
+    pending = peek_stashed_callback(mission_id)
     if not pending:
         return
     raw = extract_status(pending)
@@ -543,14 +544,10 @@ def _reconcile_early_callback(mission_id: str) -> None:
             execution=pending.get("execution"),
             event_id=str(pending.get("event_id") or pending.get("delivery_id") or ""),
         )
-        if outcome in ("awaiting_enrollment", "reconciliation_required", "identity_mismatch"):
-            from gateway.platforms.mission_status_route import stash_unroutable_callback
-
-            stash_unroutable_callback(mission_id, pending)
+        if outcome in ("folded", "duplicate"):
+            take_stashed_callback(mission_id, expected_payload=pending)
     except Exception:
-        from gateway.platforms.mission_status_route import stash_unroutable_callback
-
-        stash_unroutable_callback(mission_id, pending)
+        # Evidence remains durable if folding fails or the process exits.
         logger.warning(
             "early-callback reconcile failed for mission %s", mission_id, exc_info=True
         )

@@ -237,6 +237,203 @@ def test_stable_context_precedes_real_preloaded_skill_and_budget(tmp_path, monke
     assert scheduler._build_job_prompt(ordinary) == plain
 
 
+def test_controller_update_rejects_oversized_prompt_without_changing_job():
+    from cron import jobs
+
+    saved = jobs.create_job("Inspect project receipts.", "every 10m")
+    config = job()["controller"]
+    before = jobs.get_job(saved["id"])
+    with pytest.raises(ControllerScopeError, match="maximum is 16000"):
+        jobs.update_job(saved["id"], {"controller": config, "prompt": "x" * 21614})
+    assert jobs.get_job(saved["id"]) == before
+
+
+def test_controller_update_counts_real_skill_preload(tmp_path, monkeypatch):
+    from cron import jobs
+    import tools.skills_tool as skills_tool
+
+    skills_dir = tmp_path / "skills"
+    skill = skills_dir / "oversized-controller" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: oversized-controller\ndescription: Inspect receipts.\n---\n" + "x" * 160000)
+    monkeypatch.setattr(skills_tool, "SKILLS_DIR", skills_dir)
+    saved = jobs.create_job("Inspect project receipts.", "every 10m")
+    before = jobs.get_job(saved["id"])
+    with pytest.raises(ControllerScopeError, match="maximum is 16000"):
+        jobs.update_job(saved["id"], {
+            "controller": job()["controller"], "skills": ["oversized-controller"],
+        })
+    assert jobs.get_job(saved["id"]) == before
+
+
+def test_controller_update_loads_skills_outside_the_jobs_lock(monkeypatch):
+    from contextlib import contextmanager
+    from cron import jobs
+    import tools.skills_tool as skills_tool
+
+    saved = jobs.create_job("Inspect project receipts.", "every 10m")
+    original_lock = jobs._jobs_lock
+    lock_depth = 0
+
+    @contextmanager
+    def observed_lock():
+        nonlocal lock_depth
+        with original_lock():
+            lock_depth += 1
+            try:
+                yield
+            finally:
+                lock_depth -= 1
+
+    def qualified_skill_view(name, **_kwargs):
+        assert name == "plugin:controller-skill"
+        assert lock_depth == 0
+        return '{"success": true, "content": "Inspect receipts."}'
+
+    monkeypatch.setattr(jobs, "_jobs_lock", observed_lock)
+    monkeypatch.setattr(skills_tool, "skill_view", qualified_skill_view)
+    updated = jobs.update_job(saved["id"], {
+        "controller": job()["controller"], "skills": ["plugin:controller-skill"],
+    })
+    assert updated["skills"] == ["plugin:controller-skill"]
+
+
+def test_controller_update_rechecks_snapshot_after_out_of_lock_validation(monkeypatch):
+    from cron import jobs
+    import cron.controller_scope as controller_scope
+
+    saved = jobs.create_job("Inspect project receipts.", "every 10m")
+
+    def mutate_during_validation(_candidate):
+        with jobs._jobs_lock():
+            records = jobs.load_jobs()
+            records[0]["prompt"] = "Edited by the current owner."
+            jobs.save_jobs(records)
+
+    monkeypatch.setattr(controller_scope, "validate_controller_job", mutate_during_validation)
+    with pytest.raises(ValueError, match="changed during controller validation"):
+        jobs.update_job(saved["id"], {"controller": job()["controller"]})
+    assert jobs.get_job(saved["id"])["prompt"] == "Edited by the current owner."
+
+
+def test_controller_creation_validates_before_persistence():
+    from cron import jobs
+
+    with pytest.raises(ControllerScopeError, match="maximum is 16000"):
+        jobs.create_job("x" * 21614, "every 10m", controller=job()["controller"])
+    assert jobs.load_jobs() == []
+    saved = jobs.create_job("Inspect receipts.", "every 10m", controller=job()["controller"])
+    assert jobs.get_job(saved["id"])["controller"] == job()["controller"]
+
+
+def test_admission_does_not_execute_scripts_or_consume_callbacks(monkeypatch):
+    from cron import jobs
+    from cron.controller_scope import validate_controller_job
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Admission must not execute runtime inputs")
+
+    monkeypatch.setattr(scheduler, "_run_job_script", forbidden)
+    monkeypatch.setattr("cron.notepad.render_notepad_section", forbidden)
+    monkeypatch.setattr("cron.controller_callbacks.pending_callbacks", forbidden)
+    config = job(script="collect.py", context_from="self")
+    validate_controller_job(config)
+    assert jobs.load_jobs() == []
+
+
+def test_legacy_invalid_controller_can_be_paused_and_repaired():
+    from cron import jobs
+
+    saved = jobs.create_job("Inspect receipts.", "every 10m", controller=job()["controller"])
+    with jobs._jobs_lock():
+        records = jobs.load_jobs()
+        records[0]["prompt"] = "x" * 21614
+        jobs.save_jobs(records)
+    assert jobs.pause_job(saved["id"])["state"] == "paused"
+    repaired = jobs.update_job(saved["id"], {"prompt": "Inspect receipts."})
+    assert repaired["state"] == "paused"
+    assert repaired["controller"] == saved["controller"]
+
+
+def test_admission_counts_bundle_members_without_inline_shell(tmp_path, monkeypatch):
+    from cron.controller_scope import validate_controller_job
+    from agent import skill_bundles, skill_commands
+    import tools.skills_tool as skills_tool
+
+    skills_dir = tmp_path / "skills"
+    skill = skills_dir / "member" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: member\ndescription: Inspect receipts.\n---\nInspect !`echo receipts`.\n")
+    monkeypatch.setattr(skills_tool, "SKILLS_DIR", skills_dir)
+    monkeypatch.setenv("HERMES_BUNDLES_DIR", str(tmp_path / "bundles"))
+    skill_bundles.save_bundle("controller-bundle", ["member"])
+    monkeypatch.setattr(skill_commands, "_load_skills_config", lambda: {"inline_shell": True})
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Admission must not expand inline shell")
+
+    monkeypatch.setattr(skill_commands, "_expand_inline_shell", forbidden)
+    usage_calls = []
+    monkeypatch.setattr("tools.skill_usage.bump_use", lambda *args, **kwargs: usage_calls.append(args))
+    config = job(skills=["controller-bundle"])
+    validate_controller_job(config)
+    skill.write_text(skill.read_text() + "x" * 160000)
+    with pytest.raises(ControllerScopeError, match="maximum is 16000"):
+        validate_controller_job(config)
+    assert usage_calls == []
+
+
+def test_locked_admission_bundle_never_captures_or_registers_prerequisites(tmp_path, monkeypatch):
+    """Bundle members must stay read-only during controller admission.
+
+    This deliberately holds the jobs lock to prove a controller edit cannot
+    prompt for a missing secret or mutate execution passthrough state through
+    its bundle members.
+    """
+    from cron import jobs
+    from cron.controller_scope import validate_controller_job
+    from agent import skill_bundles
+    import tools.credential_files as credential_files
+    import tools.env_passthrough as env_passthrough
+    import tools.skills_tool as skills_tool
+
+    skills_dir = tmp_path / "skills"
+    skill = skills_dir / "credentialed-member" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    credential_file = tmp_path / "available-credential.json"
+    credential_file.write_text("{}")
+    skill.write_text(
+        "---\n"
+        "name: credentialed-member\n"
+        "description: Inspect receipts.\n"
+        "required_environment_variables:\n"
+        "  - name: ADMISSION_MISSING_SECRET\n"
+        "    prompt: Enter the admission secret\n"
+        "  - name: ADMISSION_AVAILABLE_TOKEN\n"
+        "    prompt: Enter the available token\n"
+        "required_credential_files:\n"
+        f"  - {credential_file}\n"
+        "---\n"
+        "Inspect durable receipts only.\n"
+    )
+    monkeypatch.setattr(skills_tool, "SKILLS_DIR", skills_dir)
+    monkeypatch.setenv("HERMES_BUNDLES_DIR", str(tmp_path / "bundles"))
+    monkeypatch.delenv("ADMISSION_MISSING_SECRET", raising=False)
+    monkeypatch.setenv("ADMISSION_AVAILABLE_TOKEN", "available")
+    skill_bundles.save_bundle("credentialed-controller", ["credentialed-member"])
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Controller admission must not capture or register prerequisites")
+
+    monkeypatch.setattr(skills_tool, "_secret_capture_callback", forbidden)
+    monkeypatch.setattr(env_passthrough, "register_env_passthrough", forbidden)
+    monkeypatch.setattr(credential_files, "register_credential_files", forbidden)
+
+    with jobs._jobs_lock():
+        assert getattr(jobs._jobs_lock_state, "depth", 0) > 0
+        validate_controller_job(job(skills=["credentialed-controller"]))
+
+
 @pytest.fixture
 def local_scheduler(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -345,7 +542,7 @@ def test_scheduler_acknowledges_only_completed_snapshot(
 def test_callback_store_failure_prevents_agent_and_keeps_scope_restored(local_scheduler, monkeypatch):
     from cron import controller_callbacks as callbacks
 
-    def fail_snapshot(_job_id):
+    def fail_snapshot(_job_id, **kwargs):
         raise OSError("inbox unavailable")
 
     def unexpected(**kwargs):
@@ -358,6 +555,43 @@ def test_callback_store_failure_prevents_agent_and_keeps_scope_restored(local_sc
     result = scheduler.run_job(config)
     assert result[0] is False and "inbox unavailable" in result[3]
     assert current_controller_scope() is None
+
+
+def test_scheduler_fits_complete_callback_snapshot_after_mandatory_prompt(local_scheduler, monkeypatch):
+    from cron import controller_callbacks as callbacks, jobs
+
+    mandatory = "Inspect receipts and preserve project authority. " + "x" * 11000
+    config = jobs.create_job(
+        mandatory, "every 10m", deliver="local", model="test-model",
+        controller={**job()["controller"], "callback_relay": True},
+    )
+    for index in range(3):
+        callbacks.enqueue_mission_callback({
+            "mission_id": list(MISSIONS)[0], "project": "verity-lido", "status": "completed",
+            "event_id": str(index), "summary": "x" * 2000,
+        })
+    prompts = []
+
+    class LocalAgent:
+        def __init__(self, **kwargs):
+            self.session_id = kwargs["session_id"]
+
+        def run_conversation(self, prompt, *, task_id):
+            prompts.append(prompt)
+            assert mandatory in prompt
+            assert len(prompt) <= 16000
+            assert prompt.count('"dispatch_idempotency_key":') == 1
+            return {"completed": True, "final_response": "Reviewed the captured receipt."}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("run_agent.AIAgent", LocalAgent)
+    result = scheduler.run_job(config)
+    assert result[0], result
+    assert len(prompts) == 1
+    pending = [entry for entry in jobs.get_job(config["id"])["controller_callbacks"] if not entry.get("handled_at")]
+    assert len(pending) == 2
 
 
 def observer_job(project="verity-lido", **updates):
@@ -561,3 +795,78 @@ def test_scheduler_file_output_and_response_make_observer_markers_inert(local_sc
     for marker in ("[CTRL:", "[STATE_SIGNATURE:", "[DECISION:"):
         assert (marker in saved) == (mode == "operator")
         assert (marker in final) == (mode == "operator")
+
+
+def test_existing_controller_repair_preserves_latest_owner_edits():
+    from cron import jobs
+    from cron.controller_repair import export_repair, apply_repair
+    saved = jobs.create_job("Inspect receipts.", "every 10m", controller=job()["controller"])
+    with jobs._jobs_lock():
+        records = jobs.load_jobs()
+        records[0]["prompt"] = "x" * 24646
+        jobs.save_jobs(records)
+    proposal = export_repair(saved["id"])
+    assert proposal["diagnostic"] and len(proposal["replacement_prompt"]) == 24646
+    with pytest.raises(ControllerScopeError):
+        apply_repair(proposal)
+    proposal["replacement_prompt"] = "Inspect receipts with owner-approved scope."
+    jobs.update_job(saved["id"], {"name": "Latest owner edit"})
+    with pytest.raises(ValueError, match="changed since export"):
+        apply_repair(proposal)
+    fresh = export_repair(saved["id"])
+    fresh["replacement_prompt"] = proposal["replacement_prompt"]
+    repaired = apply_repair(fresh)
+    assert repaired["name"] == "Latest owner edit"
+    assert repaired["controller"] == saved["controller"]
+    assert repaired["skills"] == saved["skills"]
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_project_delivery_does_not_enroll_legacy_cron(explicit_null):
+    from cron import jobs, controller_callbacks
+    from cron.controller_scope import validate_controller_job, check_prompt_budget
+    from cron.controller_repair import export_repair
+
+    saved = jobs.create_job("x" * 24646, "every 10m", deliver="project:verity-core")
+    if explicit_null:
+        saved = jobs.update_job(saved["id"], {"controller": None})
+    assert scope_from_job(saved) is None
+    assert controller_project(saved) is None
+    assert controller_callbacks.controller_project(saved) is None
+    assert validate_controller_job(saved) is None
+    assert check_prompt_budget(None, saved["prompt"]) == saved["prompt"]
+    edited = jobs.update_job(saved["id"], {"prompt": "x" * 25000})
+    assert len(edited["prompt"]) == 25000
+    assert edited.get("controller") is None
+    assert controller_callbacks.enqueue_mission_callback({
+        "project": "verity-core", "mission_id": list(MISSIONS)[0],
+        "status": "completed", "event_id": "legacy-discovery",
+    }) is None
+    assert not jobs.get_job(saved["id"]).get("controller_callbacks")
+    with pytest.raises(ValueError, match="Existing controller job required"):
+        export_repair(saved["id"])
+
+
+def test_explicit_legacy_prompt_repair_does_not_enroll_or_drop_authority():
+    from cron import jobs
+    from cron.controller_repair import export_repair, apply_repair
+    mandatory = "Core may supervise exactly its two authorized sandboxed-sh-dev support missions."
+    saved = jobs.create_job(mandatory + "x" * 24646, "every 10m", deliver="project:verity-core")
+    proposal = export_repair(saved["id"], legacy_prompt_only=True)
+    assert proposal["diagnostic"] and proposal["replacement_prompt"] == saved["prompt"]
+    with pytest.raises(ValueError, match="Existing controller job required"):
+        apply_repair({**proposal, "legacy_prompt_only": False})
+    with pytest.raises(ControllerScopeError):
+        apply_repair(proposal)
+    proposal["replacement_prompt"] = mandatory
+    jobs.update_job(saved["id"], {"name": "Latest operator version"})
+    with pytest.raises(ValueError, match="changed since export"):
+        apply_repair(proposal)
+    fresh = export_repair(saved["id"], legacy_prompt_only=True)
+    fresh["replacement_prompt"] = mandatory
+    repaired = apply_repair(fresh)
+    assert repaired["prompt"] == mandatory
+    assert repaired.get("controller") is None
+    assert repaired["deliver"] == saved["deliver"]
+    assert repaired["skills"] == saved["skills"]
+    assert repaired["name"] == "Latest operator version"

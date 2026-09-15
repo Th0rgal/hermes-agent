@@ -221,6 +221,14 @@ class WebhookAdapter(BasePlatformAdapter):
         # Idempotency: TTL cache of recently processed delivery IDs.
         # Prevents duplicate agent runs when webhook providers retry.
         self._seen_deliveries: Dict[str, float] = {}
+        self._inflight_deliveries: set[str] = set()
+        # The latest structured relationship revision for each routed mission
+        # delivery. A terminal receipt can legitimately change successor (and
+        # later change it back), unlike an exact provider retry.
+        self._mission_delivery_revisions: Dict[
+            str, tuple[Optional[str], str, float, bool, bool]
+        ] = {}
+        self._mission_delivery_claim_counter = 0
         self._idempotency_ttl: int = 3600  # 1 hour
         self._seen_deliveries_next_prune_at: float = 0.0
 
@@ -431,9 +439,18 @@ class WebhookAdapter(BasePlatformAdapter):
         if now < self._seen_deliveries_next_prune_at:
             return
         cutoff = now - self._idempotency_ttl
-        stale = [k for k, t in self._seen_deliveries.items() if t < cutoff]
+        stale = [k for k, t in self._seen_deliveries.items()
+                 if t < cutoff and k not in self._inflight_deliveries]
         for k in stale:
             self._seen_deliveries.pop(k, None)
+        stale_revisions = [
+            delivery_id
+            for delivery_id, (_successor, _cache_id, recorded_at, _verified, _refresh_available)
+            in self._mission_delivery_revisions.items()
+            if recorded_at < cutoff and _cache_id not in self._inflight_deliveries
+        ]
+        for delivery_id in stale_revisions:
+            self._mission_delivery_revisions.pop(delivery_id, None)
         self._seen_deliveries_next_prune_at = now + min(60.0, max(1.0, self._idempotency_ttl / 10))
 
     def _record_rate_limit_hit(self, route_name: str, now: float) -> bool:
@@ -451,17 +468,97 @@ class WebhookAdapter(BasePlatformAdapter):
         window.append(now)
         return True
 
-    def _record_delivery_id(self, delivery_id: str, now: float) -> bool:
-        """Return True when this delivery should be processed."""
+    def _record_delivery_id(self, delivery_id: str, now: float) -> str:
+        """Claim a delivery as ``new``, ``inflight``, or already ``seen``."""
         seen_at = self._seen_deliveries.get(delivery_id)
         if seen_at is not None and now - seen_at < self._idempotency_ttl:
-            return False
+            return "inflight" if delivery_id in self._inflight_deliveries else "seen"
         if seen_at is not None:
             self._seen_deliveries.pop(delivery_id, None)
         self._seen_deliveries[delivery_id] = now
+        self._inflight_deliveries.add(delivery_id)
         if len(self._seen_deliveries) > max(self._rate_limit * 2, 128):
             self._prune_seen_deliveries(now)
-        return True
+        return "new"
+
+    def _record_mission_delivery_revision(
+        self, delivery_id: str, successor: Optional[str], now: float,
+    ) -> tuple[str, str]:
+        """Claim one structured mission revision without dropping a reversal.
+
+        A cache key per successor would turn A -> B -> A into a duplicate of
+        the first A. Keep only the current revision for retry lookup, but mint
+        a distinct claim token for every changed admission: an old A completion
+        must never clear the later A's in-flight fence. A settled, unverified
+        initially observed successor may make one bounded-evidence refresh
+        admission; concurrent refreshes share its in-flight fence, and an
+        unknown refresh does not turn the cache into a perpetual read-through
+        bypass.
+        """
+        previous = self._mission_delivery_revisions.get(delivery_id)
+        # One receipt owns the entire admission (controller, readback, append).
+        # Reject overlapping revisions for retry, including across cache TTL.
+        # Otherwise a slower older read can append after a newer successor.
+        if previous and previous[1] in self._inflight_deliveries:
+            return "inflight", previous[1]
+        if previous and now - previous[2] >= self._idempotency_ttl:
+            self._mission_delivery_revisions.pop(delivery_id, None)
+            previous = None
+        if previous and previous[0] == successor:
+            cache_id = previous[1]
+            claim = self._record_delivery_id(cache_id, now)
+            if claim != "seen" or previous[3] or not previous[4] or not successor:
+                return claim, cache_id
+            # The first callback was durable but had no native verification.
+            # Refresh exactly this current successor with its own claim token,
+            # so an old completion cannot release the refresh and a concurrent
+            # retry remains retryable rather than being acknowledged as seen.
+            self._mission_delivery_claim_counter += 1
+            cache_id = (
+                f"{delivery_id}\x1fmission-superseded-by:{successor}"
+                f"\x1fclaim:{self._mission_delivery_claim_counter}"
+            )
+        else:
+            self._mission_delivery_claim_counter += 1
+            cache_id = (
+                f"{delivery_id}\x1fmission-superseded-by:{successor or '-'}"
+                f"\x1fclaim:{self._mission_delivery_claim_counter}"
+            )
+        claim = self._record_delivery_id(cache_id, now)
+        if claim == "new":
+            self._mission_delivery_revisions[delivery_id] = (
+                successor,
+                cache_id,
+                now,
+                False,
+                # Only the first declared successor for a receipt can gain
+                # native state after its original unverified callback. A
+                # later A -> B -> A reversal is already distinct durable
+                # evidence and remains an exact deduped retry.
+                bool(successor and (previous is None or previous[0] is None)),
+            )
+        return claim, cache_id
+
+    def _mark_mission_delivery_revision_verified(
+        self, delivery_id: str, cache_id: str,
+    ) -> None:
+        """Record verified evidence only for the currently admitted receipt."""
+        previous = self._mission_delivery_revisions.get(delivery_id)
+        if previous and previous[1] == cache_id:
+            self._mission_delivery_revisions[delivery_id] = (
+                previous[0], previous[1], previous[2], True, previous[4]
+            )
+
+    def _discard_mission_delivery_revision(
+        self, delivery_id: str, cache_id: str,
+    ) -> None:
+        """Forget only an unaccepted current claim so its retry starts clean."""
+        previous = self._mission_delivery_revisions.get(delivery_id)
+        if previous and previous[1] == cache_id:
+            self._mission_delivery_revisions.pop(delivery_id, None)
+
+    def _finish_delivery_id(self, delivery_id: str) -> None:
+        self._inflight_deliveries.discard(delivery_id)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {"name": chat_id, "type": "webhook"}
@@ -904,17 +1001,49 @@ class WebhookAdapter(BasePlatformAdapter):
             source = None
         return adapter, source
 
+    def _record_mission_wake_failure(self, session_id, payload, profile):
+        from gateway.platforms.mission_status_route import append_mission_wake_failure
+
+        _home, token = self._profile_home_token(profile)
+        db, owned = self._session_db_for_profile(profile)
+        try:
+            if db is None:
+                raise RuntimeError("Session store unavailable for notification receipt")
+            append_mission_wake_failure(session_id, payload, db)
+        finally:
+            if owned and db is not None:
+                db.close()
+            if token is not None:
+                from hermes_constants import reset_hermes_home_override
+                reset_hermes_home_override(token)
+
+    async def _deliver_mission_wake(self, adapter, wake_kwargs, payload, profile):
+        from gateway.wake import deliver_wake
+
+        try:
+            await deliver_wake(adapter, **wake_kwargs)
+        except Exception:
+            # A timeout can follow a completed model turn. Never blindly
+            # replay it, and never classify the native mission as failed.
+            logger.warning("[webhook] mission notification outcome unknown", exc_info=True)
+            try:
+                await asyncio.to_thread(
+                    self._record_mission_wake_failure,
+                    wake_kwargs["session_id"], payload, profile,
+                )
+            except Exception:
+                logger.exception("[webhook] could not persist notification failure receipt")
+
     async def _maybe_route_mission_status(
         self, payload: dict, *, profile: Optional[str] = None,
         controller_callback: bool = False,
-    ) -> "Optional[web.Response]":
+    ) -> "Optional[web.Response] | tuple[web.Response, bool]":
         """Append a mission-complete callback into the dedicated session.
 
         Isolated ``webhook:mission-complete:<delivery>`` sessions are how
         Coldcard ``acfb03d2`` finished without writing into Coldcard #3.
         After HMAC, route to origin_session (continuations followed) or
-        ``project:<slug>``. Unroutable payloads return None so the existing
-        isolated path still runs.
+        ``project:<slug>``. Unroutable payloads return None for explicit rejection by the caller.
         """
         from aiohttp import web
 
@@ -922,12 +1051,16 @@ class WebhookAdapter(BasePlatformAdapter):
             from gateway.platforms.mission_status_route import (
                 append_mission_callback,
                 extract_origin_session,
+                extract_superseded_by,
                 is_routable_mission_status,
                 resolve_mission_delivery_session,
                 stash_unroutable_callback,
+                take_stashed_callback,
             )
         except Exception:
             logger.exception("[webhook] mission status router unavailable")
+            if payload.get("mission_id"):
+                return web.json_response({"status": "retry", "reason": "mission_router_unavailable"}, status=503)
             return None
 
         _home, token = self._profile_home_token(profile)
@@ -940,11 +1073,14 @@ class WebhookAdapter(BasePlatformAdapter):
                     reset_hermes_home_override(token)
                 except Exception:
                     pass
+            if is_routable_mission_status(payload):
+                return web.json_response({"status": "retry", "reason": "session_store_unavailable"}, status=503)
             return None
         live = None
         appended = False
         row = None
         wake = False
+        replacement_verified = False
         try:
             # Off the event loop: SessionDB writes take BEGIN IMMEDIATE and
             # can wait on a busy state.db. Doing that inline starved the
@@ -954,40 +1090,80 @@ class WebhookAdapter(BasePlatformAdapter):
             )
             if not target:
                 mission_id = str(payload.get("mission_id") or "").strip()
-                if mission_id and is_routable_mission_status(payload):
-                    await asyncio.to_thread(
+                if controller_callback:
+                    return None  # The explicit controller inbox already owns delivery.
+                if mission_id and is_routable_mission_status(payload) and extract_origin_session(payload):
+                    stashed = await asyncio.to_thread(
                         stash_unroutable_callback, mission_id, payload
                     )
-                    if extract_origin_session(payload):
-                        return web.json_response(
-                            {
-                                "status": "pending_enrollment",
-                                "mission_id": mission_id,
-                            },
-                            status=202,
-                        )
+                    return web.json_response(
+                        {"status": "pending_enrollment", "mission_id": mission_id,
+                         "evidence_stashed": stashed,
+                         "action": "Confirm canonical ownership/enrollment, then resend this event."},
+                        status=503,
+                    )
                 return None
+            from gateway.platforms.mission_status_route import should_wake_mission_callback
+
+            # A native sender retries non-success responses. Check compression
+            # before persisting the event: append-then-skip permanently consumed
+            # both transcript and transport dedupe without ever waking the chat.
+            # Controller input already has its own durable scheduling handoff.
+            if not controller_callback and not await asyncio.to_thread(
+                should_wake_mission_callback, session_db, target
+            ):
+                return web.json_response(
+                    {"status": "retry", "reason": "conversation_compressing"}, status=503,
+                )
+            adapter, source = None, None
+            if not controller_callback:
+                row = await asyncio.to_thread(session_db.get_session, target)
+                adapter, source = self._adapter_for_routed_session(row, target, profile)
+                from gateway.wake import adapter_supports_push
+                if adapter is None or (adapter_supports_push(adapter) and source is None):
+                    return web.json_response(
+                        {"status": "retry", "reason": "wake_adapter_unavailable"}, status=503,
+                    )
+
+            from gateway.platforms.mission_status_route import bounded_replacement_evidence
+
+            replacement_evidence = await bounded_replacement_evidence(payload)
+            declared_successor = extract_superseded_by(payload)
+            # Only bounded native evidence for this declared relationship can
+            # upgrade the transport admission. Callback text never supplies
+            # verification state.
+            replacement_verified = bool(
+                declared_successor
+                and isinstance(replacement_evidence, dict)
+                and replacement_evidence.get("mission_id") == declared_successor
+                and replacement_evidence.get("verified_live") is True
+            )
             result = await asyncio.to_thread(
-                append_mission_callback, target, payload, session_db
+                append_mission_callback, target, payload, session_db,
+                replacement_evidence=replacement_evidence,
             )
             if isinstance(result, tuple):
                 live, appended = result
             else:
                 live, appended = result, True
+            if live:
+                # The transcript now owns this exact evidence. Clear only a
+                # matching backup, never another event for the same mission.
+                await asyncio.to_thread(
+                    take_stashed_callback, str(payload.get("mission_id") or ""),
+                    expected_payload=payload,
+                )
             getter = getattr(session_db, "get_session", None)
             if callable(getter) and live:
                 try:
                     row = getter(live)
                 except Exception:
                     row = None
-            from gateway.platforms.mission_status_route import (
-                should_wake_mission_callback,
-            )
-
-            wake = bool(appended and live and not controller_callback
-                        and should_wake_mission_callback(session_db, live))
+            wake = bool(appended and live and not controller_callback)
         except Exception:
             logger.exception("[webhook] failed to append routed mission callback")
+            if is_routable_mission_status(payload):
+                return web.json_response({"status": "retry", "reason": "mission_route_unavailable"}, status=503)
             return None
         finally:
             if owned:
@@ -1024,11 +1200,8 @@ class WebhookAdapter(BasePlatformAdapter):
                     mission_callback_display_metadata,
                 )
 
-                adapter, source = self._adapter_for_routed_session(
-                    row, live, profile
-                )
                 if adapter is not None:
-                    from gateway.wake import adapter_supports_push, deliver_wake
+                    from gateway.wake import adapter_supports_push
 
                     wake_kwargs = {
                         "text": MISSION_CALLBACK_WAKE_PROMPT,
@@ -1038,20 +1211,25 @@ class WebhookAdapter(BasePlatformAdapter):
                     }
                     if source is not None and adapter_supports_push(adapter):
                         wake_kwargs["source"] = source
-                    task = asyncio.create_task(deliver_wake(adapter, **wake_kwargs))
+                    task = asyncio.create_task(
+                        self._deliver_mission_wake(adapter, wake_kwargs, payload, profile)
+                    )
                     self._background_tasks.add(task)
                     task.add_done_callback(self._background_tasks.discard)
             except Exception:
                 logger.warning(
                     "[webhook] routed mission wake not scheduled", exc_info=True
                 )
-        return web.json_response(
-            {
-                "status": "routed",
-                "mission_id": payload.get("mission_id"),
-                "session_id": live,
-            },
-            status=202,
+        return (
+            web.json_response(
+                {
+                    "status": "routed",
+                    "mission_id": payload.get("mission_id"),
+                    "session_id": live,
+                },
+                status=202,
+            ),
+            replacement_verified,
         )
 
     @staticmethod
@@ -1220,6 +1398,14 @@ class WebhookAdapter(BasePlatformAdapter):
                 }
             )
 
+        # Mission callbacks use a dedicated route (the established
+        # ``mission-complete`` name or an explicit opt-in).  Generic webhooks
+        # must never be sent through mission storage/routing merely because a
+        # third-party payload has familiar field names.
+        mission_status_route = route_config.get(
+            "mission_status", route_name == "mission-complete"
+        ) is True
+
         # ── Mission-backed delegation fold ──────────────────────────────────
         # A sandboxed.sh mission started via delegate_task(backend="mission")
         # reports its terminal transition here. If this payload's mission_id
@@ -1230,23 +1416,6 @@ class WebhookAdapter(BasePlatformAdapter):
         # (the auth anchor). Unknown / non-delegated missions fall through to the
         # normal webhook path untouched.
         request_profile = profile if isinstance(profile, str) else None
-        # One durable handoff before either completion path and before the
-        # transport dedupe claim. Paused controllers retain input without
-        # being re-enabled; a failed conversation route cannot lose this work.
-        try:
-            from cron.controller_callbacks import enqueue_mission_callback
-
-            with self._profile_scope(profile):
-                _controller_callback = await asyncio.to_thread(
-                    enqueue_mission_callback, payload
-                )
-        except Exception:
-            logger.exception("[webhook] controller callback handoff failed; retry required")
-            return web.json_response({"status": "retry", "reason": "controller_inbox"}, status=503)
-        _folded = self._maybe_fold_mission_delegation(payload, profile=request_profile)
-        if _folded is not None:
-            return _folded
-
         # The route script, prompt render and skill lookup below read the
         # profile's home (skills/, config). The runner only enters the routed
         # profile's scope later, around handle_message, so without this they
@@ -1329,32 +1498,114 @@ class WebhookAdapter(BasePlatformAdapter):
             or payload_event_id
             or str(int(time.time() * 1000))
         )
+        successor = None
+        if mission_status_route:
+            # A terminal receipt can acquire a supersession relationship after
+            # its first delivery. It is new durable attempt evidence, not a
+            # provider retry, so it must reach the transcript while exact
+            # retries of that same revision remain fenced.
+            try:
+                from gateway.platforms.mission_status_route import extract_superseded_by
+
+                successor = extract_superseded_by(payload)
+            except Exception:
+                successor = None
 
         # ── Idempotency ─────────────────────────────────────────
         # Skip duplicate deliveries (webhook retries). Applied before
         # origin-route so a routed callback cannot wake twice.
         now = time.time()
-        if not self._record_delivery_id(delivery_id, now):
+        if mission_status_route:
+            delivery_claim, delivery_cache_id = self._record_mission_delivery_revision(
+                delivery_id, successor, now
+            )
+        else:
+            delivery_cache_id = delivery_id
+            delivery_claim = self._record_delivery_id(delivery_cache_id, now)
+        if delivery_claim != "new":
             logger.info(
                 "[webhook] Skipping duplicate delivery %s", delivery_id
             )
             return web.json_response(
                 {"status": "duplicate", "delivery_id": delivery_id},
-                status=200,
+                # A concurrent request must not acknowledge a delivery whose
+                # first attempt can still fail a transient routing gate.
+                status=503 if delivery_claim == "inflight" else 200,
             )
+
+        # Serialize every owner under the same receipt claim. A rejected
+        # overlapping revision must not update the controller before retrying
+        # its conversation append, or the two owners would observe different
+        # orders. Persist controller input before the conversation handoff.
+        _controller_callback = None
+        if mission_status_route:
+            try:
+                from cron.controller_callbacks import enqueue_mission_callback
+
+                with self._profile_scope(profile):
+                    _controller_callback = await asyncio.to_thread(
+                        enqueue_mission_callback, payload
+                    )
+                _folded = self._maybe_fold_mission_delegation(payload, profile=request_profile)
+            except Exception:
+                self._seen_deliveries.pop(delivery_cache_id, None)
+                self._discard_mission_delivery_revision(delivery_id, delivery_cache_id)
+                self._finish_delivery_id(delivery_cache_id)
+                logger.exception("[webhook] controller callback handoff failed; retry required")
+                return web.json_response({"status": "retry", "reason": "controller_inbox"}, status=503)
+            if _folded is not None:
+                if _folded.status >= 500:
+                    self._seen_deliveries.pop(delivery_cache_id, None)
+                    self._discard_mission_delivery_revision(delivery_id, delivery_cache_id)
+                self._finish_delivery_id(delivery_cache_id)
+                return _folded
 
         # Route sandboxed.sh mission-status events into the dedicated
         # conversation before minting a throwaway webhook session.
-        _routed = await self._maybe_route_mission_status(
-            payload, profile=request_profile,
-            controller_callback=_controller_callback is not None,
-        )
+        _routed = None
+        routed_replacement_verified = False
+        if mission_status_route:
+            route_result = await self._maybe_route_mission_status(
+                payload, profile=request_profile,
+                controller_callback=_controller_callback is not None,
+            )
+            # Keep the internal route seam compatible with tests/extensions
+            # that return an aiohttp response directly.
+            if isinstance(route_result, tuple):
+                _routed, routed_replacement_verified = route_result
+            else:
+                _routed = route_result
         if _routed is not None:
+            if _routed.status >= 500:
+                # No accepted route handoff: allow the authenticated producer
+                # to replay this exact delivery after the transient gate clears.
+                self._seen_deliveries.pop(delivery_cache_id, None)
+                self._discard_mission_delivery_revision(
+                    delivery_id, delivery_cache_id
+                )
+            elif mission_status_route and routed_replacement_verified:
+                self._mark_mission_delivery_revision_verified(
+                    delivery_id, delivery_cache_id
+                )
+            self._finish_delivery_id(delivery_cache_id)
             return _routed
         if _controller_callback is not None:
             # The existing controller is the sole operational owner. Do not
             # spawn an isolated webhook writer when its chat route is absent.
+            self._finish_delivery_id(delivery_cache_id)
             return web.json_response({"status": "controller_queued", **_controller_callback}, status=202)
+
+        from gateway.platforms.mission_status_route import is_routable_mission_status
+        if mission_status_route and is_routable_mission_status(payload):
+            # No durable owner accepted this event. Permit replay after repair.
+            self._seen_deliveries.pop(delivery_cache_id, None)
+            self._discard_mission_delivery_revision(delivery_id, delivery_cache_id)
+            self._finish_delivery_id(delivery_cache_id)
+            return web.json_response({
+                "status": "rejected", "reason": "missing_conversation_binding",
+                "mission_id": payload.get("mission_id"),
+                "action": "Repair canonical conversation binding or enroll the existing owner, then resend this event.",
+            }, status=409)
 
         # ── Direct delivery mode (deliver_only) ─────────────────
         # Skip the agent entirely — the rendered prompt IS the message we
@@ -1386,12 +1637,14 @@ class WebhookAdapter(BasePlatformAdapter):
                     route_name,
                     delivery_id,
                 )
+                self._finish_delivery_id(delivery_cache_id)
                 return web.json_response(
                     {"status": "error", "error": "Delivery failed", "delivery_id": delivery_id},
                     status=502,
                 )
 
             if result.success:
+                self._finish_delivery_id(delivery_cache_id)
                 return web.json_response(
                     {
                         "status": "delivered",
@@ -1409,6 +1662,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 delivery["deliver"],
                 result.error,
             )
+            self._finish_delivery_id(delivery_cache_id)
             return web.json_response(
                 {"status": "error", "error": "Delivery failed", "delivery_id": delivery_id},
                 status=502,
@@ -1468,6 +1722,7 @@ class WebhookAdapter(BasePlatformAdapter):
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
+        self._finish_delivery_id(delivery_cache_id)
         return web.json_response(
             {
                 "status": "accepted",

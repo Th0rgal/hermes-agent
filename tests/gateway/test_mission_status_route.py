@@ -349,6 +349,7 @@ def test_wake_prompt_does_not_order_an_inspect_loop():
     assert "do not run tools" in lower
     assert "continue autonomously" not in lower
     assert "if you can continue" not in lower
+    assert "do not mention replacement execution when no successor is declared" in lower
 
 
 class _TypedDB:

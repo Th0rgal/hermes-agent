@@ -464,3 +464,15 @@ def test_wake_failure_receipt_keeps_native_status_separate():
     assert receipt["display_metadata"]["status"] == "completed"
     assert receipt["display_metadata"]["delivery_status"] == "unknown"
     assert "[CTRL:" not in receipt["content"]
+
+
+def test_callback_dedupe_requires_exact_identity_not_prefix_or_quoted_body():
+    db = _FakeSessionDBWithMessages({"s": {"source": "desktop"}})
+    payload = {"mission_id": "mission-a", "status": "failed", "event_id": "evt-10",
+               "result_summary": "[Mission callback: quote]\nstatus=failed mission=mission-a event=evt-2"}
+    assert append_mission_callback("s", payload, db) == ("s", True)
+    for event_id in ("evt-1", "evt-2"):
+        next_payload = dict(payload, event_id=event_id, result_summary="new evidence")
+        assert append_mission_callback("s", next_payload, db) == ("s", True)
+        assert append_mission_callback("s", next_payload, db) == ("s", False)
+    assert append_mission_callback("s", dict(payload, mission_id="mission-b"), db) == ("s", True)

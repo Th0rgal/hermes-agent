@@ -259,3 +259,14 @@ the response, proving only one request is sent. The consolidated review suite
 passed 694 tests across 26 files (74.8s) before this final retry refinement; 23 focused
 wake/routing tests passed afterward. Logs: output/review-final-validation.log and
 output/ambiguous-wake-retry-tests.log.
+
+
+## Exact callback identity
+
+Transcript dedupe previously matched event IDs as substrings anywhere in a
+callback: evt-1 could disappear after evt-10, and quoted evidence could suppress
+a distinct event. It now matches the full mission/event identity on the callback
+header line. A regression reproduced the prefix loss; 71 routing/readback and
+per-execution delegation tests passed after the fix (15.1s). Logs:
+output/exact-event-before.log and output/exact-event-after.log. This remains
+bounded transcript dedupe, not a claim of a global durable event index.

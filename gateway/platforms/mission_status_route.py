@@ -504,8 +504,19 @@ def append_mission_callback(
     if event_id:
         texts = _recent_message_texts(session_db, live)
         if texts is not None:
-            marker = f" event={event_id}"
-            if any("[Mission callback" in t and marker in t for t in texts):
+            mission_id = str(payload.get("mission_id") or "").strip()
+            header = re.compile(
+                rf"status=\S+ mission={re.escape(mission_id)} event={re.escape(event_id)}"
+                r"(?: workspace=.*)?"
+            )
+            # Match the producer identity line, never a prefix or quoted
+            # evidence further down the callback body.
+            def matches(text):
+                lines = text.splitlines()
+                return (len(lines) >= 2 and lines[0].startswith("[Mission callback:")
+                        and header.fullmatch(lines[1]) is not None)
+
+            if any(matches(t) for t in texts):
                 logger.info(
                     "duplicate mission callback event %s for %s — skipping append",
                     event_id,

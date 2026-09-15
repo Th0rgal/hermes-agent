@@ -694,3 +694,27 @@ def test_scheduler_file_output_and_response_make_observer_markers_inert(local_sc
     for marker in ("[CTRL:", "[STATE_SIGNATURE:", "[DECISION:"):
         assert (marker in saved) == (mode == "operator")
         assert (marker in final) == (mode == "operator")
+
+
+def test_existing_controller_repair_preserves_latest_owner_edits():
+    from cron import jobs
+    from cron.controller_repair import export_repair, apply_repair
+    saved = jobs.create_job("Inspect receipts.", "every 10m", controller=job()["controller"])
+    with jobs._jobs_lock():
+        records = jobs.load_jobs()
+        records[0]["prompt"] = "x" * 24646
+        jobs.save_jobs(records)
+    proposal = export_repair(saved["id"])
+    assert proposal["diagnostic"] and len(proposal["replacement_prompt"]) == 24646
+    with pytest.raises(ControllerScopeError):
+        apply_repair(proposal)
+    proposal["replacement_prompt"] = "Inspect receipts with owner-approved scope."
+    jobs.update_job(saved["id"], {"name": "Latest owner edit"})
+    with pytest.raises(ValueError, match="changed since export"):
+        apply_repair(proposal)
+    fresh = export_repair(saved["id"])
+    fresh["replacement_prompt"] = proposal["replacement_prompt"]
+    repaired = apply_repair(fresh)
+    assert repaired["name"] == "Latest owner edit"
+    assert repaired["controller"] == saved["controller"]
+    assert repaired["skills"] == saved["skills"]

@@ -406,3 +406,17 @@ async def test_controller_inbox_failure_is_retryable_before_transport_dedupe(mon
     assert response.status == 202
     assert json.loads(response.body)["status"] == "controller_queued"
     assert adapter.handle_message.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_orphan_callback_rejected_without_autonomous_owner(monkeypatch):
+    adapter = _make_adapter()
+    adapter.handle_message = AsyncMock()
+    payload = {"mission_id": MISSION, "status": "failed", "type": "failed",
+               "project": "sandboxed-sh-dev", "event_id": "orphan"}
+    for _ in range(3):
+        response = await adapter._handle_webhook(_mock_request(payload))
+        assert response.status == 409
+        assert json.loads(response.body)["reason"] == "missing_conversation_binding"
+    assert adapter.handle_message.await_count == 0
+    assert not adapter._background_tasks

@@ -426,3 +426,25 @@ def test_callback_typing_tolerates_an_old_db_shim():
     append_mission_callback("s1", {"mission_id": "m1", "status": "failed"}, db)
     assert len(db.appended) == 1
     assert db.appended[0][1] == "assistant"
+
+
+def test_replacement_timeout_is_bounded_and_does_not_queue_more_reads(monkeypatch):
+    import asyncio
+    import threading
+    from gateway.platforms import mission_status_route as route
+    release = threading.Event()
+    calls = []
+    def blocked(payload):
+        calls.append(payload)
+        release.wait(2)
+        return {"verified_live": True}
+    monkeypatch.setattr(route, "read_replacement_evidence", blocked)
+    monkeypatch.setattr(route, "_REPLACEMENT_READ_TIMEOUT", 0.01)
+    async def check():
+        try:
+            assert await asyncio.wait_for(route.bounded_replacement_evidence({}), 0.5) is None
+            assert await asyncio.wait_for(route.bounded_replacement_evidence({}), 0.5) is None
+            assert len(calls) == 1
+        finally:
+            release.set()
+    asyncio.run(check())

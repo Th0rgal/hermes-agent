@@ -146,3 +146,48 @@ first failed on the original admission, batching, repeated-failure scheduling
 and callback-state behavior. Run via `scripts/run_tests.sh` with the locked
 `dev` and `messaging` extras. No merge, deployment, restart, campaign edit or
 native mission intervention is part of this change.
+
+
+## Missing binding and existing-job recovery (follow-up)
+
+Terminal callbacks with no accepted delegation/controller or canonical conversation
+route now return HTTP 409 `missing_conversation_binding`, with an enrollment and
+resend action. They do not create autonomous webhook conversations, stash a new
+project owner, or consume transport dedupe. Repeated deliveries remain bounded to
+request handling. Native delivery must expose this rejection and retain evidence;
+this source change does not establish the missing sandboxed-sh-dev binding or
+prove the producer's retry/dead-letter behavior. Explicit-origin pre-enrollment
+stashing remains the existing mechanism and is not a general durable event queue.
+
+Replacement digest lookup has a five-second total response deadline and one
+outstanding worker slot, including connection setup and both reads. Timeout or
+saturation returns unverified evidence. A hung underlying connection may retain
+that slot until it exits; it cannot accumulate more readback workers. Existing
+identity/project/fresh-heartbeat checks still apply.
+
+For existing invalid jobs, run from the configured Hermes environment:
+
+```sh
+python -m cron.controller_repair export JOB_ID proposal.json
+# Owner reviews the complete original and edits replacement_prompt only.
+python -m cron.controller_repair apply proposal.json
+```
+
+Export preserves the complete current job and reports admission errors. Apply
+validates the replacement and atomically compares the entire original snapshot
+under the jobs lock. Any concurrent edit or scheduler update requires a fresh
+export/reconciliation. Only the prompt changes; scope, skills, tools and pause
+state remain intact. This is a review artifact, not another authoritative job
+store. No automatic truncation or semantic equivalence claim is made. Lido's
+reported 24,646-character raw prompt, four errors, empty skills and MCP toolset
+need an owner-reviewed replacement; no live Lido record was read or changed by
+this repair implementation.
+
+Remaining boundaries include native canonical enrollment, producer handling of
+409 responses, post-append wake-task failure/process-crash recovery, hard tool
+restrictions for notice wakes (currently instructions), and native workspace,
+profile, auth, quota and event-size defects. These are not architecture-complete
+claims. Coordination was queued only to active counterpart
+f9fc8b08-dc42-49c3-88a0-26934b2255ce; no obsolete worker was resumed.
+
+Follow-up consolidated validation: **512 passed, 0 failed, 18 files**, 59.7s via `scripts/run_tests.sh` with two workers; focused follow-up 141 passed. Local logs: `output/progression-final-tests.log` and `output/checkpoint-followup-tests.log` in the audit workspace. New module/readback lint and `git diff --check` passed.

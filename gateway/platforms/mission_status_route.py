@@ -3,7 +3,7 @@
 HMAC already authenticated the payload. origin_session is still a hint:
 the session must exist (continuations followed). If it does not, the
 explicit project route is the only fallback. An unroutable payload returns
-None so the webhook adapter can keep its isolated-session behaviour.
+None so the webhook adapter can reject delivery without an owner.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Any, Optional, Tuple
 from uuid import UUID
@@ -73,6 +74,30 @@ def extract_superseded_by(payload: dict) -> str | None:
             if successor != str(payload.get("mission_id", "")).strip():
                 return successor
     return None
+
+
+# A wedged connection can outlive the deadline. Bound outstanding reads too.
+_REPLACEMENT_READ_SLOT = threading.BoundedSemaphore(1)
+_REPLACEMENT_READ_TIMEOUT = 5.0
+
+
+async def bounded_replacement_evidence(payload: dict) -> dict | None:
+    import asyncio
+
+    if not _REPLACEMENT_READ_SLOT.acquire(blocking=False):
+        return None
+
+    def read():
+        try:
+            return read_replacement_evidence(payload)
+        finally:
+            _REPLACEMENT_READ_SLOT.release()
+
+    task = asyncio.create_task(asyncio.to_thread(read))
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), _REPLACEMENT_READ_TIMEOUT)
+    except Exception:
+        return None
 
 
 def read_replacement_evidence(payload: dict) -> dict | None:

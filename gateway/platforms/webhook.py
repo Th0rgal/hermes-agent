@@ -913,8 +913,7 @@ class WebhookAdapter(BasePlatformAdapter):
         Isolated ``webhook:mission-complete:<delivery>`` sessions are how
         Coldcard ``acfb03d2`` finished without writing into Coldcard #3.
         After HMAC, route to origin_session (continuations followed) or
-        ``project:<slug>``. Unroutable payloads return None so the existing
-        isolated path still runs.
+        ``project:<slug>``. Unroutable payloads return None for explicit rejection by the caller.
         """
         from aiohttp import web
 
@@ -954,7 +953,7 @@ class WebhookAdapter(BasePlatformAdapter):
             )
             if not target:
                 mission_id = str(payload.get("mission_id") or "").strip()
-                if mission_id and is_routable_mission_status(payload):
+                if mission_id and is_routable_mission_status(payload) and extract_origin_session(payload):
                     await asyncio.to_thread(
                         stash_unroutable_callback, mission_id, payload
                     )
@@ -979,9 +978,9 @@ class WebhookAdapter(BasePlatformAdapter):
                 return web.json_response(
                     {"status": "retry", "reason": "conversation_compressing"}, status=503,
                 )
-            from gateway.platforms.mission_status_route import read_replacement_evidence
+            from gateway.platforms.mission_status_route import bounded_replacement_evidence
 
-            replacement_evidence = await asyncio.to_thread(read_replacement_evidence, payload)
+            replacement_evidence = await bounded_replacement_evidence(payload)
             result = await asyncio.to_thread(
                 append_mission_callback, target, payload, session_db,
                 replacement_evidence=replacement_evidence,
@@ -1370,6 +1369,16 @@ class WebhookAdapter(BasePlatformAdapter):
             # The existing controller is the sole operational owner. Do not
             # spawn an isolated webhook writer when its chat route is absent.
             return web.json_response({"status": "controller_queued", **_controller_callback}, status=202)
+
+        from gateway.platforms.mission_status_route import is_routable_mission_status
+        if is_routable_mission_status(payload):
+            # No durable owner accepted this event. Permit replay after repair.
+            self._seen_deliveries.pop(delivery_id, None)
+            return web.json_response({
+                "status": "rejected", "reason": "missing_conversation_binding",
+                "mission_id": payload.get("mission_id"),
+                "action": "Repair canonical conversation binding or enroll the existing owner, then resend this event.",
+            }, status=409)
 
         # ── Direct delivery mode (deliver_only) ─────────────────
         # Skip the agent entirely — the rendered prompt IS the message we

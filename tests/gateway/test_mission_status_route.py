@@ -433,17 +433,21 @@ def test_replacement_timeout_is_bounded_and_does_not_queue_more_reads(monkeypatc
     import threading
     from gateway.platforms import mission_status_route as route
     release = threading.Event()
+    started = threading.Event()
     calls = []
     def blocked(payload):
         calls.append(payload)
-        release.wait(2)
+        started.set()
+        release.wait(10)
         return {"verified_live": True}
     monkeypatch.setattr(route, "read_replacement_evidence", blocked)
     monkeypatch.setattr(route, "_REPLACEMENT_READ_TIMEOUT", 0.01)
     async def check():
         try:
-            assert await asyncio.wait_for(route.bounded_replacement_evidence({}), 0.5) is None
-            assert await asyncio.wait_for(route.bounded_replacement_evidence({}), 0.5) is None
+            pending = asyncio.create_task(route.bounded_replacement_evidence({}))
+            assert await asyncio.to_thread(started.wait, 5)
+            assert await asyncio.wait_for(pending, 2) is None
+            assert await asyncio.wait_for(route.bounded_replacement_evidence({}), 2) is None
             assert len(calls) == 1
         finally:
             release.set()

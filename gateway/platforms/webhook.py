@@ -978,6 +978,16 @@ class WebhookAdapter(BasePlatformAdapter):
                 return web.json_response(
                     {"status": "retry", "reason": "conversation_compressing"}, status=503,
                 )
+            adapter, source = None, None
+            if not controller_callback:
+                row = await asyncio.to_thread(session_db.get_session, target)
+                adapter, source = self._adapter_for_routed_session(row, target, profile)
+                from gateway.wake import adapter_supports_push
+                if adapter is None or (adapter_supports_push(adapter) and source is None):
+                    return web.json_response(
+                        {"status": "retry", "reason": "wake_adapter_unavailable"}, status=503,
+                    )
+
             from gateway.platforms.mission_status_route import bounded_replacement_evidence
 
             replacement_evidence = await bounded_replacement_evidence(payload)
@@ -1034,9 +1044,6 @@ class WebhookAdapter(BasePlatformAdapter):
                     mission_callback_display_metadata,
                 )
 
-                adapter, source = self._adapter_for_routed_session(
-                    row, live, profile
-                )
                 if adapter is not None:
                     from gateway.wake import adapter_supports_push, deliver_wake
 

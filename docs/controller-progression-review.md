@@ -191,3 +191,22 @@ claims. Coordination was queued only to active counterpart
 f9fc8b08-dc42-49c3-88a0-26934b2255ce; no obsolete worker was resumed.
 
 Follow-up consolidated validation: **512 passed, 0 failed, 18 files**, 59.7s via `scripts/run_tests.sh` with two workers; focused follow-up 141 passed. Local logs: `output/progression-final-tests.log` and `output/checkpoint-followup-tests.log` in the audit workspace. New module/readback lint and `git diff --check` passed.
+
+
+## Wake transport preflight
+
+A routed callback previously returned 202 and consumed transcript/transport dedupe
+even when no adapter existed to wake its owner. A regression reproduced that
+202-versus-503 failure. Non-controller routes now resolve a usable adapter (and
+required push source) before appending. Unavailable transport returns 503 without
+consuming the event; recovery and exact retry append and wake once. Controller
+inbox delivery remains independent. This closes a pre-append loss path, not the
+separate post-append crash/async-delivery boundary.
+
+Validation: 34 routing/readback tests passed; 75 broader webhook/wake tests passed
+across nine files; the event-synchronized timeout regression was rerun with all
+21 readback/formatting tests passing. Canonical runner used throughout. Logs in
+the audit workspace: `output/adapter-before.log` (causal failure),
+`output/adapter-after.log`, `output/webhook-compat-tests.log`, and
+`output/readback-bound-tests.log`. Earlier consolidated 512-test result belongs
+to 3c552d7; these targeted results validate this follow-up.

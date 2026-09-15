@@ -129,6 +129,10 @@ async def test_routed_notice_uses_trusted_replacement_readback(monkeypatch):
                         messages={ORIGIN: [{"content": f"started {MISSION}"}]})
     adapter = _make_adapter()
     adapter.gateway_runner = _FakeRunner(db)
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    monkeypatch.setattr("gateway.wake.deliver_wake", AsyncMock())
     evidence = {"mission_id": "22222222-2222-4222-8222-222222222222", "verified_live": True,
                 "run_id": "run-2", "state": "running", "observed_at": "2026-09-15T10:00:00+00:00"}
     monkeypatch.setattr("gateway.platforms.mission_status_route.read_replacement_evidence", lambda payload: evidence)
@@ -143,13 +147,17 @@ async def test_routed_notice_uses_trusted_replacement_readback(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_mission_complete_routes_into_origin_and_skips_throwaway():
+async def test_mission_complete_routes_into_origin_and_skips_throwaway(monkeypatch):
     db = _FakeSessionDB(
         {ORIGIN: {"source": "desktop"}},
         messages={ORIGIN: [{"content": f"started {MISSION}"}]},
     )
     adapter = _make_adapter()
     adapter.gateway_runner = _FakeRunner(db)
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    monkeypatch.setattr("gateway.wake.deliver_wake", AsyncMock())
     adapter.handle_message = AsyncMock()
 
     payload = {
@@ -420,3 +428,29 @@ async def test_orphan_callback_rejected_without_autonomous_owner(monkeypatch):
         assert json.loads(response.body)["reason"] == "missing_conversation_binding"
     assert adapter.handle_message.await_count == 0
     assert not adapter._background_tasks
+
+
+@pytest.mark.asyncio
+async def test_missing_wake_adapter_preserves_exact_retry(monkeypatch):
+    db = _FakeSessionDB({ORIGIN: {"source": "desktop"}},
+                        messages={ORIGIN: [{"content": f"started {MISSION}"}]})
+    adapter = _make_adapter()
+    adapter.gateway_runner = _FakeRunner(db)
+    payload = {"mission_id": MISSION, "status": "failed", "type": "failed",
+               "origin_session": ORIGIN, "event_id": "adapter-retry"}
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 503
+    assert json.loads(response.body)["reason"] == "wake_adapter_unavailable"
+    assert db.appended == []
+    api = MagicMock()
+    api.supports_async_delivery = False
+    adapter.gateway_runner.adapters[Platform.API_SERVER] = api
+    wake = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", wake)
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 202
+    await asyncio.gather(*list(adapter._background_tasks))
+    assert wake.await_count == 1 and len(db.appended) == 1
+    response = await adapter._handle_webhook(_mock_request(payload))
+    assert response.status == 200
+    assert wake.await_count == 1 and len(db.appended) == 1

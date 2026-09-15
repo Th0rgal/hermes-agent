@@ -576,6 +576,9 @@ def append_mission_callback(
             if texts is not None:
                 mission_id = _identity_line_value(payload.get("mission_id"))
                 event_id = _identity_line_value(event_id)
+                identity_prefix = re.compile(
+                    rf"status=\S+ mission={re.escape(mission_id)} event={re.escape(event_id)}"
+                )
                 header = re.compile(
                     rf"status=\S+ mission={re.escape(mission_id)} event={re.escape(event_id)}"
                     r"(?: superseded_by=[0-9a-f-]{36})?(?: replacement_verified=1)?"
@@ -602,15 +605,24 @@ def append_mission_callback(
                     # this event's current relationship. Searching every
                     # callback body made a quoted successor look authoritative
                     # and treated A -> B -> A as an unchanged retry.
-                    latest_header = existing_headers[-1].split(" workspace=", 1)[0]
-                    successor_match = re.search(
-                        r"(?:^| )superseded_by=([0-9a-f-]{36})(?: |$)",
-                        latest_header,
+                    latest_header = existing_headers[-1]
+                    # The matched event ID is externally supplied text. Parse
+                    # revision fields only from the suffix after that exact
+                    # identity, otherwise an event ID containing
+                    # "superseded_by=..." can impersonate a real revision.
+                    prefix_match = identity_prefix.match(latest_header)
+                    revision_suffix = (
+                        latest_header[prefix_match.end():] if prefix_match else ""
+                    )
+                    revision_suffix = revision_suffix.split(" workspace=", 1)[0]
+                    successor_match = re.match(
+                        r" superseded_by=([0-9a-f-]{36})(?: |$)",
+                        revision_suffix,
                     )
                     latest_successor = (
                         successor_match.group(1) if successor_match else None
                     )
-                    latest_verified = " replacement_verified=1" in latest_header
+                    latest_verified = " replacement_verified=1" in revision_suffix
                     if not successor or (
                         successor == latest_successor
                         and (not verified_now or latest_verified)

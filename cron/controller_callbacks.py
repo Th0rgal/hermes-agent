@@ -276,6 +276,12 @@ def pending_callbacks(job_id: str, *, max_chars: int = 6000) -> dict:
             entry["id"]: entry.get("revision", 0)
             for entry in entries
         }
+        # A snapshot can be followed by a pre-dispatch/model failure before
+        # the scheduler reaches defer_callbacks().  Persist its exact capture
+        # here as well, so mark_job_run() has the same clock-independent
+        # evidence for early-wake admission in that path.
+        job["controller_callback_captured_versions"] = dict(captured_versions)
+        jobs.save_jobs(records)
         # Keep the controller's bounded prompt usable during completion bursts.
         # Unselected entries remain durable for the next successful turn.
         selected = []

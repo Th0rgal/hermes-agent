@@ -347,6 +347,27 @@ def test_uncaptured_version_snapshot_callback_authorizes_early_wake(monkeypatch,
     assert jobs.get_job(job_id)["next_run_at"] < retry_at
 
 
+@pytest.mark.parametrize("arrival_offset", [0, -1], ids=["same-clock", "backwards-clock"])
+def test_pending_snapshot_alone_preserves_uncaptured_early_wake(monkeypatch, arrival_offset):
+    """Pre-dispatch failures can mark a run without calling defer_callbacks()."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    relay.enqueue_mission_callback(event())
+    relay.pending_callbacks(job_id)
+    now += timedelta(seconds=arrival_offset)
+    relay.enqueue_mission_callback(event(2))
+    now += timedelta(seconds=30)
+    jobs.mark_job_run(job_id, success=False, error="pre-dispatch callback failure")
+    retry_at = jobs.get_job(job_id)["next_run_at"]
+
+    relay.wake_pending_controllers()
+
+    assert jobs.get_job(job_id)["next_run_at"] < retry_at
+
+
 def test_revised_supersession_wakes_after_a_later_failed_run(monkeypatch):
     from datetime import datetime, timedelta, timezone
 

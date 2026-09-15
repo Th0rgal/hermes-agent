@@ -2680,6 +2680,31 @@ def update_job(job_id: str, updates: Dict[str, Any], *, expected_job: Optional[D
             f"Cron job field(s) cannot be updated: {', '.join(sorted(bad_fields))}"
         )
 
+    # Controller admission can load a qualified plugin skill.  That path may
+    # wait for discovery or initialize plugin code, so it must never run while
+    # holding the process-wide jobs lock.  Take an optimistic record snapshot,
+    # validate its merged controller definition outside the lock, then require
+    # the same snapshot at persistence below.  A concurrent edit gets a clear
+    # retry instead of being overwritten after a potentially long validation.
+    controller_validation_fields = {
+        "controller", "prompt", "skills", "skill", "deliver", "no_agent",
+    }
+    validation_snapshot: Optional[Dict[str, Any]] = None
+    if controller_validation_fields.intersection(updates):
+        with _jobs_lock():
+            records = load_jobs()
+            current = next((record for record in records if record["id"] == job_id), None)
+            if current is None:
+                return None
+            if expected_job is not None and current != expected_job:
+                raise ValueError("Job changed since export; export again and reconcile latest owner instructions")
+            validation_snapshot = dict(current)
+
+        validation_candidate = _apply_skill_fields({**validation_snapshot, **updates})
+        from cron.controller_scope import validate_controller_job
+
+        validate_controller_job(validation_candidate)
+
     with _jobs_lock():
         jobs = load_jobs()
         for i, job in enumerate(jobs):
@@ -2688,6 +2713,8 @@ def update_job(job_id: str, updates: Dict[str, Any], *, expected_job: Optional[D
 
             if expected_job is not None and job != expected_job:
                 raise ValueError("Job changed since export; export again and reconcile latest owner instructions")
+            if validation_snapshot is not None and job != validation_snapshot:
+                raise ValueError("Job changed during controller validation; retry the update")
 
             # Validate / normalize workdir if present in updates.  Empty string
             # or None both mean "clear the field" (restore old behaviour).
@@ -2851,13 +2878,6 @@ def update_job(job_id: str, updates: Dict[str, Any], *, expected_job: Optional[D
                     f"Cannot activate terminal cron job '{job.get('name', job_id)}' "
                     "through update_job; use cron resume --run-now or --at."
                 )
-
-            # Validate the merged definition, before persistence. Administrative
-            # metadata edits and pausing remain available for damaged legacy jobs.
-            if {"controller", "prompt", "skills", "skill", "deliver", "no_agent"}.intersection(updates):
-                from cron.controller_scope import validate_controller_job
-
-                validate_controller_job(updated)
 
             jobs[i] = updated
             save_jobs(jobs)

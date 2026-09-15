@@ -266,6 +266,56 @@ def test_controller_update_counts_real_skill_preload(tmp_path, monkeypatch):
     assert jobs.get_job(saved["id"]) == before
 
 
+def test_controller_update_loads_skills_outside_the_jobs_lock(monkeypatch):
+    from contextlib import contextmanager
+    from cron import jobs
+    import tools.skills_tool as skills_tool
+
+    saved = jobs.create_job("Inspect project receipts.", "every 10m")
+    original_lock = jobs._jobs_lock
+    lock_depth = 0
+
+    @contextmanager
+    def observed_lock():
+        nonlocal lock_depth
+        with original_lock():
+            lock_depth += 1
+            try:
+                yield
+            finally:
+                lock_depth -= 1
+
+    def qualified_skill_view(name, **_kwargs):
+        assert name == "plugin:controller-skill"
+        assert lock_depth == 0
+        return '{"success": true, "content": "Inspect receipts."}'
+
+    monkeypatch.setattr(jobs, "_jobs_lock", observed_lock)
+    monkeypatch.setattr(skills_tool, "skill_view", qualified_skill_view)
+    updated = jobs.update_job(saved["id"], {
+        "controller": job()["controller"], "skills": ["plugin:controller-skill"],
+    })
+    assert updated["skills"] == ["plugin:controller-skill"]
+
+
+def test_controller_update_rechecks_snapshot_after_out_of_lock_validation(monkeypatch):
+    from cron import jobs
+    import cron.controller_scope as controller_scope
+
+    saved = jobs.create_job("Inspect project receipts.", "every 10m")
+
+    def mutate_during_validation(_candidate):
+        with jobs._jobs_lock():
+            records = jobs.load_jobs()
+            records[0]["prompt"] = "Edited by the current owner."
+            jobs.save_jobs(records)
+
+    monkeypatch.setattr(controller_scope, "validate_controller_job", mutate_during_validation)
+    with pytest.raises(ValueError, match="changed during controller validation"):
+        jobs.update_job(saved["id"], {"controller": job()["controller"]})
+    assert jobs.get_job(saved["id"])["prompt"] == "Edited by the current owner."
+
+
 def test_controller_creation_validates_before_persistence():
     from cron import jobs
 

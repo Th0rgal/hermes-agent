@@ -295,6 +295,11 @@ def extract_event_id(payload: dict) -> str:
     return str(payload.get("event_id") or payload.get("delivery_id") or "").strip()
 
 
+def _identity_line_value(value: object) -> str:
+    """Keep externally supplied callback identity fields on one header line."""
+    return " ".join(str(value or "").split())
+
+
 def resolve_project_session_id(project: str, session_db: Any = None) -> Optional[str]:
     slug = (project or "").strip()
     if not slug:
@@ -356,14 +361,14 @@ def resolve_mission_delivery_session(payload: dict, session_db: Any) -> Optional
 
 def format_mission_callback(payload: dict, *, replacement_evidence: dict | None = None) -> str:
     """Human + machine trailer written into the dedicated session."""
-    mission_id = str(payload.get("mission_id") or "").strip()
-    status = extract_status(payload)
+    mission_id = _identity_line_value(payload.get("mission_id"))
+    status = _identity_line_value(extract_status(payload))
     # This line is part of the machine-readable callback envelope.  A title
     # comes from an external producer, so it must not be allowed to split the
     # header and defeat exact event-id deduplication.
-    title = " ".join(str(payload.get("title") or "mission").split())
+    title = _identity_line_value(payload.get("title") or "mission")
     project = extract_project_slug(payload) or "unknown"
-    workspace = str(payload.get("workspace_name") or "").strip()
+    workspace = _identity_line_value(payload.get("workspace_name"))
     bits = [
         payload.get("result_summary"),
         payload.get("short_description"),
@@ -371,7 +376,7 @@ def format_mission_callback(payload: dict, *, replacement_evidence: dict | None 
         payload.get("terminal_evidence") if status != "completed" else None,
     ]
     body = "\n".join(str(b).strip() for b in bits if b and str(b).strip())
-    event_id = extract_event_id(payload)
+    event_id = _identity_line_value(extract_event_id(payload))
     lines = [
         f"[Mission callback: {title}]",
         f"status={status} mission={mission_id}"
@@ -540,7 +545,8 @@ def append_mission_callback(
         if event_id:
             texts = _recent_message_texts(session_db, live)
             if texts is not None:
-                mission_id = str(payload.get("mission_id") or "").strip()
+                mission_id = _identity_line_value(payload.get("mission_id"))
+                event_id = _identity_line_value(event_id)
                 header = re.compile(
                     rf"status=\S+ mission={re.escape(mission_id)} event={re.escape(event_id)}"
                     r"(?: workspace=.*)?"

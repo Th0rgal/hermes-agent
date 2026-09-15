@@ -484,6 +484,16 @@ def test_callback_dedupe_survives_a_multiline_external_title():
     assert append_mission_callback("s", payload, db) == ("s", False)
 
 
+def test_callback_dedupe_survives_a_multiline_workspace_identity():
+    db = _FakeSessionDBWithMessages({"s": {"source": "desktop"}})
+    payload = {
+        "mission_id": "mission-a", "status": "failed", "event_id": "evt-workspace",
+        "workspace_name": "external\nworkspace",
+    }
+    assert append_mission_callback("s", payload, db) == ("s", True)
+    assert append_mission_callback("s", payload, db) == ("s", False)
+
+
 def test_callback_dedupe_absorbs_late_supersession_evidence_once():
     db = _FakeSessionDBWithMessages({"s": {"source": "desktop"}})
     payload = {"mission_id": "mission-a", "status": "failed", "event_id": "evt-revision"}

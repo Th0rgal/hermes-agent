@@ -170,6 +170,9 @@ def enqueue_mission_callback(payload: dict[str, Any]) -> dict | None:
                 "id": event_id, "project": project, "mission_id": mission,
                 "run_id": run, "native_event_id": native_event, "status": status,
                 "received_at": jobs._hermes_now().isoformat(),
+                # A revision counter avoids treating two state changes in the
+                # same clock tick as the same callback snapshot.
+                "revision": 0,
                 "summary": str(payload.get("summary") or payload.get("result_summary")
                                or payload.get("title") or "")[:2000],
                 "dispatch_idempotency_key": f"controller:{job['id']}:{event_id}",
@@ -184,6 +187,7 @@ def enqueue_mission_callback(payload: dict[str, Any]) -> dict | None:
             # the controller must see the revised evidence on its next turn.
             if entry.get("superseded_by") != successor:
                 entry["superseded_by"] = successor
+                entry["revision"] = int(entry.get("revision", 0)) + 1
                 entry["revised_at"] = jobs._hermes_now().isoformat()
                 if entry.get("handled_at"):
                     entry.pop("handled_at", None)
@@ -253,7 +257,7 @@ def pending_callbacks(job_id: str, *, max_chars: int = 6000) -> dict:
         return {
             "event_ids": [entry["id"] for entry in entries],
             "event_versions": {
-                entry["id"]: entry.get("revised_at") or entry["received_at"]
+                entry["id"]: entry.get("revision", 0)
                 for entry in entries
             },
             "prompt": (
@@ -264,7 +268,7 @@ def pending_callbacks(job_id: str, *, max_chars: int = 6000) -> dict:
 
 
 def acknowledge_callbacks(job_id: str, event_ids: list[str], *, success: bool,
-                          event_versions: dict[str, str] | None = None) -> None:
+                          event_versions: dict[str, int] | None = None) -> None:
     """Acknowledge exactly the successfully handled snapshot, not later arrivals."""
     if not success or not event_ids:
         return
@@ -277,7 +281,7 @@ def acknowledge_callbacks(job_id: str, event_ids: list[str], *, success: bool,
         now = jobs._hermes_now().isoformat()
         for entry in job.get("controller_callbacks", []):
             expected = (event_versions or {}).get(entry["id"])
-            current = entry.get("revised_at") or entry.get("received_at")
+            current = entry.get("revision", 0)
             if (entry["id"] in wanted and not entry.get("handled_at")
                     and (expected is None or expected == current)):
                 entry["handled_at"] = now

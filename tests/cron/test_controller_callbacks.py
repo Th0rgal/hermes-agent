@@ -171,6 +171,31 @@ def test_late_supersession_reopens_an_acknowledged_receipt():
     assert successor in relay.pending_callbacks(job_id)["prompt"]
 
 
+def test_acknowledgement_does_not_consume_a_receipt_revised_after_snapshot(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    receipt = relay.enqueue_mission_callback(event())
+    snapshot = relay.pending_callbacks(job_id)
+
+    now += timedelta(seconds=1)
+    successor = "f43e7dec-7143-4902-8b00-968a2b715dae"
+    relay.enqueue_mission_callback(event(tags=["superseded_by:" + successor]))
+    relay.acknowledge_callbacks(
+        job_id,
+        snapshot["event_ids"],
+        success=True,
+        event_versions=snapshot["event_versions"],
+    )
+
+    entry = jobs.get_job(job_id)["controller_callbacks"][0]
+    assert entry["id"] == receipt["event_id"]
+    assert not entry.get("handled_at")
+    assert relay.pending_callbacks(job_id)["event_ids"] == [receipt["event_id"]]
+
+
 def test_incomplete_summary_retains_input_without_immediate_replay():
     job_id = controller()
     relay.enqueue_mission_callback(event())

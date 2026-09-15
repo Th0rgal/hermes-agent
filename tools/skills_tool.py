@@ -1101,6 +1101,9 @@ def skill_view(
         preprocess: Apply configured SKILL.md template and inline shell rendering
             to main skill content. Internal slash/preload callers disable this
             because they render the skill message themselves.
+        capture_prerequisites: Prompt for missing requirements and register
+            available requirements for execution. Validation callers disable
+            this to inspect skill readiness without changing session state.
 
     Returns:
         JSON string with skill content or error message
@@ -1725,8 +1728,11 @@ def skill_view(
             if not e.get("optional")
             and not _is_env_var_persisted(e["name"], env_snapshot)
         ]
-        capture_result = ({"missing_names": [e["name"] for e in missing_required_env_vars]}
-                          if not capture_prerequisites else
+        capture_result = ({
+            "missing_names": [e["name"] for e in missing_required_env_vars],
+            "setup_skipped": False,
+            "gateway_setup_hint": None,
+        } if not capture_prerequisites else
                           _capture_required_environment_variables(
                               skill_name, missing_required_env_vars,
                           ))

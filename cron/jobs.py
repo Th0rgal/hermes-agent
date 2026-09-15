@@ -2351,6 +2351,7 @@ def create_job(
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     failure_deliver: Optional[str] = None,
+    controller: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -2358,6 +2359,8 @@ def create_job(
     Args:
         prompt: The prompt to run (must be self-contained, or a task instruction when skill is set).
                 Ignored when ``no_agent=True`` except as an optional name hint.
+        controller: Optional explicit project authority. Its stored prompt and
+                full skill preload must pass admission before persistence.
         schedule: Schedule string (see parse_schedule)
         name: Optional friendly name
         repeat: How many times to run (None = forever, 1 = once)
@@ -2588,6 +2591,12 @@ def create_job(
     # follow deliver, byte-identical to pre-feature jobs (NS-788).
     if normalized_failure_deliver is not None:
         job["failure_deliver"] = normalized_failure_deliver
+
+    if controller is not None:
+        job["controller"] = controller
+        from cron.controller_scope import validate_controller_job
+
+        validate_controller_job(job)
 
     with _jobs_lock():
         jobs = load_jobs()
@@ -2839,6 +2848,13 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     f"Cannot activate terminal cron job '{job.get('name', job_id)}' "
                     "through update_job; use cron resume --run-now or --at."
                 )
+
+            # Validate the merged definition, before persistence. Administrative
+            # metadata edits and pausing remain available for damaged legacy jobs.
+            if {"controller", "prompt", "skills", "skill", "deliver", "no_agent"}.intersection(updates):
+                from cron.controller_scope import validate_controller_job
+
+                validate_controller_job(updated)
 
             jobs[i] = updated
             save_jobs(jobs)

@@ -237,6 +237,102 @@ def test_stable_context_precedes_real_preloaded_skill_and_budget(tmp_path, monke
     assert scheduler._build_job_prompt(ordinary) == plain
 
 
+def test_controller_update_rejects_oversized_prompt_without_changing_job():
+    from cron import jobs
+
+    saved = jobs.create_job("Inspect project receipts.", "every 10m")
+    config = job()["controller"]
+    before = jobs.get_job(saved["id"])
+    with pytest.raises(ControllerScopeError, match="maximum is 16000"):
+        jobs.update_job(saved["id"], {"controller": config, "prompt": "x" * 21614})
+    assert jobs.get_job(saved["id"]) == before
+
+
+def test_controller_update_counts_real_skill_preload(tmp_path, monkeypatch):
+    from cron import jobs
+    import tools.skills_tool as skills_tool
+
+    skills_dir = tmp_path / "skills"
+    skill = skills_dir / "oversized-controller" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: oversized-controller\ndescription: Inspect receipts.\n---\n" + "x" * 160000)
+    monkeypatch.setattr(skills_tool, "SKILLS_DIR", skills_dir)
+    saved = jobs.create_job("Inspect project receipts.", "every 10m")
+    before = jobs.get_job(saved["id"])
+    with pytest.raises(ControllerScopeError, match="maximum is 16000"):
+        jobs.update_job(saved["id"], {
+            "controller": job()["controller"], "skills": ["oversized-controller"],
+        })
+    assert jobs.get_job(saved["id"]) == before
+
+
+def test_controller_creation_validates_before_persistence():
+    from cron import jobs
+
+    with pytest.raises(ControllerScopeError, match="maximum is 16000"):
+        jobs.create_job("x" * 21614, "every 10m", controller=job()["controller"])
+    assert jobs.load_jobs() == []
+    saved = jobs.create_job("Inspect receipts.", "every 10m", controller=job()["controller"])
+    assert jobs.get_job(saved["id"])["controller"] == job()["controller"]
+
+
+def test_admission_does_not_execute_scripts_or_consume_callbacks(monkeypatch):
+    from cron import jobs
+    from cron.controller_scope import validate_controller_job
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Admission must not execute runtime inputs")
+
+    monkeypatch.setattr(scheduler, "_run_job_script", forbidden)
+    monkeypatch.setattr("cron.notepad.render_notepad_section", forbidden)
+    monkeypatch.setattr("cron.controller_callbacks.pending_callbacks", forbidden)
+    config = job(script="collect.py", context_from="self")
+    validate_controller_job(config)
+    assert jobs.load_jobs() == []
+
+
+def test_legacy_invalid_controller_can_be_paused_and_repaired():
+    from cron import jobs
+
+    saved = jobs.create_job("Inspect receipts.", "every 10m", controller=job()["controller"])
+    with jobs._jobs_lock():
+        records = jobs.load_jobs()
+        records[0]["prompt"] = "x" * 21614
+        jobs.save_jobs(records)
+    assert jobs.pause_job(saved["id"])["state"] == "paused"
+    repaired = jobs.update_job(saved["id"], {"prompt": "Inspect receipts."})
+    assert repaired["state"] == "paused"
+    assert repaired["controller"] == saved["controller"]
+
+
+def test_admission_counts_bundle_members_without_inline_shell(tmp_path, monkeypatch):
+    from cron.controller_scope import validate_controller_job
+    from agent import skill_bundles, skill_commands
+    import tools.skills_tool as skills_tool
+
+    skills_dir = tmp_path / "skills"
+    skill = skills_dir / "member" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: member\ndescription: Inspect receipts.\n---\nInspect !`echo receipts`.\n")
+    monkeypatch.setattr(skills_tool, "SKILLS_DIR", skills_dir)
+    monkeypatch.setenv("HERMES_BUNDLES_DIR", str(tmp_path / "bundles"))
+    skill_bundles.save_bundle("controller-bundle", ["member"])
+    monkeypatch.setattr(skill_commands, "_load_skills_config", lambda: {"inline_shell": True})
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Admission must not expand inline shell")
+
+    monkeypatch.setattr(skill_commands, "_expand_inline_shell", forbidden)
+    usage_calls = []
+    monkeypatch.setattr("tools.skill_usage.bump_use", lambda *args, **kwargs: usage_calls.append(args))
+    config = job(skills=["controller-bundle"])
+    validate_controller_job(config)
+    skill.write_text(skill.read_text() + "x" * 160000)
+    with pytest.raises(ControllerScopeError, match="maximum is 16000"):
+        validate_controller_job(config)
+    assert usage_calls == []
+
+
 @pytest.fixture
 def local_scheduler(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))

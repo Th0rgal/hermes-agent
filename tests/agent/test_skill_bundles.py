@@ -183,6 +183,28 @@ class TestBuildBundleInvocationMessage:
             ("skill-b", {"task_id": "task-bundle"}),
         ]
 
+    def test_validation_only_bundle_loads_prerequisites_read_only(self, bundles_env, monkeypatch):
+        bundles_dir, skills_dir = bundles_env
+        _make_skill(skills_dir, "skill-a")
+        _make_bundle_yaml(bundles_dir, "combo", ["skill-a"])
+        scan_bundles()
+        import agent.skill_commands as skill_commands
+
+        real_load = skill_commands._load_skill_payload
+        calls = []
+
+        def capture_load(identifier, task_id=None, *, capture_prerequisites=True):
+            calls.append(capture_prerequisites)
+            return real_load(
+                identifier,
+                task_id=task_id,
+                capture_prerequisites=capture_prerequisites,
+            )
+
+        monkeypatch.setattr(skill_commands, "_load_skill_payload", capture_load)
+        assert build_bundle_invocation_message("/combo", validation_only=True) is not None
+        assert calls == [False]
+
     def test_skips_missing_skills(self, bundles_env):
         bundles_dir, skills_dir = bundles_env
         _make_skill(skills_dir, "skill-a")

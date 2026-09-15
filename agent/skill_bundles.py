@@ -308,7 +308,11 @@ def build_bundle_invocation_message(
             continue
         seen.add(identifier)
 
-        loaded = _load_skill_payload(identifier, task_id=task_id)
+        loaded = _load_skill_payload(
+            identifier,
+            task_id=task_id,
+            capture_prerequisites=not validation_only,
+        )
         if not loaded:
             missing.append(identifier)
             continue

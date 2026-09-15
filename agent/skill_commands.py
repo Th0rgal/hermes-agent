@@ -229,7 +229,12 @@ def _resolve_skill_commands_home() -> str:
     return str(get_hermes_home())
 
 
-def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tuple[dict[str, Any], Path | None, str] | None:
+def _load_skill_payload(
+    skill_identifier: str,
+    task_id: str | None = None,
+    *,
+    capture_prerequisites: bool = True,
+) -> tuple[dict[str, Any], Path | None, str] | None:
     """Load a skill by name/path and return (loaded_payload, skill_dir, display_name)."""
     raw_identifier = (skill_identifier or "").strip()
     if not raw_identifier:
@@ -242,7 +247,12 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
         normalized = normalize_skill_lookup_name(raw_identifier)
 
         loaded_skill = json.loads(
-            skill_view(normalized, task_id=task_id, preprocess=False)
+            skill_view(
+                normalized,
+                task_id=task_id,
+                preprocess=False,
+                capture_prerequisites=capture_prerequisites,
+            )
         )
     except Exception:
         return None

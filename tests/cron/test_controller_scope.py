@@ -718,3 +718,29 @@ def test_existing_controller_repair_preserves_latest_owner_edits():
     assert repaired["name"] == "Latest owner edit"
     assert repaired["controller"] == saved["controller"]
     assert repaired["skills"] == saved["skills"]
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_project_delivery_does_not_enroll_legacy_cron(explicit_null):
+    from cron import jobs, controller_callbacks
+    from cron.controller_scope import validate_controller_job, check_prompt_budget
+    from cron.controller_repair import export_repair
+
+    saved = jobs.create_job("x" * 24646, "every 10m", deliver="project:verity-core")
+    if explicit_null:
+        saved = jobs.update_job(saved["id"], {"controller": None})
+    assert scope_from_job(saved) is None
+    assert controller_project(saved) is None
+    assert controller_callbacks.controller_project(saved) is None
+    assert validate_controller_job(saved) is None
+    assert check_prompt_budget(None, saved["prompt"]) == saved["prompt"]
+    edited = jobs.update_job(saved["id"], {"prompt": "x" * 25000})
+    assert len(edited["prompt"]) == 25000
+    assert edited.get("controller") is None
+    assert controller_callbacks.enqueue_mission_callback({
+        "project": "verity-core", "mission_id": list(MISSIONS)[0],
+        "status": "completed", "event_id": "legacy-discovery",
+    }) is None
+    assert not jobs.get_job(saved["id"]).get("controller_callbacks")
+    with pytest.raises(ValueError, match="Existing controller job required"):
+        export_repair(saved["id"])

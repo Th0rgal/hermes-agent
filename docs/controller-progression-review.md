@@ -31,7 +31,9 @@ No new model tool, project store, polling worker or writer is introduced here.
    uses the existing assembler, including controller/cron framing and full
    skill/bundle contents, without executing scripts/inline shell, recording
    skill usage or installing cache boundaries. It does not truncate instructions
-   or change authority. Damaged legacy jobs can still be paused and repaired.
+   or change authority. Already-enrolled legacy controllers can still be paused
+   and repaired. Jobs with missing/null controller metadata are not covered by
+   this admission path; project delivery alone does not enroll them.
    Dynamic output and template expansion are checked again at runtime; static
    admission is not a promise that future external input will fit.
 
@@ -180,8 +182,9 @@ export/reconciliation. Only the prompt changes; scope, skills, tools and pause
 state remain intact. This is a review artifact, not another authoritative job
 store. No automatic truncation or semantic equivalence claim is made. Lido's
 reported 24,646-character raw prompt, four errors, empty skills and MCP toolset
-need an owner-reviewed replacement; no live Lido record was read or changed by
-this repair implementation.
+require a fresh, independent controller-metadata readback before selecting a
+repair path. Prompt size and prior failures do not establish enrollment. No live
+Lido record was read or changed by this repair implementation.
 
 Remaining boundaries include native canonical enrollment, producer handling of
 409 responses, post-append wake-task failure/process-crash recovery, and native workspace,
@@ -270,3 +273,80 @@ header line. A regression reproduced the prefix loss; 71 routing/readback and
 per-execution delegation tests passed after the fix (15.1s). Logs:
 output/exact-event-before.log and output/exact-event-after.log. This remains
 bounded transcript dedupe, not a claim of a global durable event index.
+
+
+## Operator review: legacy enrollment is a concrete residual
+
+**Verity e594d751447d is not proven covered by controller admission.** The final
+operator readback reports controller=null, enabled=true, deliver=project:verity-core
+and a successful 12:10+02 tick. These are operator observations, not a production
+read performed from this isolated checkout. Successful last_status does not prove
+controller enrollment or downstream dispatch/delivery. The source path is exact:
+
+| Boundary | Missing or null controller metadata |
+| --- | --- |
+| _controller_config / scope_from_job | Return None; no inference from job name, prompt, model or project delivery. |
+| controller_scope.controller_project | Returns None before parsing the delivery project. |
+| create_job | Calls controller validation only when a controller argument is supplied. |
+| update_job | Relevant edits call validate_controller_job, but that returns immediately for scope=None. |
+| scheduler.run_job / _build_job_prompt | Binds no controller authority; adds no controller prefix; controller-specific 16K check receives None and is inactive. Other ordinary-cron/runtime limits may still apply. |
+| controller_callbacks.controller_project | Requires an object with callback_relay=true; null jobs are not selected as controller inbox owners. |
+| controller_repair export | Rejects jobs without controller metadata. This is an enrolled-controller prompt repair, not legacy discovery/enrollment. |
+
+The regression covers absent and explicit-null metadata, project delivery,
+creation/edit above 16K, no callback-inbox discovery, and rejection by the repair
+export. It deliberately preserves ordinary cron behavior. Therefore PR136 must
+not be represented as protecting the reported live Verity cron through its
+controller admission or authority checks. Conversation-level webhook safeguards
+are separate from this enrollment claim.
+
+### Enrollment plan that preserves existing authority
+
+1. Obtain fresh read-only snapshots of Verity and Lido independently, recording
+   timestamp/profile/store identity, full current instructions, controller field,
+   skills/toolsets, delivery route and execution state. Compare each original
+   snapshot at apply time; reconcile concurrent operator edits rather than
+   replacing them with an older proposal. Lido 08d84a9565f1 currently remains
+   **unverified** here: no live cron store or cron-read API is available in this
+   checkout; its controller field was requested separately. Do not infer it
+   from Verity, its prompt length, or earlier error counts.
+2. Inventory Verity's two explicitly authorized support missions in
+   sandboxed-sh-dev by exact mission/run identity and permitted operations.
+   Keep their existing owners, receipts and active executions. A delivery route
+   to verity-core is not authority to relabel all sandboxed-sh-dev work.
+3. Resolve proper native project ownership before proposing controller metadata.
+   If the support missions correctly belong to sandboxed-sh-dev, keep that
+   ownership. Current single-project ControllerScope cannot represent those
+   cross-project exceptions: it would reject their native ownership readbacks.
+   Do not enroll Verity blindly, alias the projects together, grant blanket
+   sandboxed-sh-dev authority, or remove the authorized support work from its
+   instructions to make validation pass.
+4. Prepare a separately reviewed representation of the existing exception:
+   mission-bound delegated grants (exact IDs, operation allowlist, expiry and
+   ownership readback), or supervision by an existing appropriate project owner
+   with explicit evidence handoff to core. This is a design prerequisite, not
+   authority already implemented by this PR. Preserve one writer owner; no new
+   autonomous supervisory job or mission is created by this plan.
+5. Only once the authority representation is supported and owner-reviewed, stage
+   a complete enrollment proposal against the latest snapshot. Validate full
+   assembly and positive tests for the two authorized missions, negative tests
+   for unrelated dev missions, callback routing, and no duplicate dispatch.
+   Apply through a separate authorized rollout using stale-snapshot protection;
+   verify metadata and the first tick's native execution/delivery receipts.
+   Deployment, enrollment and live prompt edits are not performed in this PR.
+
+### Execution evidence and checkpoint provenance
+
+The operator reports successful attachment to the **same** Nippur remote job
+76be660b through durable 5b591f10 (root durable e6456cfa), with no duplicate compute.
+Record that as reuse of existing execution, not permission to launch a replacement
+or claim all callback/enrollment paths safe. No such job was resumed or mutated
+by this follow-up. Full durable/remote identities were not independently queried.
+
+The operator/root's 3c552d7 plus 512-test receipt remains a valid historical
+checkpoint. At the start of this follow-up GitHub PR136 instead reported head
+a0f639c, with 696 local tests and green CI/Nix. These are later source checkpoints,
+not evidence of any production deployment. This follow-up changes documentation
+and regression coverage only; the live null-metadata gap remains explicit.
+
+Follow-up validation: **134 passed, 0 failed**, two files in 14.2s via `scripts/run_tests.sh tests/cron/test_controller_scope.py tests/cron/test_controller_callbacks.py -j 2`. Log: output/legacy-enrollment-tests.log.

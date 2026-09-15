@@ -196,6 +196,51 @@ def test_acknowledgement_does_not_consume_a_receipt_revised_after_snapshot(monke
     assert relay.pending_callbacks(job_id)["event_ids"] == [receipt["event_id"]]
 
 
+def test_deferral_does_not_delay_a_receipt_revised_after_snapshot(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    receipt = relay.enqueue_mission_callback(event())
+    snapshot = relay.pending_callbacks(job_id)
+
+    now += timedelta(seconds=1)
+    relay.enqueue_mission_callback(
+        event(tags=["superseded_by:f43e7dec-7143-4902-8b00-968a2b715dae"])
+    )
+    relay.defer_callbacks(
+        job_id,
+        snapshot["event_ids"],
+        captured_versions=snapshot["captured_versions"],
+    )
+
+    entry = jobs.get_job(job_id)["controller_callbacks"][0]
+    assert entry["id"] == receipt["event_id"]
+    assert not entry.get("retry_after")
+
+
+def test_early_wake_snapshots_fresh_callbacks_before_deferred_backlog(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    for index in range(3):
+        relay.enqueue_mission_callback(event(index, summary="x" * 2000))
+    backlog = relay.pending_callbacks(job_id, max_chars=3200)
+    relay.defer_callbacks(
+        job_id,
+        backlog["event_ids"],
+        captured_versions=backlog["captured_versions"],
+    )
+
+    now += timedelta(seconds=1)
+    fresh = relay.enqueue_mission_callback(event(9, summary="fresh evidence"))
+    early_snapshot = relay.pending_callbacks(job_id, max_chars=3200)
+    assert early_snapshot["event_ids"][0] == fresh["event_id"]
+
+
 def test_incomplete_summary_retains_input_without_immediate_replay():
     job_id = controller()
     relay.enqueue_mission_callback(event())

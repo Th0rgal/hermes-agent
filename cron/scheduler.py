@@ -6420,6 +6420,7 @@ def _run_job(
 
     callback_event_ids = []
     callback_event_versions = {}
+    callback_captured_versions = {}
     try:
         prompt = _build_job_prompt(
             job, prerun_script=prerun_script, extra_prompt=extra_prompt
@@ -6437,6 +6438,7 @@ def _run_job(
             )
             callback_event_ids = snapshot["event_ids"]
             callback_event_versions = snapshot.get("event_versions", {})
+            callback_captured_versions = snapshot.get("captured_versions", {})
             callback_prompt = snapshot["prompt"]
             if callback_prompt:
                 callback_prompt = _scan_assembled_cron_prompt(
@@ -7458,7 +7460,8 @@ def _run_job(
         elif callback_event_ids:
             from cron.controller_callbacks import defer_callbacks
 
-            defer_callbacks(job_id, callback_event_ids)
+            defer_callbacks(job_id, callback_event_ids,
+                            captured_versions=callback_captured_versions)
         return True, output, final_response, None
 
     except Exception as e:

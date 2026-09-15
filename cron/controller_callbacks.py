@@ -237,6 +237,24 @@ def pending_callbacks(job_id: str, *, max_chars: int = 6000) -> dict:
         entries = _pending(job) if job and _eligible(job) else []
         if not entries:
             return {"event_ids": [], "prompt": ""}
+        # An early wake is authorized by ready input. Do not let a large
+        # deferred backlog hide that fresh evidence behind the prompt cap.
+        now_dt = jobs._hermes_now()
+
+        def is_ready(entry: dict) -> bool:
+            retry_at = entry.get("retry_after")
+            if not retry_at:
+                return True
+            try:
+                return jobs._ensure_aware(datetime.fromisoformat(retry_at)) <= now_dt
+            except (TypeError, ValueError):
+                return False
+
+        entries.sort(key=lambda entry: not is_ready(entry))
+        captured_versions = {
+            entry["id"]: entry.get("revision", 0)
+            for entry in entries
+        }
         # Keep the controller's bounded prompt usable during completion bursts.
         # Unselected entries remain durable for the next successful turn.
         selected = []
@@ -260,6 +278,9 @@ def pending_callbacks(job_id: str, *, max_chars: int = 6000) -> dict:
                 entry["id"]: entry.get("revision", 0)
                 for entry in entries
             },
+            # Include the bounded tail too: an incomplete turn defers every
+            # snapshot member, but must leave a post-snapshot revision ready.
+            "captured_versions": captured_versions,
             "prompt": (
                 _CALLBACK_GUIDANCE
                 + json.dumps(entries, ensure_ascii=False)
@@ -289,7 +310,8 @@ def acknowledge_callbacks(job_id: str, event_ids: list[str], *, success: bool,
         jobs.save_jobs(records)
 
 
-def defer_callbacks(job_id: str, event_ids: list[str]) -> None:
+def defer_callbacks(job_id: str, event_ids: list[str], *,
+                    captured_versions: dict[str, int] | None = None) -> None:
     """An incomplete model turn retains input but must not spin on every tick."""
     with jobs._jobs_lock():
         records = jobs.load_jobs()
@@ -311,10 +333,13 @@ def defer_callbacks(job_id: str, event_ids: list[str]) -> None:
             # and repeatedly replays the same incomplete batch.
             try:
                 captured = boundary and jobs._ensure_aware(
-                    datetime.fromisoformat(entry["received_at"])
+                    datetime.fromisoformat(entry.get("revised_at") or entry["received_at"])
                 ) <= jobs._ensure_aware(datetime.fromisoformat(boundary))
             except (KeyError, TypeError, ValueError):
                 captured = entry["id"] in selected_ids
+            expected_revision = (captured_versions or {}).get(entry["id"])
+            if expected_revision is not None:
+                captured = expected_revision == entry.get("revision", 0)
             if captured:
                 entry["retry_after"] = retry_at
         jobs.save_jobs(records)

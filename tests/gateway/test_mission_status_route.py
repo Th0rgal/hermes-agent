@@ -481,6 +481,17 @@ def test_callback_dedupe_survives_a_multiline_external_title():
     assert append_mission_callback("s", payload, db) == ("s", False)
 
 
+def test_callback_dedupe_absorbs_late_supersession_evidence_once():
+    db = _FakeSessionDBWithMessages({"s": {"source": "desktop"}})
+    payload = {"mission_id": "mission-a", "status": "failed", "event_id": "evt-revision"}
+    successor = "f43e7dec-7143-4902-8b00-968a2b715dae"
+    assert append_mission_callback("s", payload, db) == ("s", True)
+    revised = {**payload, "tags": ["superseded_by:" + successor]}
+    assert append_mission_callback("s", revised, db) == ("s", True)
+    assert append_mission_callback("s", revised, db) == ("s", False)
+    assert sum("declared successor=" + successor in row["content"] for row in db.messages["s"]) == 1
+
+
 def test_early_callback_backup_is_bounded_and_preserves_existing_evidence(monkeypatch):
     from gateway.platforms import mission_status_route as route
     monkeypatch.setattr(route, "_PENDING_MAX_RECORDS", 1)

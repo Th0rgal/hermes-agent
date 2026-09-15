@@ -519,13 +519,34 @@ def append_mission_callback(
                 return (len(lines) >= 2 and lines[0].startswith("[Mission callback:")
                         and header.fullmatch(lines[1]) is not None)
 
-            if any(matches(t) for t in texts):
-                logger.info(
-                    "duplicate mission callback event %s for %s — skipping append",
-                    event_id,
-                    live,
+            existing = [text for text in texts if matches(text)]
+            if existing:
+                # Native retry delivery may enrich a terminal event with its
+                # supersession relationship after the original callback was
+                # stored.  Keep unchanged retries idempotent, but append the
+                # new attempt evidence so the owning conversation is woken
+                # with the same revision the controller inbox receives.
+                successor = (
+                    (replacement_evidence or {}).get("mission_id")
+                    or extract_superseded_by(payload)
                 )
-                return live, False
+                successor_recorded = successor and any(
+                    f"declared successor={successor}." in text for text in existing
+                )
+                verified_now = bool(
+                    replacement_evidence
+                    and replacement_evidence.get("verified_live") is True
+                )
+                verified_recorded = any(
+                    "Replacement execution verified live" in text for text in existing
+                )
+                if not successor or (successor_recorded and (not verified_now or verified_recorded)):
+                    logger.info(
+                        "duplicate mission callback event %s for %s — skipping append",
+                        event_id,
+                        live,
+                    )
+                    return live, False
     content = format_mission_callback(payload, replacement_evidence=replacement_evidence)
     metadata = mission_callback_display_metadata(payload)
     if _last_message_role(session_db, live) == "assistant":

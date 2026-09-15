@@ -304,6 +304,49 @@ def test_incomplete_batch_does_not_defer_input_after_its_snapshot(monkeypatch):
     assert not entries[fresh["event_id"]].get("retry_after")
 
 
+@pytest.mark.parametrize("arrival_offset", [0, -1], ids=["same-clock", "backwards-clock"])
+def test_version_snapshot_never_defers_an_uncaptured_callback(monkeypatch, arrival_offset):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    captured = relay.enqueue_mission_callback(event())
+    snapshot = relay.pending_callbacks(job_id)
+    now += timedelta(seconds=arrival_offset)
+    unseen = relay.enqueue_mission_callback(event(2))
+
+    relay.defer_callbacks(
+        job_id, snapshot["event_ids"], captured_versions=snapshot["captured_versions"]
+    )
+
+    entries = {entry["id"]: entry for entry in jobs.get_job(job_id)["controller_callbacks"]}
+    assert entries[captured["event_id"]].get("retry_after")
+    assert not entries[unseen["event_id"]].get("retry_after")
+
+
+@pytest.mark.parametrize("arrival_offset", [0, -1], ids=["same-clock", "backwards-clock"])
+def test_uncaptured_version_snapshot_callback_authorizes_early_wake(monkeypatch, arrival_offset):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(jobs, "_hermes_now", lambda: now)
+    job_id = controller()
+    relay.enqueue_mission_callback(event())
+    snapshot = relay.pending_callbacks(job_id)
+    now += timedelta(seconds=arrival_offset)
+    relay.enqueue_mission_callback(event(2))
+    relay.defer_callbacks(
+        job_id, snapshot["event_ids"], captured_versions=snapshot["captured_versions"]
+    )
+    jobs.mark_job_run(job_id, success=False, error="incomplete callback turn")
+    retry_at = jobs.get_job(job_id)["next_run_at"]
+
+    relay.wake_pending_controllers()
+
+    assert jobs.get_job(job_id)["next_run_at"] < retry_at
+
+
 def test_revised_supersession_wakes_after_a_later_failed_run(monkeypatch):
     from datetime import datetime, timedelta, timezone
 

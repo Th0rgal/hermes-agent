@@ -3226,6 +3226,18 @@ def _mark_job_run_locked(
                 callback_boundary = job.pop("controller_callback_boundary_at", None)
                 if callback_boundary is not None or "last_controller_callback_boundary_at" in job:
                     job["last_controller_callback_boundary_at"] = callback_boundary or now
+                captured_versions = job.pop(
+                    "controller_callback_captured_versions", None
+                )
+                if not success and isinstance(captured_versions, dict):
+                    # An incomplete callback turn supplies an exact capture
+                    # map. Retain it for early-wake admission so same-clock or
+                    # backwards-clock arrivals are not mistaken for replay.
+                    job["last_controller_callback_captured_versions"] = captured_versions
+                else:
+                    # A successful/no-snapshot run must fall back to the
+                    # ordinary timestamp boundary; never reuse an older map.
+                    job.pop("last_controller_callback_captured_versions", None)
                 job.pop("manual_run_at", None)
                 # The transient manual-run context is single-fire: whatever
                 # run just completed consumed it (or superseded it).

@@ -98,13 +98,32 @@ def _wake(job: dict) -> None:
         # Do not pause/cancel work.
         if job.get("failure_streak") and job.get("last_run_at"):
             try:
-                last_run = jobs._ensure_aware(datetime.fromisoformat(
-                    job.get("last_controller_callback_boundary_at") or job["last_run_at"]
-                ))
-                if not any(jobs._ensure_aware(datetime.fromisoformat(
-                        entry.get("revised_at") or entry["received_at"]
-                    )) > last_run
-                           for entry in ready):
+                captured_versions = job.get(
+                    "last_controller_callback_captured_versions"
+                )
+                if isinstance(captured_versions, dict):
+                    # A supplied snapshot is authoritative: a missing ID or
+                    # changed revision is evidence the failed turn did not
+                    # see, even when producer clocks tie or move backwards.
+                    fresh = any(
+                        entry["id"] not in captured_versions
+                        or captured_versions[entry["id"]] != entry.get("revision", 0)
+                        for entry in ready
+                    )
+                else:
+                    # Legacy callers have no version snapshot. Preserve their
+                    # timestamp boundary behaviour rather than inferring a
+                    # capture set from incomplete information.
+                    last_run = jobs._ensure_aware(datetime.fromisoformat(
+                        job.get("last_controller_callback_boundary_at") or job["last_run_at"]
+                    ))
+                    fresh = any(
+                        jobs._ensure_aware(datetime.fromisoformat(
+                            entry.get("revised_at") or entry["received_at"]
+                        )) > last_run
+                        for entry in ready
+                    )
+                if not fresh:
                     return
             except (KeyError, TypeError, ValueError):
                 return  # Unknown age is not evidence authorizing an early retry.
@@ -329,6 +348,16 @@ def defer_callbacks(job_id: str, event_ids: list[str], *,
         # never saw until the ordinary schedule.
         boundary = job.get("controller_callback_boundary_at")
         selected_ids = set(event_ids)
+        if captured_versions is not None:
+            # Preserve the exact run snapshot for the completion path. This is
+            # deliberately distinct from the selected prompt prefix: bounded
+            # tails were captured and must be deferred, while an absent ID was
+            # not captured regardless of its producer timestamp.
+            job["controller_callback_captured_versions"] = dict(captured_versions)
+        else:
+            # Legacy callers rely on the timestamp boundary. They must not
+            # inherit a version map left by an earlier incomplete run.
+            job.pop("controller_callback_captured_versions", None)
         for entry in _pending(job):
             # The model saw only a bounded prefix.  Holding back only that
             # prefix leaves an unselected tail ready, which wakes every tick
@@ -339,9 +368,11 @@ def defer_callbacks(job_id: str, event_ids: list[str], *,
                 ) <= jobs._ensure_aware(datetime.fromisoformat(boundary))
             except (KeyError, TypeError, ValueError):
                 captured = entry["id"] in selected_ids
-            expected_revision = (captured_versions or {}).get(entry["id"])
-            if expected_revision is not None:
-                captured = expected_revision == entry.get("revision", 0)
+            if captured_versions is not None:
+                captured = (
+                    entry["id"] in captured_versions
+                    and captured_versions[entry["id"]] == entry.get("revision", 0)
+                )
             if captured:
                 entry["retry_after"] = retry_at
         jobs.save_jobs(records)

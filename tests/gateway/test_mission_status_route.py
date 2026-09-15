@@ -499,3 +499,50 @@ def test_ordinary_completed_callback_has_no_replacement_claim():
     assert "status=completed" in text
     assert "replacement execution" not in text.lower()
     assert "Superseded attempt" not in text
+
+
+def test_pending_backup_lock_recovers_after_process_exit(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    import sys
+    from gateway.platforms import mission_status_route as route
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    payload = {"mission_id": "crash-lock", "status": "completed"}
+    assert route.stash_unroutable_callback("crash-lock", payload)
+    lock = route._pending_callback_path("crash-lock").parent / ".mutation-lock"
+    child = subprocess.run(
+        [sys.executable, "-c", """
+import os, sys
+from gateway.status import _try_acquire_file_lock
+handle = open(sys.argv[1], 'a+', encoding='utf-8')
+assert _try_acquire_file_lock(handle)
+os._exit(0)
+""", str(lock)], env=os.environ.copy(), timeout=15, capture_output=True,
+    )
+    assert child.returncode == 0, child.stderr
+    assert route.take_stashed_callback("crash-lock", expected_payload=payload) == payload
+    assert route.stash_unroutable_callback("crash-lock", payload)
+
+
+def test_pending_backup_refuses_live_and_legacy_locks(tmp_path, monkeypatch):
+    from gateway.platforms import mission_status_route as route
+    from gateway.status import _try_acquire_file_lock, _release_file_lock
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    payload = {"mission_id": "live-lock", "status": "completed"}
+    assert route.stash_unroutable_callback("live-lock", payload)
+    lock = route._pending_callback_path("live-lock").parent / ".mutation-lock"
+    with lock.open("a+", encoding="utf-8") as handle:
+        assert _try_acquire_file_lock(handle)
+        try:
+            assert not route.stash_unroutable_callback("other", payload)
+            assert route.take_stashed_callback("live-lock") is None
+        finally:
+            _release_file_lock(handle)
+    assert route.peek_stashed_callback("live-lock") == payload
+    lock.unlink()
+    lock.mkdir()
+    assert not route.stash_unroutable_callback("other", payload)
+    assert route.take_stashed_callback("live-lock") is None
+    assert lock.is_dir()

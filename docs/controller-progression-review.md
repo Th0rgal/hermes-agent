@@ -448,3 +448,25 @@ The crash-held directory lock still requires explicit repair; native lifetime
 retry bounds, fresh Lido metadata and authority-preserving Verity enrollment remain
 open. No CI polling, merge, deployment or live job changes. Independent review is
 pending; the operator reports Fable quota-blocked until 2026-09-16T15:00Z.
+
+## Process-owned backup lock
+
+Backup mutations now reuse the gateway's cross-platform nonblocking OS lock helper
+on a persistent lock file. Process exit releases ownership automatically; the file
+is never unlinked during normal operation, preserving one lock inode for concurrent
+writers. Acquisition failures still refuse backup work immediately. A real child
+process exits without cleanup in the regression, after which backup consumption
+and storage succeed; a live lock blocks both operations without consuming evidence.
+
+Legacy `.mutation-lock` directories remain fail-closed. Migration requires stopping
+all old backup writers, verifying none remain, removing only the confirmed obsolete
+empty lock directory, and then starting the new implementation. Never perform this
+conversion alongside old writers or infer abandonment from elapsed time. No live
+migration was performed. This closes new-process crash-held locks, not mixed-version
+migration or power-loss durability. Native lifetime retries, fresh Lido metadata,
+authority-preserving Verity enrollment and independent review remain open.
+
+85 tests passed across four files in 15.9 seconds, no flaky retries; log
+`output/orphan-process-lock-tests.log`. Lint and whitespace checks passed. Validation
+ran on Linux; the shared Windows lock helper was not independently executed here.
+No CI polling, merge or deployment.

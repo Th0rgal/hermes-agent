@@ -586,15 +586,20 @@ def stash_unroutable_callback(mission_id: str, payload: dict) -> bool:
     path = _pending_callback_path(mid)
     lock = path.parent / ".mutation-lock"
     acquired = False
+    handle = None
     try:
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         if len(encoded) > _PENDING_MAX_BYTES:
             return False
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic across processes, no blocking wait. A crash-held lock refuses
-        # backup writes until repaired; producers retain unaccepted events.
-        lock.mkdir()
-        acquired = True
+        # Keep the lock inode: the OS releases ownership even on process death.
+        # A legacy directory at this path fails closed; never steal its lock.
+        from gateway.status import _try_acquire_file_lock
+
+        handle = lock.open("a+", encoding="utf-8")
+        acquired = _try_acquire_file_lock(handle)
+        if not acquired:
+            return False
         if path.exists():
             if path.stat().st_size > _PENDING_MAX_BYTES:
                 return False
@@ -612,8 +617,12 @@ def stash_unroutable_callback(mission_id: str, payload: dict) -> bool:
         logger.debug("pending callback backup refused for %s", mid, exc_info=True)
         return False
     finally:
-        if acquired:
-            lock.rmdir()
+        if handle is not None:
+            if acquired:
+                from gateway.status import _release_file_lock
+
+                _release_file_lock(handle)
+            handle.close()
 
 
 def peek_stashed_callback(mission_id: str) -> Optional[dict]:
@@ -635,9 +644,14 @@ def _read_stashed_callback(
     path = _pending_callback_path(mid)
     lock = path.parent / ".mutation-lock"
     acquired = False
+    handle = None
     try:
-        lock.mkdir()
-        acquired = True
+        from gateway.status import _try_acquire_file_lock
+
+        handle = lock.open("a+", encoding="utf-8")
+        acquired = _try_acquire_file_lock(handle)
+        if not acquired:
+            return None
         if not path.exists() or path.stat().st_size > _PENDING_MAX_BYTES:
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -652,5 +666,9 @@ def _read_stashed_callback(
         logger.debug("pending callback backup unavailable for %s", mid, exc_info=True)
         return None
     finally:
-        if acquired:
-            lock.rmdir()
+        if handle is not None:
+            if acquired:
+                from gateway.status import _release_file_lock
+
+                _release_file_lock(handle)
+            handle.close()

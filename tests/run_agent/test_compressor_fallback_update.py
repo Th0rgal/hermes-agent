@@ -24,6 +24,7 @@ def _make_agent_with_compressor() -> AIAgent:
     agent._fallback_model = {
         "provider": "openai",
         "model": "gpt-4o",
+        "max_tokens": 8192,
     }
     agent._fallback_chain = [agent._fallback_model]
     agent._fallback_index = 0
@@ -69,6 +70,25 @@ def test_compressor_updated_on_fallback(mock_ctx_len, mock_resolve):
     assert c.api_key == "sk-fallback"
     assert c.provider == "openai"
     assert c.context_length == 128_000
-    assert c.threshold_tokens == int(128_000 * c.threshold_percent)
+    assert agent.max_tokens == 8192
+    assert c.max_tokens == 8192
+    assert c.threshold_tokens == int((128_000 - 8192) * c.threshold_percent)
 
 
+@patch("agent.auxiliary_client.resolve_provider_client")
+@patch("agent.model_metadata.get_model_context_length", return_value=128_000)
+def test_uncapped_fallback_preserves_existing_caller_cap(mock_ctx_len, mock_resolve):
+    agent = _make_agent_with_compressor()
+    agent.max_tokens = 2048
+    agent._fallback_model.pop("max_tokens")
+
+    fb_client = MagicMock()
+    fb_client.base_url = "https://api.openai.com/v1"
+    fb_client.api_key = "sk-fallback"
+    mock_resolve.return_value = (fb_client, None)
+    agent._is_direct_openai_url = lambda url: "api.openai.com" in url
+    agent._emit_status = lambda msg: None
+
+    assert agent._try_activate_fallback() is True
+    assert agent.max_tokens == 2048
+    assert agent.context_compressor.max_tokens == 2048

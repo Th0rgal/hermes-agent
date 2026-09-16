@@ -1485,6 +1485,7 @@ def try_recover_primary_transport(
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
         agent.api_key = rt["api_key"]
+        agent.max_tokens = rt.get("max_tokens")
         agent._reasoning_echo_flag = rt.get("reasoning_echo_flag", False)
         agent.request_overrides = dict(rt.get("request_overrides") or {})
 
@@ -1748,6 +1749,7 @@ def restore_primary_runtime(agent) -> bool:
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
         agent.api_key = rt["api_key"]
+        agent.max_tokens = rt.get("max_tokens")
         if "runtime_capabilities" in rt:
             raw_capabilities = rt["runtime_capabilities"]
             if not isinstance(raw_capabilities, dict):
@@ -1807,13 +1809,17 @@ def restore_primary_runtime(agent) -> bool:
 
         # ── Restore context engine state ──
         cc = agent.context_compressor
-        cc.update_model(
+        from agent.context_engine import update_context_engine_model
+
+        update_context_engine_model(
+            cc,
             model=rt["compressor_model"],
             context_length=rt["compressor_context_length"],
             base_url=rt["compressor_base_url"],
             api_key=rt["compressor_api_key"],
             provider=rt["compressor_provider"],
             api_mode=rt.get("compressor_api_mode", ""),
+            max_tokens=agent.max_tokens,
         )
 
         # ── Rebind and re-select the primary credential pool ──
@@ -2984,6 +2990,9 @@ def _apply_switched_provider_request_overrides(agent, new_provider):
     agent.request_overrides = overrides
 
 
+_MAX_TOKENS_UNSET = object()
+
+
 def switch_model(
     agent,
     new_model,
@@ -2992,6 +3001,7 @@ def switch_model(
     base_url='',
     api_mode='',
     capabilities=None,
+    max_tokens=_MAX_TOKENS_UNSET,
 ):
     """Switch the model/provider in-place for a live agent.
 
@@ -3089,6 +3099,7 @@ def switch_model(
             "_config_context_length",
             "_reasoning_echo_flag",
             "runtime_capabilities",
+            "max_tokens",
         )
     }
     # _client_kwargs is a dict — snapshot a shallow copy so mutating the
@@ -3150,6 +3161,8 @@ def switch_model(
                 "refusing to keep the previous provider's endpoint"
             )
         agent.api_mode = api_mode
+        if max_tokens is not _MAX_TOKENS_UNSET:
+            agent.max_tokens = max_tokens
         # Invalidate transport cache — new api_mode may need a different transport
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
@@ -3373,13 +3386,17 @@ def switch_model(
                 config_context_length=_effective_context_length,
                 custom_providers=_sm_custom_providers,
             )
-            agent.context_compressor.update_model(
+            from agent.context_engine import update_context_engine_model
+
+            update_context_engine_model(
+                agent.context_compressor,
                 model=agent.model,
                 context_length=new_context_length,
                 base_url=agent.base_url,
                 api_key=agent.api_key,  # context_compressor forwards to call_llm; callable preserved
                 provider=agent.provider,
                 api_mode=agent.api_mode,
+                max_tokens=getattr(agent, "max_tokens", None),
             )
         except Exception:
             _restore_snapshot()
@@ -3438,6 +3455,7 @@ def switch_model(
         # overrides via the stale init-time snapshot (#75091 seam).
         "request_overrides": dict(getattr(agent, "request_overrides", {}) or {}),
         "runtime_capabilities": dict(getattr(agent, "runtime_capabilities", {}) or {}),
+        "max_tokens": getattr(agent, "max_tokens", None),
         "compressor_model": getattr(_cc, "model", agent.model) if _cc else agent.model,
         "compressor_base_url": getattr(_cc, "base_url", agent.base_url) if _cc else agent.base_url,
         "compressor_api_key": getattr(_cc, "api_key", "") if _cc else "",

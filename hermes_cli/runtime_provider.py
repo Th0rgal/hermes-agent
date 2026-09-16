@@ -747,19 +747,68 @@ def _lift_model_capabilities(
         result["capabilities"] = capabilities
 
 
-def _lift_max_output_tokens(entry: Dict[str, Any], result: Dict[str, Any]) -> None:
+def _lift_max_output_tokens(
+    entry: Dict[str, Any],
+    result: Dict[str, Any],
+    model: Optional[str] = None,
+) -> None:
     """Propagate a per-provider output cap onto the resolved runtime dict.
 
     Accepts ``max_output_tokens`` or ``max_tokens`` on a ``custom_providers``
     entry so a provider block can pin its own output limit. Gateway and CLI
     map this onto ``AIAgent.max_tokens`` only when the top-level
     ``model.max_tokens`` isn't set, so the documented global key still wins.
+
+    Precedence (first match wins):
+      1. ``providers.<name>.models.<model>.max_tokens``  (per-model)
+      2. ``providers.<name>.max_output_tokens``           (provider-level)
+      3. ``providers.<name>.max_tokens``                  (provider-level alias)
     """
+    if model:
+        models = entry.get("models")
+        model_config = models.get(model) if isinstance(models, dict) else None
+        if isinstance(model_config, dict):
+            for _k in ("max_output_tokens", "max_tokens"):
+                _v = model_config.get(_k)
+                if isinstance(_v, int) and not isinstance(_v, bool) and _v > 0:
+                    result["max_output_tokens"] = _v
+                    return
     for _k in ("max_output_tokens", "max_tokens"):
         _v = entry.get(_k)
-        if isinstance(_v, int) and _v > 0:
+        if isinstance(_v, int) and not isinstance(_v, bool) and _v > 0:
             result["max_output_tokens"] = _v
             return
+
+
+def _resolve_effective_max_output_tokens(
+    custom_provider: Dict[str, Any],
+    model: Optional[str],
+    result: Dict[str, Any],
+) -> None:
+    """Set ``result["max_output_tokens"]`` with per-model > per-provider precedence.
+
+    Called from ``_resolve_named_custom_runtime`` after the effective model is
+    known.  ``custom_provider`` is the dict returned by
+    ``_get_named_custom_provider`` — it carries both ``max_output_tokens``
+    (provider-level, already lifted) and ``_provider_models_config`` (raw
+    per-model blocks) so per-model caps can override.
+    """
+    models_config = custom_provider.get("_provider_models_config")
+    if model and isinstance(models_config, dict):
+        model_cfg = models_config.get(model)
+        if isinstance(model_cfg, dict):
+            for _k in ("max_output_tokens", "max_tokens"):
+                _v = model_cfg.get(_k)
+                if isinstance(_v, int) and not isinstance(_v, bool) and _v > 0:
+                    result["max_output_tokens"] = _v
+                    return
+    provider_mot = custom_provider.get("max_output_tokens")
+    if (
+        isinstance(provider_mot, int)
+        and not isinstance(provider_mot, bool)
+        and provider_mot > 0
+    ):
+        result["max_output_tokens"] = provider_mot
 
 
 def _lift_extra_headers(entry: Dict[str, Any], result: Dict[str, Any]) -> None:
@@ -876,7 +925,13 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                     api_mode = _parse_api_mode(entry.get("api_mode") or entry.get("transport"))
                     if api_mode:
                         result["api_mode"] = api_mode
+                    # Lift only the provider-level cap here. The raw per-model
+                    # mapping below is resolved later against the actual target
+                    # model, so a default model's cap cannot become provider-wide.
                     _lift_max_output_tokens(entry, result)
+                    _raw_models = entry.get("models")
+                    if isinstance(_raw_models, dict):
+                        result["_provider_models_config"] = _raw_models
                     capabilities = _filter_capabilities(entry.get("capabilities"))
                     if capabilities:
                         result["capabilities"] = capabilities
@@ -927,6 +982,9 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         if model_name:
             result["model"] = model_name
         _lift_max_output_tokens(entry, result)
+        _raw_models = entry.get("models")
+        if isinstance(_raw_models, dict):
+            result["_provider_models_config"] = _raw_models
         capabilities = _filter_capabilities(entry.get("capabilities"))
         if capabilities:
             result["capabilities"] = capabilities
@@ -1327,6 +1385,21 @@ def _resolve_named_custom_runtime(
     if not custom_provider:
         return None
 
+    # Gateway startup resolves the configured provider without passing a
+    # target_model.  In that path the model lives in model.default, not
+    # necessarily in providers.<name>.default_model.  Recover it only when
+    # this is the configured provider so a one-off provider override cannot
+    # inherit an unrelated model's cap.
+    effective_target_model = target_model
+    if not effective_target_model:
+        model_cfg = _get_model_config()
+        configured_provider = str(model_cfg.get("provider") or "").strip()
+        configured_norm = _normalize_custom_provider_name(configured_provider)
+        if configured_norm == requested_norm:
+            configured_model = str(model_cfg.get("default") or "").strip()
+            if configured_model:
+                effective_target_model = configured_model
+
     base_url = (
         (explicit_base_url or "").strip()
         or custom_provider.get("base_url", "")
@@ -1345,12 +1418,11 @@ def _resolve_named_custom_runtime(
         # Propagate the model name even when using pooled credentials —
         # the pool doesn't know about the custom_providers model field.
         # An explicit ``target_model`` wins (same rule as the non-pool path).
-        model_name = target_model or custom_provider.get("model")
+        model_name = effective_target_model or custom_provider.get("model")
         if model_name:
             pool_result["model"] = model_name
         _lift_model_capabilities(custom_provider, model_name, pool_result)
-        if isinstance(custom_provider.get("max_output_tokens"), int):
-            pool_result["max_output_tokens"] = custom_provider["max_output_tokens"]
+        _resolve_effective_max_output_tokens(custom_provider, model_name, pool_result)
         request_overrides = _custom_provider_request_overrides(custom_provider)
         if request_overrides:
             pool_result["request_overrides"] = {
@@ -1412,15 +1484,14 @@ def _resolve_named_custom_runtime(
     # default (regression: auxiliary slots / background-review resolve a
     # concrete model for a custom provider and must not silently fall back
     # to ``default_model``).
-    if target_model:
-        result["model"] = target_model
+    if effective_target_model:
+        result["model"] = effective_target_model
     elif custom_provider.get("model"):
         result["model"] = custom_provider["model"]
     _lift_model_capabilities(
         custom_provider, result.get("model"), result
     )
-    if isinstance(custom_provider.get("max_output_tokens"), int):
-        result["max_output_tokens"] = custom_provider["max_output_tokens"]
+    _resolve_effective_max_output_tokens(custom_provider, result.get("model"), result)
     # Per-provider extra HTTP headers (proxies, gateways, custom auth).
     # Values may carry credentials — NEVER log them.
     if custom_provider.get("extra_headers"):

@@ -107,7 +107,13 @@ def test_switch_model_clears_previous_config_context_length(mock_ctx_len):
     assert agent.context_compressor.context_length == 32_768  # From config override
 
     # Switch model
-    agent.switch_model("new-model", "openrouter", api_key="sk-new", base_url="https://openrouter.ai/api/v1")
+    agent.switch_model(
+        "new-model",
+        "openrouter",
+        api_key="sk-new",
+        base_url="https://openrouter.ai/api/v1",
+        max_tokens=8192,
+    )
 
     # Verify the old config override is not passed to the new model.
     mock_ctx_len.assert_called_once()
@@ -117,6 +123,9 @@ def test_switch_model_clears_previous_config_context_length(mock_ctx_len):
     # Verify compressor was updated from the newly resolved model metadata.
     assert agent.context_compressor.model == "new-model"
     assert agent.context_compressor.context_length == 131_072
+    assert agent.max_tokens == 8192
+    assert agent.context_compressor.max_tokens == 8192
+    assert agent._primary_runtime["max_tokens"] == 8192
 
 
 def test_switch_model_without_config_context_length():

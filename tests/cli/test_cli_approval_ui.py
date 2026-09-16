@@ -43,10 +43,12 @@ def _make_background_cli_stub():
             "base_url": "https://example.test/v1",
             "provider": "test",
             "api_mode": "chat_completions",
+            "max_output_tokens": 8192,
         },
         "request_overrides": None,
     })
     cli.max_turns = 90
+    cli.max_tokens = None
     cli.enabled_toolsets = []
     cli._session_db = None
     cli.reasoning_config = {}
@@ -227,6 +229,7 @@ class TestCliApprovalUi:
 
         class FakeAgent:
             def __init__(self, **kwargs):
+                seen["max_tokens"] = kwargs.get("max_tokens")
                 self._print_fn = None
                 self.thinking_callback = None
 
@@ -261,6 +264,7 @@ class TestCliApprovalUi:
         assert seen["approval"].__func__ is HermesCLI._approval_callback
         assert seen["sudo"].__self__ is cli
         assert seen["sudo"].__func__ is HermesCLI._sudo_password_callback
+        assert seen["max_tokens"] == 8192
         assert not cli._background_tasks
 
 
@@ -593,4 +597,3 @@ class TestClearOverlaysForInterrupt:
 
         assert not t.is_alive(), "worker thread never unblocked"
         assert result["value"] == "deny"
-

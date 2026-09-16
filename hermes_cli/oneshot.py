@@ -489,6 +489,15 @@ def _run_agent(
         # gateway sessions.
         _fb = get_fallback_chain(cfg)
 
+        from hermes_cli.max_tokens import resolve_global_max_tokens
+
+        configured_max_tokens = resolve_global_max_tokens(model_cfg)
+        effective_max_tokens = configured_max_tokens
+        if effective_max_tokens is None:
+            candidate = runtime.get("max_output_tokens")
+            if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate > 0:
+                effective_max_tokens = candidate
+
         agent = AIAgent(
             api_key=runtime.get("api_key"),
             base_url=runtime.get("base_url"),
@@ -496,6 +505,7 @@ def _run_agent(
             requested_provider=runtime.get("requested_provider"),
             api_mode=runtime.get("api_mode"),
             model=effective_model,
+            max_tokens=effective_max_tokens,
             enabled_toolsets=toolsets_list,
             quiet_mode=True,
             platform="cli",

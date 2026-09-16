@@ -2491,6 +2491,9 @@ def resolve_model_threshold(
     return default
 
 
+_MAX_TOKENS_UNSET = object()
+
+
 class ContextCompressor(ContextEngine):
     """Default context engine — compresses conversation context via lossy summarization.
 
@@ -3384,7 +3387,7 @@ class ContextCompressor(ContextEngine):
         api_key: Any = "",
         provider: str = "",
         api_mode: str = "",
-        max_tokens: int | None = None,
+        max_tokens: int | None | object = _MAX_TOKENS_UNSET,
     ) -> None:
         """Update model info after a model switch or fallback activation."""
         runtime_changed = any((
@@ -3413,10 +3416,9 @@ class ContextCompressor(ContextEngine):
         self.threshold_percent = self._effective_threshold_percent(
             context_length, _new_base,
         )
-        # max_tokens=None here means "caller didn't specify" → keep the existing
-        # output reservation. A switch that genuinely changes the output budget
-        # passes the new value explicitly. (#43547)
-        if max_tokens is not None:
+        # Omission keeps the existing reservation; an explicit None clears it.
+        # Route switches need that distinction when moving capped → uncapped.
+        if max_tokens is not _MAX_TOKENS_UNSET:
             self.max_tokens = self._coerce_max_tokens(max_tokens)
         self.threshold_tokens = self._compute_threshold_tokens(
             context_length, self.threshold_percent, self.max_tokens,

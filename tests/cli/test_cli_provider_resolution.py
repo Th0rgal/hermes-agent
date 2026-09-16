@@ -403,7 +403,10 @@ def test_codex_provider_uses_config_model(monkeypatch):
         "base_url": "https://chatgpt.com/backend-api/codex",
     })
 
+    runtime_calls = []
+
     def _runtime_resolve(**kwargs):
+        runtime_calls.append(kwargs)
         return {
             "provider": "openai-codex",
             "api_mode": "codex_responses",
@@ -428,6 +431,7 @@ def test_codex_provider_uses_config_model(monkeypatch):
     assert "codex" in shell.model.lower()
     # LLM_MODEL env var is NOT used
     assert shell.model != "should-be-ignored"
+    assert runtime_calls[-1]["target_model"] == shell.model
 
 
 
@@ -678,5 +682,3 @@ def test_custom_endpoint_key_env_is_a_valid_posix_name_for_ip_endpoints():
 
     for identity in ("127.0.0.1_8080", "0.0.0.0", "10.0.0.7:11434", "", "-–-"):
         assert _ENV_VAR_NAME_RE.match(custom_endpoint_key_env(identity)), identity
-
-

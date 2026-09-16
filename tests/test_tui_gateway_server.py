@@ -18024,6 +18024,7 @@ class _FakeAgentForBackground:
     acp_command = None
     acp_args = None
     model = "test-model"
+    max_tokens = 8192
     enabled_toolsets = None
     ephemeral_system_prompt = None
     providers_allowed = None
@@ -18044,6 +18045,7 @@ def test_background_agent_kwargs_reads_nested_max_turns(monkeypatch):
     kwargs = server._background_agent_kwargs(_FakeAgentForBackground(), "task_1")
 
     assert kwargs["max_iterations"] == 300
+    assert kwargs["max_tokens"] == 8192
 
 
 def test_background_agent_kwargs_falls_back_to_root_max_turns(monkeypatch):

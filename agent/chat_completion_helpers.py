@@ -2907,6 +2907,48 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         old_provider = agent.provider
         old_base_url = agent.base_url
 
+        # Resolve the fallback route's output cap before mutating the live
+        # agent. A lower-cap fallback must not inherit the primary model's
+        # request budget.
+        # Keep an explicit caller cap unless the fallback route supplies a
+        # destination-specific or global replacement.
+        fb_max_tokens = getattr(agent, "max_tokens", None)
+        try:
+            from hermes_cli.runtime_provider import (
+                _get_named_custom_provider,
+                _resolve_effective_max_output_tokens,
+            )
+
+            cap_runtime: dict = {}
+            cap_provider = _get_named_custom_provider(fb_provider)
+            if cap_provider:
+                _resolve_effective_max_output_tokens(
+                    cap_provider, fb_model, cap_runtime
+                )
+            if "max_output_tokens" in cap_runtime:
+                fb_max_tokens = cap_runtime["max_output_tokens"]
+        except Exception:
+            pass
+        for cap_key in ("max_output_tokens", "max_tokens"):
+            entry_cap = fb.get(cap_key)
+            if (
+                isinstance(entry_cap, int)
+                and not isinstance(entry_cap, bool)
+                and entry_cap > 0
+            ):
+                fb_max_tokens = entry_cap
+                break
+        try:
+            from hermes_cli.config import load_config
+            from hermes_cli.max_tokens import resolve_global_max_tokens
+
+            model_cfg = (load_config() or {}).get("model", {})
+            configured_cap = resolve_global_max_tokens(model_cfg)
+            if configured_cap is not None:
+                fb_max_tokens = configured_cap
+        except Exception:
+            pass
+
         # Clear the per-config context_length override so the fallback
         # model's actual context window is resolved instead of inheriting
         # the stale value from the previous model.  See #22387.
@@ -2916,6 +2958,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         agent.requested_provider = fb_provider
         agent.base_url = fb_base_url
         agent.api_mode = fb_api_mode
+        agent.max_tokens = fb_max_tokens
         # Per-provider reasoning_content echo opt-in (see _reasoning_echo_opt_in).
         # Read from the fallback entry so the flag travels with the active
         # provider; restore_primary_runtime will revert it from the snapshot.
@@ -3043,13 +3086,17 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 config_context_length=getattr(agent, "_config_context_length", None),
                 custom_providers=getattr(agent, "_custom_providers", None),
             )
-            agent.context_compressor.update_model(
+            from agent.context_engine import update_context_engine_model
+
+            update_context_engine_model(
+                agent.context_compressor,
                 model=agent.model,
                 context_length=fb_context_length,
                 base_url=agent.base_url,
                 api_key=getattr(agent, "api_key", ""),  # callable preserved → call_llm
                 provider=agent.provider,
                 api_mode=agent.api_mode,
+                max_tokens=agent.max_tokens,
             )
 
         # Re-resolve reasoning_config for the new fallback model (Closes #21256).

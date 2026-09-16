@@ -7,6 +7,7 @@ context_length, causing the CLI status bar to show 'ctx --'.
 from unittest.mock import MagicMock, patch
 
 from agent.context_engine import ContextEngine
+from agent.context_engine import update_context_engine_model
 
 
 class _StubEngine(ContextEngine):
@@ -35,6 +36,23 @@ class _ToolEngine(_StubEngine):
                 "parameters": {"type": "object", "properties": {}},
             }
         ]
+
+
+def test_model_update_filters_new_kwargs_for_legacy_plugin_signature():
+    class LegacyEngine:
+        def __init__(self):
+            self.model = None
+
+        def update_model(self, model, context_length):
+            self.model = model
+            self.context_length = context_length
+
+    engine = LegacyEngine()
+    update_context_engine_model(
+        engine, model="next", context_length=8192, max_tokens=1024
+    )
+    assert engine.model == "next"
+    assert engine.context_length == 8192
 
 
 def test_plugin_engine_gets_context_length_on_init():
@@ -208,5 +226,4 @@ def test_codex_gpt55_autoraise_still_applies_to_builtin_compressor():
     assert agent.context_compressor.threshold_percent == 0.85
     # Gateway parity: the notice is stashed for replay on turn 1.
     assert agent._compression_warning and "85%" in agent._compression_warning
-
 

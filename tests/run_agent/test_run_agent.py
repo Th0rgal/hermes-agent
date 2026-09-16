@@ -4750,7 +4750,9 @@ class TestRunConversation:
         assert result["completed"] is True
         assert second_call["max_tokens"] <= 936
         assert agent.context_compressor.context_length == 200_000
-        mock_compress.assert_called_once()
+        # The reconstructed request is tiny, so the reduced output cap fits
+        # comfortably below the 90% threshold and compression is unnecessary.
+        mock_compress.assert_not_called()
 
     def test_output_cap_retry_before_generic_retry_exhaustion(self, agent):
         """Provider max-output-cap 400s clamp via the output-cap handler, not
@@ -4933,6 +4935,10 @@ class TestRunConversation:
         agent.context_compressor.context_length = 200_000
         # Context is essentially full -> compressor would want to run.
         agent.context_compressor.should_compress = MagicMock(return_value=True)
+        # Make the actual request estimate match the provider's near-full
+        # input report.  The recovery decision intentionally uses the local
+        # request shape, not just numbers parsed from the error string.
+        agent._cached_system_prompt = "S" * 796_000
 
         error_msg = (
             "max_tokens: 65536 > context_window: 200000 "

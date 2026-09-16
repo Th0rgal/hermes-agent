@@ -44,6 +44,7 @@ class TestRunJobRequestOverrides:
                      "provider": "custom",
                      "api_mode": "codex_responses",
                      "request_overrides": overrides,
+                     "max_output_tokens": 8192,
                  },
              ), \
              patch("run_agent.AIAgent") as mock_agent_cls:
@@ -58,3 +59,4 @@ class TestRunJobRequestOverrides:
         assert final_response == "ok"
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["request_overrides"] == overrides
+        assert kwargs["max_tokens"] == 8192

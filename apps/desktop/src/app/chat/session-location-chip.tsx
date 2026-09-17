@@ -26,7 +26,7 @@ export function SessionLocationChip({ className, cwd }: { className?: string; cw
   const location = describeSessionLocation({
     connection,
     cwd: path,
-    thisMac: t.statusbar.thisMac
+    thisMac: t.shell.statusbar.thisMac
   })
   const nativeTarget = localRegistryConnection(registry?.connections)
   const canRunNatively = Boolean(nativeTarget && location.virtualized && nativeTarget.id !== connection?.connectionId)
@@ -41,13 +41,13 @@ export function SessionLocationChip({ className, cwd }: { className?: string; cw
 
   const Icon = location.native ? Monitor : location.kind === 'container' ? Terminal : FolderOpen
   const tip = canRunNatively
-    ? t.statusbar.runNativelyHint
+    ? t.shell.statusbar.runNativelyHint
     : path
       ? `${location.machine}\n${path}`
       : location.machine
 
   return (
-    <Tip content={tip}>
+    <Tip label={tip}>
       <button
         className={cn(
           'pointer-events-auto mr-1.5 inline-flex max-w-56 shrink items-center gap-1 rounded-md px-1.5 py-0.5 text-[0.6875rem] text-muted-foreground hover:bg-accent/60 hover:text-foreground',
@@ -62,7 +62,7 @@ export function SessionLocationChip({ className, cwd }: { className?: string; cw
       >
         <Icon className="size-3 shrink-0" />
         <span className="truncate">{location.label}</span>
-        {canRunNatively ? <span className="truncate font-medium">{t.statusbar.runNatively}</span> : null}
+        {canRunNatively ? <span className="truncate font-medium">{t.shell.statusbar.runNatively}</span> : null}
       </button>
     </Tip>
   )

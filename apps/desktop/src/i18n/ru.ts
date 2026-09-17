@@ -3352,6 +3352,10 @@ export const ru = defineLocale({
       connectionCloudTooltip: host => `Hermes Cloud · ${host}`,
       connectionSshTooltip: host => `SSH · ${host}`,
       connectionRemoteTooltip: host => `Удалённый · ${host}`,
+      thisMac: 'Этот Mac',
+      runNatively: 'Запустить на этом Mac',
+      runNativelyHint:
+        'Этот ассистент работает в удалённой или виртуализированной среде. Нажмите, чтобы переключиться на нативный рантайм на этом Mac.',
       backendLabel: version => `бэкенд v${version}`,
       commit: sha => `коммит ${sha}`,
       branch: branch => `ветка ${branch}`,

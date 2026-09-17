@@ -60,6 +60,7 @@ import { primaryRouteSelectedSessionId, routeSessionId } from '../routes'
 import { titlebarHeaderBaseClass, titlebarHeaderShadowClass, titlebarHeaderTitleClass } from '../shell/titlebar'
 
 import { ChatDropOverlay } from './chat-drop-overlay'
+import { SessionLocationChip } from './session-location-chip'
 import { ChatSwapOverlay, ChatSyncBadge } from './chat-swap-overlay'
 import { ChatBar, ChatBarFallback } from './composer'
 import { FloatingComposerSurface } from './composer/floating-surface'
@@ -217,6 +218,7 @@ function ChatHeader({
         }}
       >
         {showProfileTag && <ProfileTag className="pointer-events-auto mr-1.5" profile={activeStoredSession?.profile} />}
+        <SessionLocationChip cwd={activeStoredSession?.cwd} />
         <MissionTag className="pointer-events-auto mr-1.5" missions={sessionMissions} />
         <SessionActionsMenu
           align="start"

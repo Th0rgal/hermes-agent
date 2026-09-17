@@ -3210,6 +3210,9 @@ export interface Translations {
       connectionCloudTooltip: (host: string) => string
       connectionSshTooltip: (host: string) => string
       connectionRemoteTooltip: (host: string) => string
+      thisMac: string
+      runNatively: string
+      runNativelyHint: string
       backendLabel: (version: string) => string
       commit: (sha: string) => string
       branch: (branch: string) => string

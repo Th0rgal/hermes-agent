@@ -50,6 +50,19 @@ def test_append_is_never_blocked_by_a_foreign_compression_lock(db: SessionDB) ->
     assert any(r["content"] == "steered mid-compression" for r in rows)
 
 
+def test_append_adopts_published_continuation_when_parent_closed(db: SessionDB) -> None:
+    """A write aimed at a compacted parent must land on the child tip."""
+    db.end_session("sess1", "compression")
+    db.create_session("sess1-child", source="test", parent_session_id="sess1")
+    db.append_message("sess1-child", role="assistant", content="compacted")
+    db.append_message("sess1", role="user", content="typed during compact")
+    rows = db.get_messages("sess1-child")
+    assert any(r["content"] == "typed during compact" for r in rows)
+    assert not any(
+        r["content"] == "typed during compact" for r in db.get_messages("sess1")
+    )
+
+
 def test_append_is_never_blocked_by_a_stale_dead_pid_lock(db: SessionDB) -> None:
     """A crashed compressor's unexpired lock must not fence writes (#74568)."""
     assert db.try_acquire_compression_lock(

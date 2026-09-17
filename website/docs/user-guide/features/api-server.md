@@ -540,6 +540,36 @@ Resolve a pending approval for a run that is waiting on a human decision (for ex
 
 MCP trust-gate consent — a write-capable tool on a server configured `trust: untrusted` — surfaces the same way: the run emits an `approval.request` event and parks in `waiting_for_approval` until this endpoint resolves it (`once` runs the tool, `deny` blocks it).
 
+### Autonomous delegation continuations
+
+By default an API client owns the next turn after a run finishes. Background
+worker results appear in the conversation, without starting another agent turn.
+For an explicitly autonomous project, an operator can authorize named durable
+conversations in the gateway profile's `config.yaml`:
+
+```yaml
+gateway:
+  platforms:
+    api_server:
+      extra:
+        background_delegation_sessions:
+          - my-durable-project-session
+```
+
+Restart the gateway after changing this list. Only these session IDs and their
+verified compression continuations may resume automatically on a delegation
+completion. Other conversations, branches and sessions closed with `/new` do
+not inherit this permission. An active parent defers delivery until its current
+turn finishes. Results use the existing durable delegation queue and normal
+API execution path; no additional scheduler or tool is installed.
+
+This grants permission to run further model/tool turns without another client
+request. Keep one conversational pilot per project. Remove the session from the
+list and restart the gateway to disable future autonomous continuations;
+stopping an individual API run only interrupts that run. Existing tool approval
+requirements still apply. Delivery remains at least once across a process crash,
+so delegated mutations should use stable idempotency keys.
+
 ## Jobs API (background scheduled work)
 
 The server exposes a lightweight jobs CRUD surface for managing scheduled / background agent runs from a remote client. All endpoints are gated behind the same bearer auth.

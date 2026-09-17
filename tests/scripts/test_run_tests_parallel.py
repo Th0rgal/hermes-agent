@@ -460,3 +460,37 @@ def test_drive_letter_colon_is_not_a_path_separator(tmp_path: Path) -> None:
         f"drive letter split off as a phantom root:\n{proc.stdout}"
     )
     assert "Discovered 1 test files" in proc.stdout, proc.stdout
+
+
+def test_outer_slice_does_not_reslice_nested_runner(tmp_path):
+    """A nested runner must execute its requested files, not the CI parent's slice."""
+    repo = Path(__file__).resolve().parent.parent
+    runner = repo / "scripts/run_tests_parallel.py"
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    for index in range(2):
+        marker = tmp_path / f"ran-{index}"
+        (inner / f"test_inner_{index}.py").write_text(
+            f"from pathlib import Path\ndef test_inner():\n    Path({str(marker)!r}).touch()\n",
+            encoding="utf-8",
+        )
+    probe = tmp_path / "test_outer.py"
+    probe.write_text(textwrap.dedent(f"""\
+        import subprocess, sys
+        from pathlib import Path
+        def test_nested():
+            result = subprocess.run(
+                [sys.executable, {str(runner)!r}, '--paths', {str(inner)!r}, '-j', '1'],
+                capture_output=True, text=True, timeout=30,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert Path({str(tmp_path / 'ran-0')!r}).exists(), result.stdout
+            assert Path({str(tmp_path / 'ran-1')!r}).exists(), result.stdout
+        """), encoding="utf-8")
+    env = dict(os.environ, HERMES_TEST_SLICE="4/4")
+    result = subprocess.run(
+        [sys.executable, str(runner), '--paths', str(probe), '--slice', '1/1',
+         '-j', '1', '--file-retries', '0'],
+        cwd=repo, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

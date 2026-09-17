@@ -20,6 +20,7 @@ arrived. This suite pins the two-record contract that fixes that:
 from __future__ import annotations
 
 import logging
+import contextlib
 import threading
 import types
 
@@ -117,6 +118,46 @@ def test_accepted_and_finished_records_on_success(turn_env, caplog):
     assert "ui_session=ui-sid" in fin
     assert "status=complete" in fin
     assert "hunter2" not in fin
+
+
+def test_next_prompt_includes_observed_cron_delivery(turn_env, monkeypatch):
+    observed = {
+        "role": "assistant",
+        "content": "[Cron delivery: controller]\nPR checks passed.",
+        "observed": True,
+        "timestamp": 123.0,
+    }
+
+    class FakeDb:
+        def get_session(self, session_id):
+            return {"id": session_id, "source": "desktop"}
+
+        def get_messages_as_conversation(self, _session_id):
+            return [observed]
+
+    captured = {}
+
+    def run_conversation(message, **kwargs):
+        captured["message"] = message
+        captured["history"] = kwargs["conversation_history"]
+        return {"final_response": "done"}
+
+    agent = types.SimpleNamespace(
+        session_id="gw-session-key",
+        run_conversation=run_conversation,
+        clear_interrupt=lambda: None,
+    )
+    session = _session(agent=agent, source="desktop")
+    monkeypatch.setattr(
+        server,
+        "_session_db",
+        lambda _session: contextlib.nullcontext(FakeDb()),
+    )
+
+    server._run_prompt_submit("rid", "ui-sid", session, "what changed?")
+
+    assert observed in captured["history"]
+    assert captured["message"] == "what changed?"
 
 
 def test_finished_record_reflects_mid_turn_rotation(turn_env, caplog):

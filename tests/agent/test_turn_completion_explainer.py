@@ -98,6 +98,16 @@ def test_explanation_for_max_iterations_reached_prefix_match():
 # --------------------------------------------------------------------------
 # 1b. Cause-aware session-persistence wording
 # --------------------------------------------------------------------------
+def test_explanation_persistence_compressing_cause_names_compaction():
+    out = AIAgent._format_turn_completion_explanation(
+        "session_persistence_failed", "compressing"
+    )
+    lower = out.lower()
+    assert "compact" in lower
+    assert "disk" not in lower
+    assert "another hermes process" not in lower
+
+
 def test_explanation_persistence_locked_cause_says_busy_not_disk():
     """Write-lock contention must NOT be misdiagnosed as a disk problem."""
     out = AIAgent._format_turn_completion_explanation(
@@ -116,7 +126,8 @@ def test_explanation_persistence_compression_cause_is_specific():
         "session_persistence_failed", "compression"
     )
     lower = out.lower()
-    assert "compression" in lower
+    assert "compact" in lower
+    assert "send your message again" in lower
     assert "database" not in lower
     assert "disk" not in lower
 

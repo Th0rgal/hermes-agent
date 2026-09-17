@@ -60,6 +60,7 @@ import {
   retireLocalProfileGateways,
   type SpawnPriority
 } from '@/store/gateway'
+import { $goalsBySession, type SessionGoal } from '@/store/goals'
 import { notify, notifyError } from '@/store/notifications'
 import {
   $activeGatewayProfile,
@@ -677,6 +678,9 @@ export const host = {
     focusedUsage: readonlyAtom<null | UsageStats>($focusedUsage),
     /** Gateway socket state: 'idle' | 'connecting' | 'open' | …. Not turn-busy. */
     gateway: readonlyAtom<string>($gatewayState),
+    /** Per-session standing `/goal` (Ralph loop). Same store as the composer
+     *  status stack. Plugins observe; they do not write. */
+    goalsBySession: readonlyAtom<Record<string, SessionGoal>>($goalsBySession),
     /** Current main model slug. */
     model: readonlyAtom<string>($currentModel),
     /** Profile the live gateway is routed to. */
@@ -1596,6 +1600,9 @@ export {
   PanelRowMenu,
   PanelSectionLabel
 } from '@/app/overlays/panel'
+/** The core-sidebar ↔ projects seam: bindings published by the plugin, the
+ *  active chat session published by the sidebar. */
+export { $activeChatSessionIds, $projectBoundSessionIds } from '@/app/project-session-links'
 export { type RouteContribution, ROUTES_AREA, SIDEBAR_NAV_AREA, type SidebarNavContribution } from '@/app/routes'
 
 /** THE full per-toolset config panel core Settings renders — provider picker,
@@ -1645,6 +1652,7 @@ export { Wordmark } from '@/components/chat/wordmark'
  *  Pair it with `anchor` (spawn corner, default `'top-right'`) plus
  *  `width`/`height`. */
 export type { FloatingAnchor } from '@/components/pane-shell/tree/renderer/floating-rect'
+
 export { StatusDot, type StatusTone } from '@/components/status-dot'
 export { Badge } from '@/components/ui/badge'
 export { Button } from '@/components/ui/button'
@@ -1688,6 +1696,9 @@ export {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
 export { EmptyState } from '@/components/ui/empty-state'
@@ -1812,6 +1823,11 @@ export const PANES_AREA = 'panes'
 export const STATUSBAR_AREAS = { left: 'statusBar.left', right: 'statusBar.right' } as const
 export const TITLEBAR_AREAS = { center: 'titleBar.center', left: 'titleBar.left', right: 'titleBar.right' } as const
 
+export const SESSIONS_SECTIONS_AREA = 'sidebar.sessions.sections'
+/** Right-hand rail of the primary chat surface. Contributions render as
+ *  full-height siblings of the conversation column — render null to stay
+ *  hidden (e.g. only when the open session is relevant to your plugin). */
+export const CHAT_RAIL_AREA = 'chat.rail'
 /** The app's own gateway-readiness evaluation (setup.status +
  *  setup.runtime_check, reconciled) — pass `host.request`. Don't hand-roll
  *  readiness from raw RPC shapes. */
@@ -1831,6 +1847,23 @@ export {
   type TranscriptDirectiveProps
 } from '@/lib/transcript-directives'
 export { cn } from '@/lib/utils'
+/** Per-session standing `/goal` — the SAME store the composer status stack
+ *  reads. Plugins observe; they do not write. */
+export { $goalsBySession } from '@/store/goals'
+export type { GoalStatus, SessionGoal } from '@/store/goals'
+/** Per-session color overrides — the SAME store the sidebar/tabs resolve, so a
+ *  plugin-set color agrees everywhere. Write under `sessionDurableId(id)`. */
+export {
+  $sessionColorById,
+  $sessionColorOverrides,
+  sessionColorForId,
+  sessionDurableId,
+  setSessionColorOverride
+} from '@/store/session-color'
+/** Session id (live OR durable) → unread message count since last opened;
+ *  nonzero entries only. Baselines stamp/clear on session open — the same
+ *  signal that clears the core unread dot. */
+export { $sessionUnreadCounts } from '@/store/session-unread'
 /** THE unread store behind `SessionStatusDot`'s emerald dot. A plugin that
  *  learns out-of-band that a session produced something the user hasn't seen
  *  (a roster poll's activity watermark, say) writes HERE rather than keeping

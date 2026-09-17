@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router'
 
 import { blurComposerInput } from '@/app/chat/composer/focus'
 import { useComposerSurfaceId } from '@/app/chat/composer/scope'
+import { $projectBoundSessionIds } from '@/app/project-session-links'
 import { AGENTS_ROUTE } from '@/app/routes'
 import type { SubmitTextOptions } from '@/app/session/hooks/use-prompt-actions/utils'
 import { BillingBanner } from '@/components/billing-banner'
@@ -59,7 +60,11 @@ const GROUP_ICON: Record<StatusGroup['type'], string> = {
   background: 'server-process'
 }
 
-const groupLabel = (group: StatusGroup, s: Translations['statusStack']) => {
+const groupLabel = (
+  group: StatusGroup,
+  s: Translations['statusStack'],
+  projectBound = false
+) => {
   if (group.type === 'goal') {
     const status = group.items[0]?.goalStatus
 
@@ -69,7 +74,9 @@ const groupLabel = (group: StatusGroup, s: Translations['statusStack']) => {
         ? s.goalWaiting
         : status === 'done'
           ? s.goalDone
-          : s.goalActive
+          : projectBound
+            ? s.projectObjective
+            : s.goalActive
   }
 
   if (group.type === 'todo') {
@@ -107,6 +114,8 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
   const items = useSessionSlice($statusItemsBySession, sessionId)
   const previews = useSessionSlice($previewStatusBySession, sessionId)
   const controlEntry = useSessionValue($sessionControlBySession, sessionId)
+  const projectBindings = useStore($projectBoundSessionIds)
+  const projectBound = Boolean(sessionId && projectBindings[sessionId])
 
   const surfaceId = useComposerSurfaceId()
   const scrollSessionId = sessionId ?? surfaceId
@@ -257,7 +266,7 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
           }
           defaultCollapsed={group.type !== 'todo'}
           icon={<Codicon className="text-muted-foreground/70" name={GROUP_ICON[group.type]} size="0.8rem" />}
-          label={groupLabel(group, t.statusStack)}
+          label={groupLabel(group, t.statusStack, projectBound)}
         >
           {group.items.map(item => (
             <StatusItemRow

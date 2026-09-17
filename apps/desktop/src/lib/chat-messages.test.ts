@@ -10,7 +10,12 @@ import {
   chatMessageText,
   collectUnspokenTurnSpeech,
   completeOpenTimelineParts,
+  dedupeRepeatedTextInParts,
+  dedupeRepeatedToolCallsInParts,
+  deliveryNeedsOwner,
+  legacyDisplayKind,
   mergeFinalAssistantText,
+  missionCallbackLabel,
   preserveLocalAssistantErrors,
   reasoningPart,
   renderMediaTags,
@@ -89,6 +94,29 @@ describe('toChatMessages', () => {
     expect((toolPart as { args: { command?: string } }).args.command).toBe(longCommand)
   })
 
+  it('drops provider-echoed duplicate assistant text after a tool-call turn', () => {
+    // Providers re-send the same prose on the stop row after tool_calls.
+    // Turn merge concatenates both; without dedupe the reply paints twice
+    // (Hermes Desktop calendar "Done" bubble duplicated around the tool run).
+    const done =
+      'Done.\n\n- Doctor — dimanche 23 août 2026, 09:20-10:20 (Europe/Paris)\n- Rappel popup 30 min avant (08:50)'
+
+    const messages = toChatMessages([
+      {
+        role: 'assistant',
+        content: done,
+        timestamp: 1,
+        tool_calls: [{ id: 'tc', function: { name: 'terminal', arguments: '{"command":"gws calendar create"}' } }]
+      },
+      { role: 'tool', tool_call_id: 'tc', content: 'created', timestamp: 2 },
+      { role: 'assistant', content: done, timestamp: 3 }
+    ])
+
+    expect(messages).toHaveLength(1)
+    expect(chatMessageText(messages[0])).toBe(done)
+    expect(messages[0].parts.filter(part => part.type === 'text')).toHaveLength(1)
+  })
+
   it('keeps a turn with interleaved tool-only rows in a single bubble', () => {
     const messages = toChatMessages([
       { role: 'assistant', content: 'Planning.', timestamp: 1 },
@@ -123,6 +151,56 @@ describe('toChatMessages', () => {
     expect(messages).toHaveLength(1)
     expect(messages[0].timestamp).toBe(1)
     expect(messages[0].parts.map(part => part.timestamp)).toEqual([1, 3])
+  })
+
+  it('hides a durably marked intentional-silence turn', () => {
+    const messages = toChatMessages([
+      { role: 'user', content: 'visible question', timestamp: 1 },
+      { role: 'assistant', content: 'visible answer', timestamp: 2 },
+      { role: 'user', content: 'mission callback', display_kind: 'intentional_silence', timestamp: 3 },
+      {
+        role: 'assistant',
+        content: '',
+        display_kind: 'intentional_silence',
+        timestamp: 4,
+        tool_calls: [{ id: 'tc', function: { name: 'get_mission_digest', arguments: '{}' } }]
+      },
+      {
+        role: 'tool',
+        content: 'digest',
+        display_kind: 'intentional_silence',
+        tool_call_id: 'tc',
+        timestamp: 5
+      },
+      { role: 'assistant', content: '[SILENT]', display_kind: 'intentional_silence', timestamp: 6 }
+    ])
+
+    expect(messages.map(chatMessageText)).toEqual(['visible question', 'visible answer'])
+  })
+
+  it('hides legacy unmarked silence turns without matching prose mentions', () => {
+    const messages = toChatMessages([
+      { role: 'user', content: 'A sandboxed.sh mission changed status.', timestamp: 1 },
+      {
+        role: 'assistant',
+        content: '',
+        timestamp: 2,
+        tool_calls: [{ id: 'tc', function: { name: 'get_mission_digest', arguments: '{}' } }]
+      },
+      { role: 'tool', content: 'digest', tool_call_id: 'tc', timestamp: 3 },
+      { role: 'assistant', content: '[SILENT]', timestamp: 4 },
+      { role: 'user', content: 'what happened?', timestamp: 5 },
+      { role: 'assistant', content: 'The prior response was [SILENT], intentionally.', timestamp: 6 },
+      { role: 'user', content: 'ordinary question', timestamp: 7 },
+      { role: 'assistant', content: '[SILENT]', timestamp: 8 }
+    ])
+
+    expect(messages.map(chatMessageText)).toEqual([
+      'what happened?',
+      'The prior response was [SILENT], intentionally.',
+      'ordinary question',
+      '[SILENT]'
+    ])
   })
 
   it('keeps assistant tool-call iterations in one loaded assistant bubble', () => {
@@ -327,6 +405,71 @@ describe('toChatMessages', () => {
     ])
 
     expect(chatMessageText(message)).toBe('summarize @file:`src/main.ts` for me')
+  })
+
+  it('renders an observed cron delivery as assistant output with media', () => {
+    const [message] = toChatMessages([
+      {
+        content: '[Cron delivery: asset callback]\nDone.\n\nMEDIA:/tmp/proof.png',
+        observed: true,
+        role: 'user',
+        timestamp: 1
+      }
+    ])
+
+    expect(message.role).toBe('assistant')
+    expect(message.delivery).toEqual({ kind: 'cron', label: 'asset callback', needsOwner: false })
+    expect(chatMessageText(message)).toBe('Done.\n\n[Image: proof.png](#media:%2Ftmp%2Fproof.png)')
+  })
+
+  it('renders SQLite numeric observed provenance as assistant output', () => {
+    const [message] = toChatMessages([
+      {
+        content: '[Cron delivery: callback]\nDone.',
+        observed: 1,
+        role: 'user',
+        timestamp: 1
+      }
+    ])
+
+    expect(message.role).toBe('assistant')
+    expect(message.delivery).toEqual({ kind: 'cron', label: 'callback', needsOwner: false })
+  })
+
+  it('lifts the sentinel of an assistant-role delivery into delivery metadata', () => {
+    const [message] = toChatMessages([
+      {
+        content: '[Cron delivery: Beal roadmap progression]\nHead advanced to fbfde973.',
+        observed: true,
+        role: 'assistant',
+        timestamp: 1
+      }
+    ])
+
+    expect(message.role).toBe('assistant')
+    expect(message.delivery).toEqual({ kind: 'cron', label: 'Beal roadmap progression', needsOwner: false })
+    expect(chatMessageText(message)).toBe('Head advanced to fbfde973.')
+  })
+
+  it('keeps a delivery out of the preceding tool-bearing assistant turn', () => {
+    const messages = toChatMessages([
+      {
+        role: 'assistant',
+        content: 'Checking.',
+        timestamp: 1,
+        tool_calls: [{ id: 'tc', function: { name: 'terminal', arguments: '{}' } }]
+      },
+      {
+        content: '[Cron delivery: watcher]\nBuild finished.',
+        observed: true,
+        role: 'assistant',
+        timestamp: 2
+      }
+    ])
+
+    expect(messages).toHaveLength(2)
+    expect(messages[1].delivery).toEqual({ kind: 'cron', label: 'watcher', needsOwner: false })
+    expect(chatMessageText(messages[1])).toBe('Build finished.')
   })
 
   it('never paints redirect scaffolding as an assistant bubble', () => {
@@ -1516,5 +1659,158 @@ describe('sealOpenToolParts', () => {
     const messages = [assistantWithParts([done])]
 
     expect(sealOpenToolParts(messages)).toBe(messages)
+  })
+})
+
+describe('dedupeRepeatedTextInParts', () => {
+  it('keeps the last copy of verbatim assistant prose and all tool parts', () => {
+    const done = { type: 'text', text: 'Done.\n\n- Doctor — 09:20' } as ChatMessagePart
+    const echo = { type: 'text', text: 'Done.\n\n- Doctor — 09:20' } as ChatMessagePart
+    const tool = { type: 'tool-call', toolCallId: 'tc', toolName: 'terminal' } as ChatMessagePart
+
+    const next = dedupeRepeatedTextInParts([done, tool, echo])
+
+    expect(next).toEqual([tool, echo])
+  })
+})
+
+describe('dedupeRepeatedToolCallsInParts', () => {
+  it('keeps the completed copy when the same toolCallId is echoed', () => {
+    const spinning = {
+      type: 'tool-call',
+      toolCallId: 'tc',
+      toolName: 'terminal'
+    } as ChatMessagePart
+
+    const done = {
+      type: 'tool-call',
+      toolCallId: 'tc',
+      toolName: 'terminal',
+      result: { output: 'ok' }
+    } as ChatMessagePart
+
+    const next = dedupeRepeatedToolCallsInParts([spinning, done])
+
+    expect(next).toEqual([done])
+  })
+})
+
+
+describe('mission callback rows', () => {
+  const WAKE = 'A routed mission-complete callback was just appended to this conversation. In one or two sentences…'
+  const SEPARATOR = 'A mission you started has finished. The result follows.'
+
+  const CALLBACK =
+    '[Mission callback: PR #27 exact-head two Codex]\nstatus=completed mission=da27b56c event=evt-1 workspace=verity\nThe check `prove` is SUCCESS and GitHub says CLEAN.\n[CTRL: verity-lido | mode=active | wait=0 | next=inspect da27b56c]\n[STATE_SIGNATURE: verity-lido|mission-callback|da27b56c|completed|inspect]'
+
+  it('types legacy rows by their fixed prefixes only', () => {
+    expect(legacyDisplayKind('user', WAKE)).toBe('mission_callback_wake')
+    expect(legacyDisplayKind('user', SEPARATOR)).toBe('hidden')
+    expect(legacyDisplayKind('assistant', CALLBACK)).toBe('mission_callback')
+    expect(legacyDisplayKind('user', 'please repair PR #27')).toBeUndefined()
+    expect(legacyDisplayKind('user', CALLBACK)).toBeUndefined()
+  })
+
+  it('renders the wake as a timeline line, hides the separator, and puts the callback under a divider', () => {
+    const rows: SessionMessage[] = [
+      { role: 'user', content: 'comment progresse la roadmap ?', timestamp: 1 },
+      { role: 'assistant', content: 'Voici l’état.', timestamp: 2 },
+      { role: 'user', content: SEPARATOR, timestamp: 3 },
+      { role: 'assistant', content: CALLBACK, timestamp: 4 },
+      { role: 'user', content: WAKE, timestamp: 5 },
+      { role: 'assistant', content: 'La mission #27 est terminée et propre.', timestamp: 6 }
+    ]
+
+    const chat = toChatMessages(rows)
+    const roles = chat.map(message => message.role)
+
+    // separator dropped; wake is a system line, not a user bubble
+    expect(roles).toEqual(['user', 'assistant', 'assistant', 'system', 'assistant'])
+
+    const callback = chat[2]
+    expect(callback.delivery?.label).toBe('mission finished · PR #27 exact-head two Codex · completed')
+    const body = callback.parts.map(part => ('text' in part ? part.text : '')).join('')
+    expect(body).toContain('The check `prove` is SUCCESS')
+    expect(body).not.toContain('[Mission callback:')
+    expect(body).not.toContain('status=completed mission=')
+    expect(body).not.toContain('[STATE_SIGNATURE')
+    expect(body).not.toContain('[CTRL:')
+
+    const wake = chat[3]
+    const wakeText = wake.parts.map(part => ('text' in part ? part.text : '')).join('')
+    expect(wakeText).toBe('mission finished')
+    expect(wakeText).not.toContain('routed mission-complete')
+  })
+
+  it('prefers typed metadata over prose for the divider label', () => {
+    const typed: SessionMessage[] = [
+      {
+        role: 'assistant',
+        content: CALLBACK,
+        display_kind: 'mission_callback',
+        display_metadata: { title: 'Repair PR 27', status: 'failed' } as never,
+        timestamp: 1
+      },
+      {
+        role: 'user',
+        content: WAKE,
+        display_kind: 'mission_callback_wake',
+        display_metadata: { title: 'Repair PR 27', status: 'failed' } as never,
+        timestamp: 2
+      }
+    ]
+
+    const chat = toChatMessages(typed)
+    expect(chat[0].delivery?.label).toBe('mission finished · Repair PR 27 · failed')
+    expect(chat[0].delivery?.kind).toBe('mission_callback')
+    expect(chat[1].role).toBe('system')
+    expect(chat[1].parts.map(part => ('text' in part ? part.text : '')).join('')).toBe(
+      'mission finished · Repair PR 27 · failed'
+    )
+    expect(missionCallbackLabel(undefined, '')).toBe('mission finished')
+  })
+})
+
+describe('deliveryNeedsOwner', () => {
+  const cronDelivery = (body: string): SessionMessage => ({
+    content: `[Cron delivery: verity controller]\n${body}`,
+    observed: true,
+    role: 'assistant',
+    timestamp: 1
+  })
+
+  it('flags a [DECISION:] trailer', () => {
+    expect(deliveryNeedsOwner('Stuck.\n[DECISION: merge or drop #2332?]', '')).toBe(true)
+    expect(toChatMessages([cronDelivery('Stuck.\n[DECISION: merge or drop?]')])[0].delivery?.needsOwner).toBe(true)
+  })
+
+  it('treats "Action Thomas : aucune" as nothing to do', () => {
+    expect(deliveryNeedsOwner('OK.\nAction Thomas : aucune pour l’instant.', '')).toBe(false)
+    expect(deliveryNeedsOwner('OK.\nAction Thomas : none', '')).toBe(false)
+    expect(deliveryNeedsOwner('OK.\nAction Thomas :', '')).toBe(false)
+
+    const [message] = toChatMessages([
+      cronDelivery('OK.\n\nAction Thomas : aucune.\n[CTRL: verity | mode=active | wait=1]')
+    ])
+
+    expect(message.delivery).toEqual({ kind: 'cron', label: 'verity controller', needsOwner: false })
+  })
+
+  it('flags a real "Action Thomas :" ask', () => {
+    expect(deliveryNeedsOwner('OK.\nAction Thomas : relancer le worker', '')).toBe(true)
+    expect(toChatMessages([cronDelivery('OK.\nAction Thomas : relancer')])[0].delivery?.needsOwner).toBe(true)
+  })
+
+  it('flags a blocker in the [CTRL: …] trailer, stripped from the body', () => {
+    expect(deliveryNeedsOwner('Waiting.', '[CTRL: verity | mode=blocked | blocker=missing gh auth]')).toBe(true)
+    expect(deliveryNeedsOwner('Waiting.', '[CTRL: verity | mode=blocked | blocker=none]')).toBe(false)
+    expect(deliveryNeedsOwner('Waiting.', '[CTRL: verity | mode=blocked]')).toBe(false)
+
+    const [message] = toChatMessages([
+      cronDelivery('Waiting on auth.\n[CTRL: verity | mode=blocked | blocker=missing gh auth | wait=1]')
+    ])
+
+    expect(message.delivery?.needsOwner).toBe(true)
+    expect(chatMessageText(message)).toBe('Waiting on auth.')
   })
 })

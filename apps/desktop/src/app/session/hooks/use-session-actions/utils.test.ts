@@ -1,7 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { textWithoutReferenceLines, WIRE_REFERENCE_KINDS } from '@/components/assistant-ui/reference-kinds'
 import { type ChatMessage, type ChatMessagePart, chatMessageText } from '@/lib/chat-messages'
+import {
+  clearInFlightTurnJournal,
+  dropInFlightTurnJournalRow,
+  persistInFlightTurnState,
+  readInFlightTurnJournal,
+  recoverInFlightTurnJournal,
+  resetInFlightTurnJournalStateForTests
+} from '@/lib/inflight-turn-journal'
 import { $approvalModes, approvalModeForProfile } from '@/store/approval-mode'
 import { $desktopOnboarding, consumePendingCredentialWarning } from '@/store/onboarding'
 import { $activeGatewayProfile } from '@/store/profile'
@@ -1756,6 +1764,129 @@ describe('overlayConcurrentMessageChanges', () => {
       { type: 'text', text: 'partial A' },
       { type: 'text', text: ' + delta B' }
     ])
+  })
+})
+
+describe('appendLiveSessionProjection — retained failed turn after a mission callback', () => {
+  const prompt = 'comment progresse la roadmap pour Lido ?'
+
+  it('does not resurrect a failed prompt whose reply is committed once callback rows follow it', () => {
+    const transcript = [
+      msg('u1', 'user', prompt),
+      msg('a1', 'assistant', 'Voici l’état de la roadmap.'),
+      // Rows the mission-callback route appended after the operator's turn;
+      // the wake is a system-typed row on read, the callback an assistant drop.
+      msg('a2', 'assistant', 'La mission #27 est terminée et propre.', {
+        delivery: { kind: 'mission_callback', label: 'mission finished', needsOwner: false }
+      }),
+      msg('s1', 'system', 'mission finished · PR #27 · completed'),
+      msg('a3', 'assistant', 'Rien à faire de ton côté.')
+    ]
+
+    const restored = appendLiveSessionProjection(transcript, {
+      inflight: { assistant: '', error: 'provider 429', status: 'error', streaming: false, user: prompt },
+      session_id: 'sid'
+    } as never)
+
+    expect(restored.some(message => message.id === 'user-inflight-sid')).toBe(false)
+  })
+
+  it('still projects a failed prompt that was never answered', () => {
+    const transcript = [msg('u1', 'user', 'older question'), msg('a1', 'assistant', 'older answer')]
+
+    const restored = appendLiveSessionProjection(transcript, {
+      inflight: { assistant: '', error: 'provider 429', status: 'error', streaming: false, user: prompt },
+      session_id: 'sid'
+    } as never)
+
+    expect(restored.some(message => message.id === 'user-inflight-sid')).toBe(true)
+  })
+
+  it('keeps a live repeat of an earlier prompt visible', () => {
+    const transcript = [msg('u1', 'user', prompt), msg('a1', 'assistant', 'first answer'), msg('u2', 'user', 'other'), msg('a2', 'assistant', 'other answer')]
+
+    const restored = appendLiveSessionProjection(transcript, {
+      inflight: { assistant: '', streaming: true, user: prompt },
+      session_id: 'sid'
+    } as never)
+
+    expect(restored.some(message => message.id === 'user-inflight-sid')).toBe(true)
+  })
+})
+
+describe('retained failed turn: journal replay follows the server resume snapshot', () => {
+  const prompt = 'do the thing'
+  const transcript = () => [msg('u0', 'user', 'older question'), msg('a0', 'assistant', 'older answer')]
+
+  function journalFailedTurn() {
+    persistInFlightTurnState({
+      awaitingResponse: false,
+      busy: true,
+      messages: [
+        msg('user-inflight-sid', 'user', prompt),
+        msg('assistant-err', 'assistant', '', { error: "agent init failed: name 'registry' is not defined" })
+      ],
+      storedSessionId: 'stored-sid',
+      streamId: null,
+      turnStartedAt: 1000
+    })
+    vi.advanceTimersByTime(400)
+  }
+
+  /** The resume-path rule from use-session-actions: the server snapshot is the
+   *  authority on a retained failure — no `inflight.error`, no local replay. */
+  function resumeWith(inflight: SessionResumeResponse['inflight']) {
+    const base = appendLiveSessionProjection(transcript(), { inflight, session_id: 'sid' } as never)
+
+    return recoverInFlightTurnJournal('stored-sid', base, {
+      dropRetainedErrors: !inflight?.error?.trim(),
+      keepPending: false
+    })
+  }
+
+  beforeEach(() => {
+    resetInFlightTurnJournalStateForTests()
+    vi.useFakeTimers()
+    window.localStorage.clear()
+  })
+
+  afterEach(() => {
+    clearInFlightTurnJournal('stored-sid')
+    vi.useRealTimers()
+  })
+
+  it('drops the retained error when the gateway (restarted) no longer reports it', () => {
+    journalFailedTurn()
+
+    const result = resumeWith(null)
+
+    expect(result.applied).toBe(false)
+    expect(result.messages.some(message => Boolean(message.error))).toBe(false)
+    expect(result.messages.some(message => message.id === 'user-inflight-sid')).toBe(false)
+    expect(readInFlightTurnJournal('stored-sid')).toBeNull()
+  })
+
+  it('keeps the retained error while the gateway still replays it', () => {
+    journalFailedTurn()
+
+    const result = resumeWith({ assistant: '', error: 'agent init failed', status: 'error', streaming: false, user: prompt } as never)
+
+    const failedRow = result.messages.find(message => Boolean(message.error))
+    expect(failedRow?.error).toContain('agent init failed')
+    expect(result.messages.some(message => message.id === 'user-inflight-sid')).toBe(true)
+    expect(readInFlightTurnJournal('stored-sid')).not.toBeNull()
+  })
+
+  it('dismissing the error card clears the journal row so a later resume stays clean', () => {
+    journalFailedTurn()
+
+    dropInFlightTurnJournalRow('stored-sid', 'assistant-err')
+
+    expect(readInFlightTurnJournal('stored-sid')).toBeNull()
+    expect(
+      resumeWith({ assistant: '', error: 'agent init failed', status: 'error', streaming: false, user: prompt } as never)
+        .applied
+    ).toBe(false)
   })
 })
 

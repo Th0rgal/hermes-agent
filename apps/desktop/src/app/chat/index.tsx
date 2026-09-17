@@ -18,7 +18,9 @@ import { $hoveredTreeGroup, $sessionTileDragging, $sessionTileEdgeHover } from '
 import { PromptOverlays } from '@/components/prompt-overlays'
 import { Button } from '@/components/ui/button'
 import { ErrorState } from '@/components/ui/error-state'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import { TitleMenuTrigger } from '@/components/ui/title-menu-trigger'
+import { Slot } from '@/contrib/react/slot'
 import { type HermesGateway } from '@/hermes'
 import { useI18n } from '@/i18n'
 import type { ChatMessage } from '@/lib/chat-messages'
@@ -27,6 +29,7 @@ import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-s
 import { currentModelCapabilities, modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
+import { $chatViewFilter, CHAT_VIEW_FILTERS, type ChatViewFilter, setChatViewFilter } from '@/store/chat-view-filter'
 import { migrateSessionDraft } from '@/store/composer'
 import { migrateQueuedPrompts, parkQueuedPrompts } from '@/store/composer-queue'
 import { $introSplash } from '@/store/intro-splash'
@@ -68,6 +71,7 @@ import { useHistoryWindow } from './history-window'
 import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-actions'
 import { type DragKind, useFileDropZone } from './hooks/use-file-drop-zone'
 import { shouldShowIntro } from './intro-visibility'
+import { MissionTag, useSessionMissions } from './mission-tag'
 import { ProfileTag } from './profile-tag'
 import { isRouteSessionMismatch } from './route-session-state'
 import { useRuntimeMessageRepository } from './runtime-repository'
@@ -124,6 +128,41 @@ interface ChatHeaderProps {
   selectedSessionId: null | string
 }
 
+/** All / Mine / Reports transcript filter (see `$chatViewFilter`). Tinted
+ *  whenever a filter is active so a hidden delivery is never a mystery. */
+function ChatViewFilterControl({ className }: { className?: string }) {
+  const { t } = useI18n()
+  const filter = useStore($chatViewFilter)
+
+  const options = useMemo(
+    () => CHAT_VIEW_FILTERS.map(id => ({ id, label: t.assistant.thread.viewFilter[id] })),
+    [t]
+  )
+
+  return (
+    <div
+      className={cn('flex items-center gap-1', className)}
+      data-active={filter !== 'all' ? 'true' : undefined}
+      data-slot="chat-view-filter"
+    >
+      <SegmentedControl<ChatViewFilter>
+        className={cn(filter !== 'all' && 'ring-1 ring-primary/40')}
+        onChange={setChatViewFilter}
+        options={options}
+        value={filter}
+      />
+      {filter !== 'all' && (
+        <span
+          aria-hidden="true"
+          className="size-1.5 shrink-0 rounded-full bg-primary"
+          data-slot="chat-view-filter-badge"
+          data-testid="chat-view-filter-badge"
+        />
+      )}
+    </div>
+  )
+}
+
 function ChatHeader({
   activeSessionId,
   isRoutedSessionView,
@@ -145,6 +184,13 @@ function ChatHeader({
   // (#66003). Single-profile users see the unchanged header.
   const showProfileTag = profiles.length > 1 && Boolean(activeStoredSession)
 
+  // Missions this conversation spawned. Null while loading, and also when the
+  // gateway has no sandboxed.sh to ask — the tag simply does not appear.
+  const sessionMissions = useSessionMissions(
+    selectedSessionId || activeSessionId,
+    activeStoredSession?.profile
+  )
+
   // Pins live on the durable lineage-root id, but selectedSessionId is the live
   // (tip) id — resolve through the loaded row so the menu reflects the pin
   // state after auto-compression rotates the id.
@@ -164,13 +210,14 @@ function ChatHeader({
   return (
     <header className={cn(titlebarHeaderBaseClass, isRoutedSessionView && titlebarHeaderShadowClass)}>
       <div
-        className={cn(titlebarHeaderTitleClass, showProfileTag && 'flex items-center')}
+        className={cn(titlebarHeaderTitleClass, 'flex items-center')}
         style={{
           maxWidth:
             'calc(100vw - var(--titlebar-content-inset,0px) - var(--titlebar-tools-right) - var(--titlebar-tools-width) - 1.5rem)'
         }}
       >
         {showProfileTag && <ProfileTag className="pointer-events-auto mr-1.5" profile={activeStoredSession?.profile} />}
+        <MissionTag className="pointer-events-auto mr-1.5" missions={sessionMissions} />
         <SessionActionsMenu
           align="start"
           onDelete={selectedSessionId ? onDeleteSelectedSession : undefined}
@@ -182,6 +229,7 @@ function ChatHeader({
         >
           <TitleMenuTrigger>{title}</TitleMenuTrigger>
         </SessionActionsMenu>
+        <ChatViewFilterControl className="pointer-events-auto ml-2 shrink-0" />
       </div>
     </header>
   )
@@ -717,7 +765,7 @@ const ChatViewContent = memo(function ChatViewContent({
   return (
     <div
       className={cn(
-        'relative isolate flex h-full min-w-0 flex-col overflow-hidden bg-(--ui-chat-surface-background)',
+        'relative isolate flex h-full min-w-0 overflow-hidden bg-(--ui-chat-surface-background)',
         className
       )}
       data-chat-surface=""
@@ -726,6 +774,10 @@ const ChatViewContent = memo(function ChatViewContent({
       data-composer-target={composerScope.target}
       data-session-anchor={sessionAnchor}
     >
+      {/* The conversation column. Contributions to `chat.rail` render as
+          right-hand siblings (primary surface only) — e.g. the projects
+          plugin's context rail when the open session is bound to a project. */}
+      <div className="relative flex h-full min-w-0 flex-1 flex-col overflow-hidden">
       <Backdrop />
       {/* Tiles get their chrome from the layout zone (chip strip); the modal
           prompt overlays stay active-session-scoped in the primary surface. */}
@@ -842,6 +894,8 @@ const ChatViewContent = memo(function ChatViewContent({
           </FloatingComposerSurface>
         )}
       </ChatRuntimeBoundary>
+      </div>
+      {isPrimary && <Slot area="chat.rail" />}
     </div>
   )
 })

@@ -180,6 +180,37 @@ describe('useMessageStream interim text sealing', () => {
     expect(getState().interimBoundaryPending).toBe(true)
   })
 
+  it('folds the tool bubble back onto the sealed interim at turn end instead of reprinting the same narration', async () => {
+    mountStream()
+    await start()
+
+    const line = 'Umbrel (100.116.71.62) est ton nœud Bitcoin — idle sur Tailscale. Je teste l\'accès RPC.'
+
+    await delta(line)
+    await interim(line)
+    await act(() =>
+      stream.handleEvent({
+        payload: { name: 'terminal', tool_id: 'ssh-1' },
+        session_id: SID,
+        type: 'tool.start'
+      })
+    )
+
+    // Mid-turn the tool opens its own bubble (upstream contract, see
+    // timeline-events.test.tsx). The fold happens at completion.
+    expect(getState().messages.filter(message => message.role === 'assistant')).toHaveLength(2)
+
+    await complete(line)
+
+    // After the turn: one bubble — the tool folded onto the interim, narration
+    // printed once, non-text parts before the text.
+    const assistants = getState().messages.filter(message => message.role === 'assistant' && !message.hidden)
+    expect(assistants).toHaveLength(1)
+    expect(assistantMessages().filter(text => text.includes('Umbrel'))).toHaveLength(1)
+    expect(assistants[0].parts.map(part => part.type)).toEqual(['tool-call', 'text'])
+    expect(assistants[0].interim).toBeFalsy()
+  })
+
   it('settles an identical final onto a non-previewed interim (tool-call turn) instead of duplicating (#63679)', async () => {
     mountStream()
     await start()

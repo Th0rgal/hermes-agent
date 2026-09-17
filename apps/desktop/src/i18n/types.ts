@@ -2687,6 +2687,7 @@ export interface Translations {
     background: (count: number) => string
     goalActive: string
     goalBlocked: string
+    projectObjective: string
     goalDone: string
     goalPaused: string
     goalWaiting: string
@@ -3515,6 +3516,8 @@ export interface Translations {
     thread: {
       loadingSession: string
       showEarlier: string
+      deliveryRunCount: (count: number) => string
+      viewFilter: { all: string; mine: string; reports: string }
       loadingResponse: string
       loadingLocalModel: (model: string) => string
       processingPrompt: string

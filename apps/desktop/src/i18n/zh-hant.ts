@@ -2554,6 +2554,7 @@ export const zhHant = defineLocale({
     background: count => `${count} 個背景任務`,
     goalActive: '目標進行中',
     goalBlocked: '目標受阻',
+    projectObjective: '專案目標',
     goalDone: '目標已完成',
     goalPaused: '目標已暫停',
     goalWaiting: '目標等待中',
@@ -3293,6 +3294,8 @@ export const zhHant = defineLocale({
     thread: {
       loadingSession: '正在載入工作階段',
       showEarlier: '顯示較早的訊息',
+      deliveryRunCount: count => `${count} 份報告`,
+      viewFilter: { all: '全部', mine: '我的', reports: '報告' },
       loadingResponse: 'Hermes 正在載入回覆',
       resumeWhenBackgroundDone: count =>
         count === 1 ? '背景工作完成後將自動繼續' : `${count} 個背景工作完成後將自動繼續`,

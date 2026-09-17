@@ -1,3 +1,5 @@
+import { computed } from 'nanostores'
+
 import { Codecs, persistentAtom } from '@/lib/persisted'
 import { stableArray } from '@/lib/stable-array'
 import { readKey } from '@/lib/storage'
@@ -579,3 +581,35 @@ if (!isSecondaryWindow() && !isBrowserWindow()) {
   // old selection would otherwise arrive as the profile hint.
   $selectedStoredSessionId.listen(id => ackStoredSessionId(id))
 }
+
+/** Numeric unread remaining per stored session id (`message_count − watermark`).
+ *  Projects-board badges still consume this map; core dots use the boolean
+ *  finished-unread layer. */
+export const $sessionUnreadCounts = computed(
+  [$sessions, $cronSessions, $sessionSeenCounts, $selectedStoredSessionId],
+  (sessions, cron, seen, selected) => {
+    const counts: Record<string, number> = {}
+
+    for (const row of [...sessions, ...cron]) {
+      if (isSelected(row, selected)) {
+        continue
+      }
+
+      const durableId = sessionPinId(row)
+      const watermark = seen[profileKeyForRow(row)]?.[durableId]
+
+      if (
+        typeof watermark === 'number' &&
+        Number.isFinite(row.message_count) &&
+        row.message_count > watermark
+      ) {
+        const n = row.message_count - watermark
+
+        counts[row.id] = n
+        counts[durableId] = n
+      }
+    }
+
+    return counts
+  }
+)

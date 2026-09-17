@@ -4,7 +4,15 @@ import { extractImageRefs } from '@/lib/embedded-images'
 import { dedupeGeneratedImageEchoesInParts } from '@/lib/generated-images'
 import type { MessageReaction, SessionMessage } from '@/types/hermes'
 
-import { assistantTextPart, chatMessageText, dedupeRepeatedTextInParts, reasoningPart, textPart } from './parts'
+import {
+  assistantTextPart,
+  chatMessageText,
+  dedupeRepeatedTextInParts,
+  dedupeRepeatedToolCallsInParts,
+  reasoningPart,
+  stripStateSignature,
+  textPart
+} from './parts'
 import {
   applyStoredToolResult,
   applyStoredToolResultToParts,
@@ -87,6 +95,47 @@ function codexMessageItemText(message: SessionMessage): string {
   return texts.join('')
 }
 
+/** Scheduler-written durable deliveries prefix their content with
+ * "[Cron delivery: <job name>]\n". Paired with `observed` provenance the
+ * sentinel identifies the row as a delivery — the UI lifts it into a divider
+ * and shows only the payload. */
+const CRON_DELIVERY_SENTINEL_RE = /^\s*\[Cron delivery:\s*([^\]]*)\]\s*/
+
+/** The controller/routing trailer tokens a delivery carries (the same shapes
+ *  `stripStateSignature` removes from the visible text). Collected verbatim
+ *  so `deliveryNeedsOwner` can read their fields. */
+const DELIVERY_TRAILER_RE = /\[(?:STATE_SIGNATURE|CTRL):[^\n]{1,4096}\]/gi
+const DECISION_TRAILER_RE = /\[DECISION:/i
+/** "Action Thomas : <value>" — the controller's owner-facing ask line. */
+const ACTION_OWNER_LINE_RE = /^[ \t]*(?:\*\*)?Action Thomas\s*(?:\*\*)?\s*:\s*(.*)$/im
+/** Values that mean "nothing to do" ("aucune pour l’instant." included). */
+const NO_ACTION_VALUE_RE = /^(?:\*\*)?\s*(?:aucune|none|rien)\b/i
+const BLOCKER_FIELD_RE = /\bblocker\s*=\s*([^|\]]*)/i
+const NO_BLOCKER_VALUE_RE = /^(?:none|null|no|-|n\/a)?$/i
+
+/** Whether a delivery is waiting on the owner and must not auto-collapse.
+ *  `text` is the visible body (trailers already stripped); `trailer` is the
+ *  raw `[CTRL: …]` / `[STATE_SIGNATURE: …]` token text. Pure. */
+export function deliveryNeedsOwner(text: string, trailer: string): boolean {
+  if (DECISION_TRAILER_RE.test(text)) {
+    return true
+  }
+
+  const action = ACTION_OWNER_LINE_RE.exec(text)?.[1]?.trim() ?? ''
+
+  if (action && !NO_ACTION_VALUE_RE.test(action)) {
+    return true
+  }
+
+  const blocker = BLOCKER_FIELD_RE.exec(trailer)?.[1]?.trim() ?? ''
+
+  return !NO_BLOCKER_VALUE_RE.test(blocker)
+}
+
+function deliveryTrailer(content: null | string | undefined): string {
+  return content ? (content.match(DELIVERY_TRAILER_RE) ?? []).join(' ') : ''
+}
+
 function displayContentForMessage(role: SessionMessage['role'], content: unknown): string {
   const textContent = textFromUnknown(content)
 
@@ -122,7 +171,7 @@ function displayContentForMessage(role: SessionMessage['role'], content: unknown
 }
 
 function transcriptContent(displayKind: SessionMessage['display_kind'], content: string): string | null {
-  return displayKind === 'hidden' ? null : content
+  return displayKind === 'hidden' || displayKind === 'intentional_silence' ? null : content
 }
 
 // A remote backend older than this app serves display_metadata as raw JSON text,
@@ -199,6 +248,98 @@ function asyncResultBody(content: string): string | undefined {
   )
 }
 
+/** Rows the mission-callback route wrote before it typed them. Same three
+ *  fixed prefixes as `tui_gateway/server.py::_legacy_display_kind`; this is
+ *  the migration for transcripts already on disk, not how new rows get typed. */
+const MISSION_CALLBACK_WAKE_PREFIX = 'A routed mission-complete callback'
+const MISSION_CALLBACK_SEPARATOR_PREFIX = 'A mission you started has finished'
+const MISSION_CALLBACK_PREFIX = '[Mission callback:'
+
+export function legacyDisplayKind(role: SessionMessage['role'], text: string): SessionMessage['display_kind'] | undefined {
+  const stripped = text.trimStart()
+
+  if (role === 'user' && stripped.startsWith(MISSION_CALLBACK_WAKE_PREFIX)) {
+    return 'mission_callback_wake'
+  }
+
+  if (role === 'user' && stripped.startsWith(MISSION_CALLBACK_SEPARATOR_PREFIX)) {
+    return 'hidden'
+  }
+
+  if (role === 'assistant' && stripped.startsWith(MISSION_CALLBACK_PREFIX)) {
+    return 'mission_callback'
+  }
+
+  return undefined
+}
+
+/** User rows that are events, not operator prompts. They render as timeline
+ *  lines and must never take part in prompt de-duplication. */
+export const SYSTEM_TYPED_USER_KINDS: ReadonlySet<string> = new Set([
+  'model_switch',
+  'async_delegation_complete',
+  'process_complete',
+  'auto_continue',
+  'personality_switch',
+  'mission_callback_wake'
+])
+
+function missionCallbackFacts(metadata: SessionMessage['display_metadata'], content: string): { status: string; title: string } {
+  const parsed = parseDisplayMetadata(metadata)
+  const metaTitle = typeof parsed?.title === 'string' ? parsed.title.trim() : ''
+  const metaStatus = typeof parsed?.status === 'string' ? parsed.status.trim() : ''
+  // Legacy rows carry the facts in the prose: "[Mission callback: <title>]\nstatus=<s> mission=…".
+  const headerTitle = /^\s*\[Mission callback:\s*([^\]]*)\]/.exec(content)?.[1]?.trim() ?? ''
+  const proseStatus = /^status=(\S+)/m.exec(content)?.[1]?.trim() ?? ''
+
+  return { status: metaStatus || proseStatus, title: metaTitle || headerTitle }
+}
+
+/** "mission finished · <title> · <status>" — the divider / timeline label. */
+export function missionCallbackLabel(metadata: SessionMessage['display_metadata'], content: string): string {
+  const { status, title } = missionCallbackFacts(metadata, content)
+
+  return ['mission finished', title, status].filter(Boolean).join(' · ')
+}
+
+/** The callback prose without its machine header line — the divider carries it. */
+function missionCallbackBody(content: string): string {
+  return content.replace(/^\s*\[Mission callback:[^\n]*\n?/, '').replace(/^status=[^\n]*\n?/, '')
+}
+
+const INTENTIONAL_SILENCE_MARKERS = new Set(['[SILENT]', 'SILENT', 'NO_REPLY', 'NO REPLY'])
+
+function withoutIntentionalSilenceTurns(messages: SessionMessage[]): SessionMessage[] {
+  const hidden = new Set<number>()
+  let turnStart: null | number = null
+
+  messages.forEach((message, index) => {
+    if (message.role === 'user') {
+      turnStart = index
+    }
+
+    if (message.display_kind === 'intentional_silence') {
+      hidden.add(index)
+    }
+
+    const content = textFromUnknown(message.content || message.text || message.context || message.name)
+
+    if (message.role === 'assistant' && INTENTIONAL_SILENCE_MARKERS.has(content.trim().toUpperCase())) {
+      const start = turnStart ?? index
+      const trigger = messages[start]
+      const triggerContent = textFromUnknown(trigger.content || trigger.text || trigger.context || trigger.name)
+
+      if (triggerContent.toLowerCase().includes('sandboxed.sh mission changed status')) {
+        for (let turnIndex = start; turnIndex <= index; turnIndex += 1) {
+          hidden.add(turnIndex)
+        }
+      }
+    }
+  })
+
+  return messages.filter((_message, index) => !hidden.has(index))
+}
+
 function timelineDisplayContent(message: SessionMessage, content: string): string {
   if (message.display_kind === 'model_switch') {
     return 'model changed'
@@ -227,10 +368,16 @@ function timelineDisplayContent(message: SessionMessage, content: string): strin
     return timelineDisplayText(message.display_metadata) ?? 'background process finished'
   }
 
+  if (message.display_kind === 'mission_callback_wake') {
+    // Never the wake prompt itself — the operator did not type it.
+    return missionCallbackLabel(message.display_metadata, '')
+  }
+
   return content
 }
 
 export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
+  const visibleMessages = withoutIntentionalSilenceTurns(messages)
   const result: ChatMessage[] = []
   let pendingToolParts: ChatMessagePart[] = []
   let pendingToolTimestamp: number | undefined
@@ -284,7 +431,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     clearPendingTools()
   }
 
-  messages.forEach((message, index) => {
+  visibleMessages.forEach((message, index) => {
     if (message.role === 'tool') {
       const updatedPendingToolParts = applyStoredToolResultToParts(pendingToolParts, message)
 
@@ -309,19 +456,54 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
         ? message.display_content
         : message.content || message.text || message.context || message.name
 
+    const contentText = textFromUnknown(content)
+
+    // Preserve compatibility with cron rows written before delivery switched
+    // to the assistant role. Requiring both provenance and the scheduler
+    // sentinel prevents a human-authored lookalike from spoofing agent output.
+    const isObserved = message.observed === true || message.observed === 1
+
+    const deliveryMatch = isObserved ? CRON_DELIVERY_SENTINEL_RE.exec(contentText) : null
+
+    const isObservedCronDelivery = message.role === 'user' && deliveryMatch !== null
+
+    // Untyped legacy mission-callback rows get their kind from the fixed prefix.
+    const displayKind = message.display_kind ?? legacyDisplayKind(message.role, contentText)
+    const typedMessage: SessionMessage = displayKind === message.display_kind ? message : { ...message, display_kind: displayKind }
+
+    const durableDisplayRole: SessionMessage['role'] =
+      displayKind !== undefined && SYSTEM_TYPED_USER_KINDS.has(displayKind) ? 'system' : message.role
+
+    const displayRole: SessionMessage['role'] = isObservedCronDelivery ? 'assistant' : durableDisplayRole
+
+    const isMissionCallback = displayKind === 'mission_callback' && message.role === 'assistant'
+
+    const deliveryBase: Pick<NonNullable<ChatMessage['delivery']>, 'kind' | 'label'> | undefined = isMissionCallback
+      ? { kind: 'mission_callback', label: missionCallbackLabel(message.display_metadata, contentText) }
+      : deliveryMatch && displayRole === 'assistant'
+        ? { kind: 'cron', label: deliveryMatch[1].trim() || 'cron' }
+        : undefined
+
     const rawDisplayContent = transcriptContent(
-      message.display_kind,
-      timelineDisplayContent(message, displayContentForMessage(message.role, content))
+      displayKind,
+      timelineDisplayContent(typedMessage, displayContentForMessage(message.role, content))
     )
 
-    const displayRole =
-      message.display_kind === 'model_switch' ||
-      message.display_kind === 'async_delegation_complete' ||
-      message.display_kind === 'process_complete' ||
-      message.display_kind === 'auto_continue' ||
-      message.display_kind === 'personality_switch'
-        ? 'system'
-        : message.role
+    // The sentinel is provenance, not prose — the divider carries the label.
+    const sentinelStrippedContent = stripStateSignature(
+      deliveryBase && rawDisplayContent
+        ? isMissionCallback
+          ? missionCallbackBody(rawDisplayContent)
+          : rawDisplayContent.replace(CRON_DELIVERY_SENTINEL_RE, '')
+        : rawDisplayContent
+    )
+
+    const delivery: ChatMessage['delivery'] = deliveryBase
+      ? {
+          ...deliveryBase,
+          needsOwner: deliveryNeedsOwner(sentinelStrippedContent ?? '', deliveryTrailer(rawDisplayContent))
+        }
+      : undefined
 
     // Persisted user turns carry `@image:<path>` directive lines inline in
     // the text (see tui_gateway/server.py's persist-time rewrite). The
@@ -330,8 +512,8 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     // pull image refs out into `attachmentRefs` (same shape the local
     // optimistic composer already uses) and render them via the dedicated
     // attachments row below the bubble instead.
-    const imageRefExtraction = displayRole === 'user' && rawDisplayContent ? extractImageRefs(rawDisplayContent) : null
-    const displayContent = imageRefExtraction ? imageRefExtraction.cleanedText : rawDisplayContent
+    const imageRefExtraction = displayRole === 'user' && sentinelStrippedContent ? extractImageRefs(sentinelStrippedContent) : null
+    const displayContent = imageRefExtraction ? imageRefExtraction.cleanedText : sentinelStrippedContent
     const extractedAttachmentRefs = imageRefExtraction?.refs.length ? imageRefExtraction.refs : undefined
 
     const parts: ChatMessagePart[] = []
@@ -405,7 +587,9 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       const currentHasToolCall = parts.some(part => part.type === 'tool-call')
       const activeHasToolCall = Boolean(activeAssistant?.parts.some(part => part.type === 'tool-call'))
 
-      if (activeAssistant && (currentHasToolCall || activeHasToolCall)) {
+      // Deliveries are out-of-band drops: never fold one into the turn that
+      // happens to precede it.
+      if (activeAssistant && !delivery && (currentHasToolCall || activeHasToolCall)) {
         activeAssistant.parts = [...activeAssistant.parts, ...parts]
         activeAssistant.timestamp = earliestTimestamp(
           activeAssistant.timestamp,
@@ -436,16 +620,23 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       timestamp: earliestTimestamp(message.timestamp, ...parts.map(part => part.timestamp)),
       ...(rowId !== undefined ? { rowId } : {}),
       ...(reactions.length ? { reactions } : {}),
-      ...(extractedAttachmentRefs ? { attachmentRefs: extractedAttachmentRefs } : {})
+      ...(extractedAttachmentRefs ? { attachmentRefs: extractedAttachmentRefs } : {}),
+      ...(delivery ? { delivery } : {})
     })
 
-    activeAssistantIndex = message.role === 'assistant' ? result.length - 1 : null
+    // A delivery bubble is closed on arrival — later rows must not merge in.
+    activeAssistantIndex = displayRole === 'assistant' && !delivery ? result.length - 1 : null
   })
-  flushPendingTools(messages.length)
+  flushPendingTools(visibleMessages.length)
 
   const withoutGeneratedImageEchoes = result.map(message =>
     message.role === 'assistant'
-      ? { ...message, parts: dedupeRepeatedTextInParts(dedupeGeneratedImageEchoesInParts(message.parts)) }
+      ? {
+          ...message,
+          parts: dedupeRepeatedToolCallsInParts(
+            dedupeRepeatedTextInParts(dedupeGeneratedImageEchoesInParts(message.parts))
+          )
+        }
       : message
   )
 

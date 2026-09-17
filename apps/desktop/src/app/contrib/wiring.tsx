@@ -40,6 +40,7 @@ import { emitGatewayEvent } from '@/contrib/events'
 import { getLatestSessionMessages } from '@/hermes'
 import { translateNow } from '@/i18n'
 import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
+import { dropInFlightTurnJournalRow } from '@/lib/inflight-turn-journal'
 import { isMessagingSource } from '@/lib/session-source'
 import { latestSessionTodos } from '@/lib/todos'
 import { activateWakeIndicator } from '@/lib/wake-indicator'
@@ -863,10 +864,16 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       // $messages as the error-preservation baseline.
       setMessages(clearErrorIn($messages.get()))
 
-      updateSessionState(runtimeSessionId, state => ({
-        ...state,
-        messages: clearErrorIn(state.messages)
-      }))
+      updateSessionState(runtimeSessionId, state => {
+        // The in-flight journal may still carry the failed row; drop it there
+        // too so the dismissed failure never comes back on the next resume.
+        dropInFlightTurnJournalRow(state.storedSessionId, messageId)
+
+        return {
+          ...state,
+          messages: clearErrorIn(state.messages)
+        }
+      })
     },
     [activeSessionIdRef, updateSessionState]
   )

@@ -3259,6 +3259,7 @@ export const zh = defineLocale({
     background: count => `${count} 个后台任务`,
     goalActive: '目标进行中',
     goalBlocked: '目标受阻',
+    projectObjective: '项目目标',
     goalDone: '目标已完成',
     goalPaused: '目标已暂停',
     goalWaiting: '目标等待中',
@@ -4076,6 +4077,8 @@ export const zh = defineLocale({
     thread: {
       loadingSession: '正在加载会话',
       showEarlier: '显示更早的消息',
+      deliveryRunCount: count => `${count} 份报告`,
+      viewFilter: { all: '全部', mine: '我的', reports: '报告' },
       loadingResponse: 'Hermes 正在加载回复',
       loadingLocalModel: model => `正在将 ${model} 载入内存`,
       processingPrompt: '正在处理提示词',

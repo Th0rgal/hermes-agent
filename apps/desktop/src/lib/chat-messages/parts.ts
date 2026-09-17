@@ -118,6 +118,35 @@ export function collectUnspokenTurnSpeech(
 
 const normalizeWs = (value: string) => value.replace(/\s+/g, ' ').trim()
 
+/** `[STATE_SIGNATURE: …]` and `[CTRL: …]` are routing/state tokens for the
+ * ingestor, never for the reader: the first field routes, the rest describes
+ * controller state. The scheduler strips them before delivery, but several
+ * emission shapes defeated its matcher and reached the operator verbatim
+ * (backticks, a bold label, a bracket inside the payload, an over-long
+ * payload). Messages persisted while that was true still carry the markers, so
+ * stripping here is what clears the transcripts that already exist — the server
+ * fix only helps new deliveries.
+ *
+ * Greedy up to the LAST `]` on the line so a nested `[blocked]` is consumed
+ * whole; lazy matching stops at the first `]` and strands the remainder. */
+const STATE_SIGNATURE_RE = /[ \t]*(?:\*\*[^*\n]{0,64}?\*\*[ \t]*:?[ \t]*)?`?\[(?:STATE_SIGNATURE|CTRL):[^\n]{1,4096}\]`?/gi
+
+/** Empty-tag improvisation: `[CTRL:]` then prose *outside* the brackets.
+ *  The structured form is `[CTRL: project | mode=…]`; models sometimes emit
+ *  `[CTRL:] #2332 repair active; …` which the bracket matcher cannot close. */
+const EMPTY_CTRL_LINE_RE = /^[ \t]*\[CTRL:\][^\n]*$/gim
+
+/** Remove the controller markers and the blank line(s) they leave behind. */
+export function stripStateSignature<T extends string | null | undefined>(text: T): T {
+  if (!text || !(text.includes('[STATE_SIGNATURE:') || text.includes('[CTRL:'))) {return text}
+
+  return text
+    .replace(STATE_SIGNATURE_RE, '')
+    .replace(EMPTY_CTRL_LINE_RE, '')
+    .replace(/\n[ \t]*\n[ \t]*\n+/g, '\n\n')
+    .trim() as T
+}
+
 /**
  * Drop earlier text parts that a later text part repeats verbatim (after
  * whitespace normalization). Providers that continue a turn after a tool
@@ -153,6 +182,52 @@ export function dedupeRepeatedTextInParts(parts: ChatMessagePart[]): ChatMessage
   return dropped.length === parts.length ? parts : dropped
 }
 
+
+/**
+ * Collapse tool-call parts that share a `toolCallId`. Providers that echo a
+ * whole assistant row after tools replay the same calls; unique-id rewriting
+ * would then paint two "Ran …" groups (one still spinning). Prefer the copy
+ * that already has a result.
+ */
+export function dedupeRepeatedToolCallsInParts(parts: ChatMessagePart[]): ChatMessagePart[] {
+  const keep = new Map<string, number>()
+
+  parts.forEach((part, index) => {
+    if (part.type !== 'tool-call' || !part.toolCallId) {
+      return
+    }
+
+    const previous = keep.get(part.toolCallId)
+
+    if (previous === undefined) {
+      keep.set(part.toolCallId, index)
+
+      return
+    }
+
+    const previousPart = parts[previous]
+
+    const previousHasResult =
+      previousPart.type === 'tool-call' && 'result' in previousPart && previousPart.result != null
+
+    const hasResult = 'result' in part && part.result != null
+
+    if (hasResult && !previousHasResult) {
+      keep.set(part.toolCallId, index)
+    }
+  })
+
+  const dropped = parts.filter((part, index) => {
+    if (part.type !== 'tool-call' || !part.toolCallId) {
+      return true
+    }
+
+    return keep.get(part.toolCallId) === index
+  })
+
+  return dropped.length === parts.length ? parts : dropped
+}
+
 /**
  * Merge the final assistant text into a message's parts.
  *
@@ -175,6 +250,7 @@ export function mergeFinalAssistantText(
     return parts
   }
 
+  finalText = stripStateSignature(finalText) ?? finalText
   const dedupeReference = normalizeWs(finalText)
 
   const streamedText = normalizeWs(

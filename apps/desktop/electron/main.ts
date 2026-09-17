@@ -17881,6 +17881,8 @@ ipcMain.handle('hermes:version', async () => {
 
   return {
     appVersion: resolveHermesVersion(),
+    installCommit: INSTALL_STAMP?.commit ?? null,
+    installBranch: INSTALL_STAMP?.branch ?? null,
     electronVersion: process.versions.electron,
     nodeVersion: process.versions.node,
     platform: process.platform,

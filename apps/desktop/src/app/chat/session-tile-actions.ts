@@ -16,6 +16,7 @@ import type { ClientSessionState } from '@/app/types'
 import { useI18n } from '@/i18n'
 import { textPart } from '@/lib/chat-messages'
 import { triggerHaptic } from '@/lib/haptics'
+import { dropInFlightTurnJournalRow } from '@/lib/inflight-turn-journal'
 import { clearClarifyRequest } from '@/store/clarify'
 import type { ComposerAttachment } from '@/store/composer'
 import { resetSessionBackground } from '@/store/composer-status'
@@ -672,7 +673,13 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
 
   const dismissError = useCallback(
     (messageId: string) => {
-      update(state => ({ ...state, messages: state.messages.filter(m => m.id !== messageId) }))
+      update(state => {
+        // Drop the failed row from the in-flight journal too, so the dismissed
+        // failure is not replayed on the next resume.
+        dropInFlightTurnJournalRow(state.storedSessionId, messageId)
+
+        return { ...state, messages: state.messages.filter(m => m.id !== messageId) }
+      })
     },
     [update]
   )

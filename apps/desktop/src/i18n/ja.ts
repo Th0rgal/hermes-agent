@@ -2569,6 +2569,7 @@ export const ja = defineLocale({
     background: count => `バックグラウンド ${count} 件`,
     goalActive: '目標進行中',
     goalBlocked: '目標がブロックされています',
+    projectObjective: 'プロジェクト目標',
     goalDone: '目標達成',
     goalPaused: '目標一時停止中',
     goalWaiting: '目標待機中',
@@ -3333,6 +3334,8 @@ export const ja = defineLocale({
     thread: {
       loadingSession: 'セッションを読み込み中',
       showEarlier: '以前のメッセージを表示',
+      deliveryRunCount: count => (count === 1 ? '1 件のレポート' : `${count} 件のレポート`),
+      viewFilter: { all: 'すべて', mine: '自分', reports: 'レポート' },
       loadingResponse: 'Hermes が応答を読み込み中',
       resumeWhenBackgroundDone: count =>
         count === 1

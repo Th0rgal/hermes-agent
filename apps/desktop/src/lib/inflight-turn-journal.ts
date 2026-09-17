@@ -719,10 +719,48 @@ function journalTailAlreadyCommitted(tailAssistants: ChatMessage[], baseMessages
   })
 }
 
+export interface InFlightRecoveryOptions {
+  /** Drop journaled assistant rows that carry an `error` (and the projected
+   *  `user-inflight-*` prompt they orphan) before merging. The gateway is the
+   *  authority on a retained failed turn: it replays the failure through the
+   *  resume snapshot's `inflight.error` while it still holds it, and forgets
+   *  it on restart. A local error row without that server echo is stale and
+   *  must not resurface as a fresh "Turn failed" card on every resume. */
+  dropRetainedErrors?: boolean
+  keepPending?: boolean
+}
+
+/** Whether the row is a user prompt the resume projection minted from
+ *  `inflight.user` (never a persisted transcript row). */
+function isProjectedInflightUserRow(message: ChatMessage): boolean {
+  return message.role === 'user' && message.id.startsWith('user-inflight-')
+}
+
+/** Strip retained error rows from a journal tail; see
+ *  `InFlightRecoveryOptions.dropRetainedErrors`. A projected `user-inflight-*`
+ *  prompt that no longer has any recoverable assistant row after it is
+ *  dropped too — it only existed to anchor the failed turn. Returns the same
+ *  array reference when nothing changed. */
+export function withoutRetainedErrorRows(messages: ChatMessage[]): ChatMessage[] {
+  if (!messages.some(message => message.role === 'assistant' && Boolean(message.error))) {
+    return messages
+  }
+
+  const kept = messages.filter(message => !(message.role === 'assistant' && Boolean(message.error)))
+
+  return kept.filter((message, index) => {
+    if (!isProjectedInflightUserRow(message)) {
+      return true
+    }
+
+    return kept.slice(index + 1).some(assistantHasRecoverableContent)
+  })
+}
+
 export function mergeInFlightMessages(
   baseMessages: ChatMessage[],
   tailMessages: ChatMessage[],
-  options: { keepPending?: boolean } = {}
+  options: InFlightRecoveryOptions = {}
 ): InFlightRecoveryResult {
   const noop: InFlightRecoveryResult = {
     applied: false,
@@ -732,7 +770,10 @@ export function mergeInFlightMessages(
     turnStartedAt: null
   }
 
-  const tail = normalizeRecoveredTail(tailMessages, Boolean(options.keepPending))
+  const tail = normalizeRecoveredTail(
+    options.dropRetainedErrors ? withoutRetainedErrorRows(tailMessages) : tailMessages,
+    Boolean(options.keepPending)
+  )
 
   if (!tail.some(assistantHasRecoverableContent)) {
     return noop
@@ -964,9 +1005,15 @@ export function readInFlightTurnJournal(storedSessionId: null | string): InFligh
 export function recoverInFlightTurnJournal(
   storedSessionId: null | string,
   baseMessages: ChatMessage[],
-  options: { keepPending?: boolean } = {}
+  options: InFlightRecoveryOptions = {}
 ): InFlightRecoveryResult {
-  const snapshot = readInFlightTurnJournal(storedSessionId)
+  let snapshot = readInFlightTurnJournal(storedSessionId)
+
+  if (snapshot && options.dropRetainedErrors) {
+    // Persist the pruned journal so the stale failure cannot come back on the
+    // next open either — the merge below only affects this resume's view.
+    snapshot = pruneRetainedErrorRows(storedSessionId, snapshot)
+  }
 
   if (!snapshot) {
     return {
@@ -993,6 +1040,76 @@ export function recoverInFlightTurnJournal(
     streamId: recovered.applied ? (recovered.streamId ?? (options.keepPending ? snapshot.streamId : null)) : null,
     turnStartedAt: recovered.applied ? snapshot.turnStartedAt : null
   }
+}
+
+/** Replace a session's journal entry with `messages`, or clear the entry when
+ *  the remaining rows hold nothing worth recovering. Returns the snapshot now
+ *  on disk (null once cleared). */
+function rewriteSnapshotMessages(
+  storedSessionId: string,
+  snapshot: InFlightTurnSnapshot,
+  messages: ChatMessage[]
+): InFlightTurnSnapshot | null {
+  if (!messages.some(assistantHasRecoverableContent)) {
+    clearInFlightTurnJournal(storedSessionId)
+
+    return null
+  }
+
+  const next: InFlightTurnSnapshot = {
+    ...snapshot,
+    messages,
+    streamId: messages.some(message => message.id === snapshot.streamId) ? snapshot.streamId : null
+  }
+
+  const store = storage()
+  const key = sessionStorageKey(storedSessionId)
+  const raw = serializeSnapshot(next)
+
+  if (store && key && raw && !writeRaw(store, key, raw)) {
+    // A failed rewrite must not leave the stale rows behind.
+    clearInFlightTurnJournal(storedSessionId)
+
+    return null
+  }
+
+  return next
+}
+
+function pruneRetainedErrorRows(
+  storedSessionId: null | string,
+  snapshot: InFlightTurnSnapshot
+): InFlightTurnSnapshot | null {
+  const pruned = withoutRetainedErrorRows(snapshot.messages)
+
+  if (pruned === snapshot.messages || !storedSessionId) {
+    return snapshot
+  }
+
+  return rewriteSnapshotMessages(storedSessionId, snapshot, pruned)
+}
+
+/** Remove one row from a session's journal entry (a dismissed failed turn
+ *  must never be replayed on the next resume). Clears the entry when nothing
+ *  recoverable remains; no-op when the row is not journaled. */
+export function dropInFlightTurnJournalRow(storedSessionId: null | string, messageId: string): void {
+  if (!storedSessionId) {
+    return
+  }
+
+  const snapshot = readInFlightTurnJournal(storedSessionId)
+
+  if (!snapshot || !snapshot.messages.some(message => message.id === messageId)) {
+    return
+  }
+
+  const kept = snapshot.messages.filter(message => message.id !== messageId)
+
+  const remaining = kept.filter(
+    (message, index) => !isProjectedInflightUserRow(message) || kept.slice(index + 1).some(assistantHasRecoverableContent)
+  )
+
+  rewriteSnapshotMessages(storedSessionId, snapshot, remaining)
 }
 
 export function clearInFlightTurnJournal(storedSessionId: null | string): void {

@@ -289,6 +289,13 @@ class SessionMessagesMixin:
         the platform's own id. ``api_content``: byte-fidelity sidecar, the exact string sent to the API when
         it differed from ``content``, stored as sent except lone surrogates."""
         msg = dict(locals())  # every keyword above is a message-dict field of the same name
+        if role == "assistant":
+            try:
+                from cron.controller_scope import sanitize_observer_output
+
+                msg["content"] = sanitize_observer_output(content)
+            except Exception:
+                pass
         # Encode outside the write txn (display metadata first: log-order parity).
         msg["display_metadata"] = self._encode_display_metadata(display_metadata)
         tool_calls = _parse_tool_calls(tool_calls)
@@ -354,9 +361,24 @@ class SessionMessagesMixin:
             self._check_transcript_write_guards(conn, session_id, compression_lock_holder,
                 turn_lease_holder=turn_lease_holder, turn_lease_ttl_seconds=turn_lease_ttl_seconds)
             from agent.transcript_repair import resolve_and_repair_transcript_batch
-            inserted_rows = resolve_and_repair_transcript_batch(conn, session_id, messages,
-                encode_content_fn=self._encode_content, decode_content_fn=self._decode_content)
+            from cron.controller_scope import sanitize_observer_output
+
+            inserted_rows = resolve_and_repair_transcript_batch(
+                conn, session_id, messages,
+                encode_content_fn=lambda content: self._encode_content(sanitize_observer_output(content)),
+                decode_content_fn=self._decode_content,
+            )
+            for message in messages:
+                if message.get("role") == "assistant" and "_canonical_content" in message:
+                    original = message.get("content")
+                    canonical = message["_canonical_content"]
+                    if canonical != original and canonical == sanitize_observer_output(original):
+                        message.pop("_canonical_content")
             inserted, tool_calls_total = self._insert_message_rows(conn, session_id, inserted_rows)
+            if len(inserted_rows) == len(messages):
+                for src, dest in zip(inserted_rows, messages):
+                    if "_row_id" in src:
+                        dest["_row_id"] = src["_row_id"]
             self._bump_session_counters(conn, session_id, inserted, tool_calls_total, unit=False)
             return inserted
         return self._execute_write(_do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
@@ -481,10 +503,14 @@ class SessionMessagesMixin:
         inserted = tool_calls_total = 0
         for msg in messages:
             role = msg.get("role", "unknown")
-            tool_calls = _parse_tool_calls(msg.get("tool_calls"))
-            message_timestamp = _coerce_timestamp(msg.get("timestamp"), now_ts)
+            stored = msg
+            if role == "assistant":
+                from cron.controller_scope import sanitize_observer_output
+                stored = {**msg, "content": sanitize_observer_output(msg.get("content"))}
+            tool_calls = _parse_tool_calls(stored.get("tool_calls"))
+            message_timestamp = _coerce_timestamp(stored.get("timestamp"), now_ts)
             cur = conn.execute(_INSERT_MESSAGE_SQL, self._message_row_params(
-                session_id, role, msg, tool_calls, message_timestamp, keep_reasoning=role == "assistant"))
+                session_id, role, stored, tool_calls, message_timestamp, keep_reasoning=role == "assistant"))
             if cur.lastrowid is not None:
                 msg["_row_id"] = cur.lastrowid
             inserted += 1
@@ -939,6 +965,16 @@ class SessionMessagesMixin:
                 current = child_row["id"]
                 seen.add(current)
             return best if best is not None else session_id
+
+    def resolve_delivery_session_id(self, session_id: str) -> str:
+        """Return the explicit continuation tip used for delivery.
+
+        Compression continuations are safe because they replace the parent
+        conversation. Delegate, branch, reset, cron, and tool children are
+        separate conversations and must never capture delivery merely because
+        they are newer. Adopting one requires rebinding the project route.
+        """
+        return self.resolve_resume_session_id(session_id) or session_id
 
     def _fetch_conversation_rows(self, session_ids: List[str], active_clause: str, *, with_session_id: bool):
         """``_CONVERSATION_ROW_COLUMNS`` rows for *session_ids* ORDER BY id (timestamps are not monotonic

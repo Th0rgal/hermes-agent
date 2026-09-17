@@ -217,6 +217,8 @@ def gate_manifest(
         # invocation. A deferred loader keeps every platform available on first use.
         if manifest.kind == "platform":
             return ManifestGate("defer")
+        if manifest.kind == "standalone" and manifest.default_enabled:
+            return ManifestGate("load_now")
     if enabled is None or not names & enabled:
         return _placeholder(
             f"not enabled in config (run `hermes plugins enable {lookup_key}` to activate)", logging.DEBUG,

@@ -115,6 +115,13 @@ class CompressionConfig:
     protect_first_gpt: bool = True
     protect_first_tool: bool = True
     protect_last_n_turns: int = 4
+    # Tier-A fallback: last-resort elision of bulky tool responses when the
+    # normal summarise-the-middle pass still leaves the request over the budget
+    # (e.g. a huge tool_result sits inside a PROTECTED head/tail turn).
+    tool_elision_fallback: bool = True
+    tool_elision_threshold_tokens: int = 1500
+    tool_elision_keep_head_chars: int = 600
+    tool_elision_keep_tail_chars: int = 600
     summarization_model: str = "google/gemini-3-flash-preview"
     base_url: str = OPENROUTER_BASE_URL
     api_key_env: str = "OPENROUTER_API_KEY"
@@ -166,6 +173,7 @@ class TrajectoryMetrics:
     was_compressed: bool = False
     still_over_limit: bool = False
     skipped_under_target: bool = False
+    tool_elision_applied: bool = False
     summarization_api_calls: int = 0
     summarization_errors: int = 0
 
@@ -357,6 +365,70 @@ class TrajectoryCompressor:
 
     def count_turn_tokens(self, trajectory: List[Dict[str, str]]) -> List[int]:
         return [self.count_tokens(turn.get("value", "")) for turn in trajectory]
+
+    def _elide_bulky_tool_results(
+        self, trajectory: List[Dict[str, str]], target_max_tokens: int
+    ) -> Tuple[List[Dict[str, str]], int]:
+        """Last-resort Tier-A fallback: truncate the largest tool-response turns
+        to a head+tail window until the trajectory fits ``target_max_tokens``.
+        Oldest-first; the most-recent tool turn is preserved verbatim."""
+        turn_tokens = self.count_turn_tokens(trajectory)
+        total = sum(turn_tokens)
+        if total <= target_max_tokens:
+            return trajectory, 0
+        last_tool_idx = max(
+            (i for i, t in enumerate(trajectory) if t.get("from") == "tool"),
+            default=-1,
+        )
+        candidates = [
+            i for i, t in enumerate(trajectory)
+            if t.get("from") == "tool"
+            and i != last_tool_idx
+            and turn_tokens[i] > self.config.tool_elision_threshold_tokens
+        ]
+        if not candidates:
+            return trajectory, 0
+        result = [t.copy() for t in trajectory]
+        head_n = self.config.tool_elision_keep_head_chars
+        tail_n = self.config.tool_elision_keep_tail_chars
+        saved = 0
+        for i in candidates:
+            if total - saved <= target_max_tokens:
+                break
+            value = result[i].get("value", "")
+            if len(value) <= head_n + tail_n:
+                continue
+            before = turn_tokens[i]
+            elided = (
+                value[:head_n]
+                + f"\n\n… [tool output elided to fit context: {before:,} tokens, "
+                f"{len(value):,} chars] …\n\n"
+                + value[-tail_n:]
+            )
+            result[i]["value"] = elided
+            saved += before - self.count_tokens(elided)
+        return result, saved
+
+    def compress_to_fit(
+        self,
+        trajectory: List[Dict[str, str]],
+        target_max_tokens: Optional[int] = None,
+    ) -> Tuple[List[Dict[str, str]], "TrajectoryMetrics"]:
+        """Compress, then apply tool-result elision if still over budget."""
+        result, metrics = self.compress_trajectory(trajectory)
+        budget = target_max_tokens or self.config.target_max_tokens
+        if metrics.still_over_limit and self.config.tool_elision_fallback:
+            result, saved = self._elide_bulky_tool_results(result, budget)
+            if saved > 0:
+                metrics.compressed_tokens = self.count_trajectory_tokens(result)
+                metrics.tokens_saved = metrics.original_tokens - metrics.compressed_tokens
+                metrics.compression_ratio = metrics.compressed_tokens / max(
+                    metrics.original_tokens, 1
+                )
+                metrics.compressed_turns = len(result)
+                metrics.still_over_limit = metrics.compressed_tokens > budget
+                metrics.tool_elision_applied = True
+        return result, metrics
 
     def _find_protected_indices(self, trajectory: List[Dict[str, str]]) -> Tuple[set, int, int]:
         """Return ``(protected_set, compressible_start, compressible_end)``."""

@@ -1046,11 +1046,11 @@ class GatewayNotificationsMixin:
         turn's event.complete the CLIENT owns the next turn on this stateless surface, so never
         self-post them as a new role=user prompt. Other watch events wake the session via self-post.
         """
-        from gateway.wake import deliver_wake, persist_delegation_delivery
+        from gateway.wake import deliver_api_delegation, deliver_wake
         if evt.get("type") == "async_delegation":
-            info = "Async delegation completion — persisting delivery row for api_server session %s (no wake turn)"
-            fail = "Async delegation delivery persist failed for session %s: %s"
-            deliver = lambda: persist_delegation_delivery(adapter, text=synth_text, session_id=raw_sid, evt=evt)  # noqa: E731
+            info = "Async delegation completion — delivering to api_server session %s"
+            fail = "Async delegation delivery failed for session %s: %s"
+            deliver = lambda: deliver_api_delegation(adapter, text=synth_text, session_id=raw_sid, evt=evt)  # noqa: E731
         else:
             info = "Watch pattern notification — waking api_server session %s via self-post"
             fail = "Watch notification self-post wake failed for session %s: %s"

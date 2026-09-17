@@ -270,11 +270,13 @@ def _tool_defs_cache_key(
         cfg_fp = file_signature(cfg_stat)
     except (FileNotFoundError, OSError, ImportError):
         cfg_fp = None
+    from cron.controller_scope import observer_mode
     return (
         registry.current_scope_key(), frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
         frozenset(disabled_toolsets) if disabled_toolsets else None, registry._generation, cfg_fp,
         bool(os.environ.get("HERMES_KANBAN_TASK")), bool(skip_tool_search_assembly),
         _is_delegated_child_context(), _is_dispatcher_owned_worker(), profile_scope,
+        observer_mode(),
     )
 
 
@@ -506,6 +508,10 @@ def _compute_tool_definitions(enabled_toolsets: Optional[List[str]] = None, disa
     from tools.kanban_toolset_context import scoped_kanban_toolset_selection
     with scoped_kanban_toolset_selection(enabled_toolsets):
         filtered_tools = _apply_dynamic_schemas(registry.get_definitions(tools_to_include, quiet=quiet_mode))
+    # Filter before progressive disclosure so both direct and deferred catalogs
+    # expose the same observer surface. Its mode is part of the cache key.
+    from cron.controller_scope import filter_observer_tool_definitions
+    filtered_tools = filter_observer_tool_definitions(filtered_tools)
     global _last_resolved_tool_names
     _last_resolved_tool_names = [t["function"]["name"] for t in filtered_tools]
 
@@ -830,6 +836,11 @@ def _execute_tool(function_name: str, function_args: Dict[str, Any], original_ar
         from tools.connectors import dispatch_connector_call, is_connector_name
         if is_connector_name(function_name):
             return dispatch_connector_call(function_name, next_args, ids.tool_call_id)
+        from cron.controller_scope import guard_sandboxed_call
+        next_args = guard_sandboxed_call(
+            function_name, next_args,
+            lambda name, args: registry.dispatch(name, args, **dispatch_kwargs),
+        )
         return registry.dispatch(function_name, next_args, **dispatch_kwargs)
 
     with _approval_observability(ids):
@@ -885,6 +896,13 @@ def handle_function_call(
         function_args = {}
     trace = list(tool_request_middleware_trace or [])
     function_name = _LEGACY_TOOL_ALIASES.get(function_name, function_name)
+    # Direct callers (including execute_code RPC) do not necessarily pass
+    # through the agent executor. Reject executable/non-read surfaces before
+    # any handler can run; deferred calls recurse through this gate too.
+    from cron.controller_scope import observer_tool_error
+    observer_error = observer_tool_error(function_name)
+    if observer_error:
+        return tool_error(observer_error)
     ids = _CallIds(task_id, session_id, tool_call_id, turn_id, api_request_id)
     start = time.monotonic()
 

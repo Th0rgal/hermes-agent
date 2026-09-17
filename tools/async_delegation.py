@@ -113,6 +113,33 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     # nullability/defaults depending on which authority touched the database
     # first (#94691).
     reconcile_state_schema(conn)
+    _ensure_mission_schema(conn)
+
+
+def _ensure_mission_schema(conn: sqlite3.Connection) -> None:
+    """Mission-delegation columns/indexes. Canonical SCHEMA_SQL may not have
+    them yet (schema merge is separate); keep the ledger usable for mission rows."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(async_delegations)")}
+    if not columns:
+        return
+    for name, sql_type in (
+        ("mission_id", "TEXT"),
+        ("mission_run_id", "TEXT"),
+        ("mission_generation", "INTEGER"),
+        ("mission_event_id", "TEXT"),
+        ("mission_resume_key", "TEXT"),
+    ):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE async_delegations ADD COLUMN {name} {sql_type}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_async_delegations_mission_id "
+        "ON async_delegations(mission_id)"
+    )
+    for field in ("mission_run_id", "mission_generation", "mission_resume_key"):
+        conn.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS idx_async_delegations_{field} "
+            f"ON async_delegations(mission_id, {field}) WHERE {field} IS NOT NULL"
+        )
 
 
 def _transaction():
@@ -141,7 +168,8 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
         owner_started_at = None
     task_payload = {
         key: record.get(key)
-        for key in ("goal", "goals", "context", "toolsets", "role", "model", "is_batch", "task_indexes", *_ROUTING_KEYS)
+        for key in ("goal", "goals", "context", "toolsets", "role", "model", "is_batch", "task_indexes",
+                    *_ROUTING_KEYS, "backend", "workspace_id", "project", "mission_receipt_version")
         if key in record}
     with _DB_LOCK, _transaction() as conn:
         conn.execute("""INSERT OR REPLACE INTO async_delegations
@@ -181,14 +209,21 @@ def _prune_durable_records() -> None:
                    )""", (pending_count - _MAX_DURABLE_PENDING,))
 
 
-def _persist_completion(event: Dict[str, Any], result: Dict[str, Any]) -> None:
+def _persist_completion(event: Dict[str, Any], result: Dict[str, Any]) -> bool:
     now = time.time()
     with _DB_LOCK, _transaction() as conn:
-        conn.execute("""UPDATE async_delegations SET state=?, completed_at=?, updated_at=?,
-               event_json=?, result_json=?, delivery_state='pending'
-               WHERE delegation_id=?""",
+        # A repeated native terminal event must not overwrite a pending or
+        # claimed receipt, nor queue it twice across competing processes.
+        once = " AND event_json IS NULL" if event.get("mission_completion") else ""
+        cur = conn.execute(
+            """UPDATE async_delegations SET state=?, completed_at=?, updated_at=?,
+               event_json=?, result_json=?, delivery_state='pending',
+               mission_event_id=CASE WHEN ? THEN ? ELSE mission_event_id END
+               WHERE delegation_id=?""" + once,
             (event.get("status", "completed"), event.get("completed_at", now), now,
-             json.dumps(event), json.dumps(result), event["delegation_id"]))
+             json.dumps(event), json.dumps(result), bool(event.get("mission_completion")),
+             event.get("mission_event_id"), event["delegation_id"]))
+        return cur.rowcount == 1
 
 
 def record_unit_child(delegation_id: str, entry: Dict[str, Any]) -> None:
@@ -232,13 +267,21 @@ def recover_abandoned_delegations() -> int:
     with _DB_LOCK, _transaction() as conn:
         rows = conn.execute("""SELECT delegation_id, origin_session, origin_ui_session_id,
                       parent_session_id, dispatched_at, owner_pid,
-                      owner_started_at, task_json, origin_session_id, result_json
+                      owner_started_at, task_json, origin_session_id, result_json,
+                      mission_id, mission_generation
                FROM async_delegations WHERE state IN ('running','finalizing')""").fetchall()
         for row in rows:
-            delegation_id, session_key, origin_ui, parent_id, dispatched_at, pid, started, task_json, origin_sid, result_json = row
+            (delegation_id, session_key, origin_ui, parent_id, dispatched_at, pid, started,
+             task_json, origin_sid, result_json, mission_id, mission_generation) = row
+            task = json.loads(task_json or "{}")
+            if mission_id and task.get("backend") == "mission" and (
+                mission_generation is not None or task.get("mission_receipt_version") == 1
+            ):
+                # The gateway does not own the external runner. A restart is
+                # not a terminal result; keep the pending native receipt.
+                continue
             if pid and _pid_exists(int(pid)) and (started is None or get_process_start_time(int(pid)) == int(started)):
                 continue
-            task = json.loads(task_json or "{}")
             error = "Delegation owner exited before recording a terminal result; outcome unknown."
             recovered_results = _recovered_results(task, result_json, error)
             if recovered_results:
@@ -350,6 +393,251 @@ def claim_event_delivery(evt: Dict[str, Any], consumer: str) -> Optional[str]:
         return ""
     claim_id = f"{consumer}:{os.getpid()}:{uuid.uuid4().hex}"
     return claim_id if claim_completion_delivery(delegation_id, claim_id) else None
+
+
+_MISSION_ROW_FIELDS = (
+    "delegation_id", "parent_session_id", "origin_session",
+    "origin_session_id", "origin_ui_session_id", "delivery_state",
+    "state", "task_json", "event_json", "mission_id", "mission_run_id",
+    "mission_generation", "mission_event_id", "mission_resume_key", "dispatched_at",
+)
+
+
+def _mission_rows(conn, mission_id: str) -> list:
+    rows = conn.execute(
+        f"SELECT {', '.join(_MISSION_ROW_FIELDS)} FROM async_delegations "
+        "WHERE mission_id=? ORDER BY mission_generation DESC, dispatched_at DESC, delegation_id",
+        (mission_id,),
+    ).fetchall()
+    return [dict(zip(_MISSION_ROW_FIELDS, row)) for row in rows]
+
+
+def find_delegation_by_mission_id(mission_id: str) -> Optional[Dict[str, Any]]:
+    """Return the newest enrolled execution of a native mission, or None.
+
+    Authentication anchor for the webhook fork: a mission result is folded
+    into a parent turn ONLY when this returns a row. Callers must read
+    parent/origin from the row, never from the (untrusted) webhook payload.
+    """
+    mid = (mission_id or "").strip()
+    if not mid:
+        return None
+    with _DB_LOCK, _transaction() as conn:
+        rows = _mission_rows(conn, mid)
+    return rows[0] if rows else None
+
+
+def arm_mission_resume(*, mission_id: str, resume_key: str,
+                       expected_previous_execution: Optional[dict] = None) -> dict:
+    """Reserve the next execution after an authenticated, accepted resume.
+
+    Routing/task data are copied from the existing ledger, never the tool args
+    or callback. The old receipt and its current delivery claim stay untouched.
+    """
+    from gateway.status import get_process_start_time
+
+    if not resume_key:
+        return {"status": "reconciliation_required", "reason": "missing_resume_identity"}
+    now = time.time()
+    pid = os.getpid()
+    from hermes_cli.sqlite_util import transaction as _sql_txn
+    with _records_lock, _DB_LOCK, _sql_txn(_connect(), immediate=True) as conn:
+        rows = _mission_rows(conn, mission_id)
+        if not rows:
+            return {"status": "reconciliation_required", "reason": "not_enrolled"}
+        for row in rows:
+            if row["mission_resume_key"] == resume_key:
+                return {"status": "already_enrolled", "delegation_id": row["delegation_id"]}
+        prior = rows[0]
+        if expected_previous_execution is not None and (
+            prior["mission_run_id"] != expected_previous_execution["run_id"]
+            or prior["mission_generation"] != expected_previous_execution["generation"]
+            or not prior["event_json"]
+        ):
+            return {"status": "reconciliation_required", "reason": "prior_execution_changed"}
+        if prior["mission_generation"] is None:
+            return {"status": "reconciliation_required", "reason": "unknown_prior_execution"}
+        if not prior["event_json"]:
+            return {"status": "already_enrolled", "delegation_id": prior["delegation_id"]}
+        generation = prior["mission_generation"] + 1
+        did = _new_delegation_id()
+        task = json.loads(prior["task_json"] or "{}")
+        conn.execute(
+            """INSERT INTO async_delegations
+               (delegation_id, origin_session, origin_ui_session_id,
+                parent_session_id, state, dispatched_at, updated_at,
+                delivery_state, owner_pid, owner_started_at, task_json,
+                origin_session_id, mission_id, mission_generation, mission_resume_key)
+               VALUES (?, ?, ?, ?, 'running', ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)""",
+            (did, prior["origin_session"], prior["origin_ui_session_id"],
+             prior["parent_session_id"], now, now, pid, get_process_start_time(pid),
+             prior["task_json"], prior["origin_session_id"], mission_id, generation, resume_key),
+        )
+        record = {
+            **task, "delegation_id": did, "session_key": prior["origin_session"],
+            "parent_session_id": prior["parent_session_id"],
+            "origin_session_id": prior["origin_session_id"],
+            "origin_ui_session_id": prior["origin_ui_session_id"],
+            "status": "running", "dispatched_at": now, "completed_at": None,
+        }
+    with _records_lock:
+        with _DB_LOCK, _transaction() as conn:
+            persisted = conn.execute(
+                "SELECT state FROM async_delegations WHERE delegation_id=?", (did,)
+            ).fetchone()
+        if persisted:
+            record["status"] = persisted[0]
+        _records[did] = record
+    return {"status": "enrolled", "delegation_id": did, "mission_id": mission_id,
+            "generation_floor": generation}
+
+
+def _mission_completion_row(mission_id: str, execution: Optional[dict], event_id: str):
+    """Bind a terminal callback to one reserved execution, atomically."""
+    identity = None
+    if execution is not None:
+        if not isinstance(execution, dict):
+            return None, "identity_mismatch"
+        try:
+            run_id = str(uuid.UUID(execution["run_id"]))
+            generation = execution["generation"]
+            if type(generation) is not int or generation < 1:
+                raise ValueError("invalid generation")
+            identity = (run_id, generation)
+        except (KeyError, ValueError, TypeError, AttributeError):
+            return None, "identity_mismatch"
+    from hermes_cli.sqlite_util import transaction as _sql_txn
+    with _DB_LOCK, _sql_txn(_connect(), immediate=True) as conn:
+        rows = _mission_rows(conn, mission_id)
+        if not rows:
+            return None, "not_delegated"
+        if event_id and any(row["mission_event_id"] == event_id and row["event_json"] for row in rows):
+            return None, "duplicate"
+        if identity is None:
+            if any(row["mission_generation"] is not None for row in rows):
+                return None, "reconciliation_required"
+            return rows[0], None
+        run_id, generation = identity
+        for row in rows:
+            if row["mission_run_id"] == run_id:
+                if row["mission_generation"] != generation:
+                    return None, "identity_mismatch"
+                return row, None
+            if row["mission_generation"] == generation and row["mission_run_id"]:
+                return None, "identity_mismatch"
+        row = rows[0]
+        if row["mission_generation"] is None and row["event_json"]:
+            return None, "reconciliation_required"
+        if row["mission_generation"] is not None and generation < row["mission_generation"]:
+            return None, "stale_execution"
+        if row["mission_run_id"] or row["event_json"]:
+            return None, "awaiting_enrollment"
+        conn.execute(
+            """UPDATE async_delegations SET mission_run_id=?, mission_generation=?,
+               mission_event_id=? WHERE delegation_id=?""",
+            (run_id, generation, event_id or None, row["delegation_id"]),
+        )
+        row.update(mission_run_id=run_id, mission_generation=generation,
+                   mission_event_id=event_id or None)
+        return row, None
+
+
+def fold_mission_completion(
+    *,
+    mission_id: str,
+    status: str,
+    summary: str = "",
+    error: Optional[str] = None,
+    live_transcript: Optional[str] = None,
+    duration_seconds: Optional[float] = None,
+    execution: Optional[dict] = None,
+    event_id: str = "",
+) -> str:
+    """Fold a sandboxed.sh mission's TERMINAL result into the delegating turn."""
+    row, outcome = _mission_completion_row(mission_id, execution, event_id)
+    if outcome:
+        return outcome
+    if row.get("event_json") or (row.get("delivery_state") or "") != "pending":
+        if row.get("state") not in {"running", "stalling", "finalizing"}:
+            _begin_finalization(row["delegation_id"])
+            _finish_finalization(row["delegation_id"], row["state"])
+        return "duplicate"
+    try:
+        task = json.loads(row.get("task_json") or "{}")
+    except Exception:
+        task = {}
+    event_record: Dict[str, Any] = {
+        "delegation_id": row["delegation_id"],
+        "session_key": row.get("origin_session") or "",
+        "origin_ui_session_id": row.get("origin_ui_session_id") or "",
+        "origin_session_id": row.get("origin_session_id") or "",
+        "parent_session_id": row.get("parent_session_id"),
+        "goal": task.get("goal", ""),
+        "role": task.get("role"),
+        "model": task.get("model"),
+        "completed_at": time.time(),
+        "dispatched_at": row["dispatched_at"],
+        "is_batch": True,
+        "mission_completion": True,
+        "mission_execution": execution,
+        "mission_event_id": event_id or None,
+    }
+    for _k in _ROUTING_KEYS:
+        if task.get(_k):
+            event_record[_k] = task[_k]
+    combined: Dict[str, Any] = {
+        "results": [
+            {
+                "status": status,
+                "summary": summary or "",
+                "error": error,
+                "goal": task.get("goal", ""),
+                "mission_id": mission_id,
+                "execution": execution,
+            }
+        ],
+        "error": error,
+        "total_duration_seconds": duration_seconds,
+    }
+    if live_transcript:
+        combined["live_transcripts"] = [live_transcript]
+    if _push_batch_completion_event(event_record, combined, status) is False:
+        return "duplicate"
+    with _DB_LOCK, _transaction() as conn:
+        persisted = next((r for r in _mission_rows(conn, mission_id)
+                          if r["delegation_id"] == row["delegation_id"]), None)
+    if persisted and persisted.get("state") == status:
+        _begin_finalization(row["delegation_id"])
+        _finish_finalization(row["delegation_id"], status)
+    logger.info(
+        "mission %s folded into delegation %s (status=%s)",
+        mission_id, row["delegation_id"], status,
+    )
+    return "folded"
+
+
+def get_delegation_mission_id(delegation_id: str) -> Optional[str]:
+    """Resolve a delegation_id to its bound sandboxed.sh mission id (or None)."""
+    did = (delegation_id or "").strip()
+    if not did:
+        return None
+    with _DB_LOCK, _transaction() as conn:
+        row = conn.execute(
+            "SELECT mission_id FROM async_delegations WHERE delegation_id=?",
+            (did,),
+        ).fetchone()
+    return (row[0] if row and row[0] else None)
+
+
+def set_delegation_mission_id(delegation_id: str, mission_id: str) -> bool:
+    """Bind a mission id to a pending delegation row after the mission POST."""
+    now = time.time()
+    with _DB_LOCK, _transaction() as conn:
+        cur = conn.execute(
+            "UPDATE async_delegations SET mission_id=?, updated_at=? WHERE delegation_id=?",
+            ((mission_id or "").strip() or None, now, delegation_id),
+        )
+        return cur.rowcount == 1
 
 
 def release_completion_delivery(delegation_id: str, claim_id: str) -> bool:
@@ -743,16 +1031,128 @@ def _push_completion_event(record: Dict[str, Any], result: Dict[str, Any], statu
         **({} if is_batch else {"exit_reason": result.get("exit_reason")}),
         **{k: record[k] for k in _ROUTING_KEYS if record.get(k)},
         **{k: result[k] for k in _STALL_META_KEYS if k in result}}
+    for key in ("mission_completion", "mission_execution", "mission_event_id"):
+        if key in record:
+            evt[key] = record[key]
     try:
-        _persist_completion(evt, result)
+        persisted = _persist_completion(evt, result)
     except Exception as exc:  # noqa: BLE001 — a lost durable row is recoverable; a lost result + leaked slot is not
+        if evt.get("mission_completion"):
+            raise
         logger.error(f"Async delegation{label} %s: durable completion write failed; delivering in-memory "
                      "only (a restart may report this unit as unknown): %s", record.get("delegation_id"), exc)
+        persisted = True
+    if persisted is False and evt.get("mission_completion"):
+        return False
     try:
         process_registry.completion_queue.put(evt)
+        return True
     except Exception as exc:  # pragma: no cover
         logger.error(f"Async delegation{label} %s: failed to enqueue completion event; "
                      "result lost: %s", record.get("delegation_id"), exc)
+
+
+def _push_batch_completion_event(
+    event_record: Dict[str, Any], combined: Dict[str, Any], status: str
+) -> Optional[bool]:
+    """Push a combined async-delegation batch completion (used by mission fold)."""
+    return _push_completion_event({**event_record, "is_batch": True}, combined, status)
+
+
+def _begin_finalization(
+    delegation_id: str,
+) -> Optional[tuple]:
+    """Atomically claim terminal delivery while keeping the record active."""
+    with _records_lock:
+        record = _records.get(delegation_id)
+        if record is None or record.get("status") not in _ACTIVE_STATES:
+            return None
+        record["status"] = "finalizing"
+        record["completed_at"] = time.time()
+        interrupt_fn = record.get("interrupt_fn")
+        record["interrupt_fn"] = None
+        record["progress_fn"] = None
+        return dict(record), interrupt_fn
+
+
+def _finish_finalization(delegation_id: str, status: str) -> None:
+    with _records_lock:
+        record = _records.get(delegation_id)
+        if record is not None:
+            record["status"] = status
+        _prune_completed_locked()
+
+
+def _delete_durable_delegation(delegation_id: str) -> None:
+    with _DB_LOCK, _transaction() as conn:
+        conn.execute("DELETE FROM async_delegations WHERE delegation_id=?", (delegation_id,))
+
+
+def abandon_pending_delegation(delegation_id: str) -> None:
+    """Remove a pending slot that never actually dispatched (e.g. mission POST failed)."""
+    with _records_lock:
+        _records.pop(delegation_id, None)
+    try:
+        _delete_durable_delegation(delegation_id)
+    except Exception:
+        logger.debug("abandon_pending_delegation: durable delete failed for %s",
+                     delegation_id, exc_info=True)
+
+
+def register_mission_delegation(
+    *,
+    goal: str,
+    context: Optional[str] = None,
+    role: Optional[str] = None,
+    model: Optional[str] = None,
+    session_key: str,
+    parent_session_id: Optional[str] = None,
+    origin_ui_session_id: str = "",
+    origin_session_id: str = "",
+    workspace_id: Optional[str] = None,
+    project: Optional[str] = None,
+    max_async_children: int = _DEFAULT_MAX_ASYNC_CHILDREN,
+    delegation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Register a durable pending ledger slot for a sandboxed.sh mission-backed
+    delegation (``backend="mission"``). No local runner/thread — the terminal
+    webhook folds the result later via :func:`set_delegation_mission_id`."""
+    delegation_id = delegation_id or _new_delegation_id()
+    dispatched_at = time.time()
+    record: Dict[str, Any] = {
+        "delegation_id": delegation_id,
+        "goal": goal,
+        "context": context,
+        "role": role,
+        "model": model,
+        "session_key": session_key,
+        "origin_ui_session_id": origin_ui_session_id,
+        "origin_session_id": origin_session_id,
+        "parent_session_id": parent_session_id,
+        **_capture_routing_origin(),
+        "status": "running",
+        "dispatched_at": dispatched_at,
+        "completed_at": None,
+        "is_batch": True,
+        "backend": "mission",
+        "mission_receipt_version": 1,
+        "workspace_id": workspace_id,
+        "project": project,
+    }
+    with _records_lock:
+        running = sum(1 for r in _records.values() if r.get("status") in _ACTIVE_STATES)
+        if running >= max_async_children:
+            return {
+                "status": "rejected",
+                "error": (
+                    f"Async delegation capacity reached ({max_async_children} "
+                    f"running). Wait for one to finish, or raise "
+                    f"delegation.max_concurrent_children in config.yaml."
+                ),
+            }
+        _records[delegation_id] = record
+    _persist_dispatch(record)
+    return {"status": "dispatched", "delegation_id": delegation_id}
 
 
 def push_task_failure_notice(delegation_id: str, entry: Dict[str, Any], *, n_tasks: int) -> None:

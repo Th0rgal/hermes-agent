@@ -233,6 +233,9 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
             part = part.strip()
             if not part or part.lower() in {"local", "origin", "all"}:
                 continue
+            # `project:<id|slug>` is a fork routing scheme, not a messaging platform.
+            if part.lower() == "project" or part.lower().startswith("project:"):
+                continue
             # bot-chat targets deliver via a local subprocess; failures land in last_delivery_error.
             if _delivery.parse_bot_chat_deliver_token(part) is not None:
                 continue

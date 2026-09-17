@@ -344,6 +344,10 @@ class PluginManifest:
     requires_hermes: str = ""
     portable: bool = False
     skill_namespace: str = ""
+    # Bundled standalone plugins are opt-in unless this is true. Used for
+    # fork-critical always-on plugins (e.g. sandboxed-origin-session).
+    # Explicit plugins.disabled still wins.
+    default_enabled: bool = False
     # Declared capability ids, normalized to KNOWN ids. Declaration is consent metadata, NOT a grant: live
     # only via plugins.entries.<id>.granted_capabilities or the legacy allow_* key.
     # See #64228.
@@ -476,6 +480,7 @@ def parse_manifest_file(
             provides_tools=data.get("provides_tools", []),
             provides_hooks=data.get("provides_hooks", []), source=source, path=str(plugin_dir),
             kind=kind, key=key, requires_hermes=str(data.get("requires_hermes") or "").strip(),
+            default_enabled=bool(data.get("default_enabled", False)),
             capabilities=_parse_declared_capabilities(data.get("capabilities"), name),
             **_parse_manifest_v2_fields(data, key), emits=data.get("emits") or [],
             listens=data.get("listens") or [],

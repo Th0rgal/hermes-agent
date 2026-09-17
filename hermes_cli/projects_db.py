@@ -7,6 +7,7 @@ opening an old DB is always safe.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import secrets
@@ -261,12 +262,76 @@ def list_projects(conn: sqlite3.Connection, *, include_archived: bool = False) -
     return [_load_project(conn, r) for r in conn.execute(sql).fetchall()]
 
 
+def _project_alias_map() -> dict[str, str]:
+    """Load sandboxed ``routes.json`` so ``verity-core`` finds ``verity``.
+
+    Cron ``deliver=project:verity-core`` must resolve to the Hermes Project
+    row the operator actually bound (slug ``verity``). Without this fold,
+    every tick logs ``unknown project 'verity-core'`` and the conversation
+    receives nothing.
+    """
+    candidates: List[Path] = []
+    env = (os.environ.get("HERMES_PROJECTS_DIR") or "").strip()
+    if env:
+        candidates.append(Path(env) / "routes.json")
+    home = get_hermes_home()
+    # HERMES_HOME is sometimes the profile dir (`~/.hermes`) and sometimes the
+    # workspace that *contains* `.hermes` (agent-core). Try both, plus cwd,
+    # so `deliver=project:verity-lido` still folds onto the bound `lido-audit`
+    # row when the overlay lives in either layout.
+    candidates.append(home / "projects" / "active" / "routes.json")
+    candidates.append(home / ".hermes" / "projects" / "active" / "routes.json")
+    cwd = Path.cwd()
+    candidates.append(cwd / ".hermes" / "projects" / "active" / "routes.json")
+    candidates.append(cwd / "projects" / "active" / "routes.json")
+    for path in candidates:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        aliases: dict[str, str] = {}
+        for key, value in data.items():
+            if isinstance(key, str) and isinstance(value, str):
+                src = key.strip().lower()
+                dst = value.strip().lower()
+                if src and dst:
+                    aliases[src] = dst
+        if aliases:
+            return aliases
+    return {}
+
+
+def _slug_lookup_keys(token: str) -> List[str]:
+    """Exact slug, its routes.json canonical, then nicknames that fold onto it."""
+    token = str(token or "").strip().lower()
+    if not token:
+        return []
+    keys = [token]
+    aliases = _project_alias_map()
+    canonical = aliases.get(token, token)
+    if canonical not in keys:
+        keys.append(canonical)
+    for alias, target in aliases.items():
+        if target == token or target == canonical:
+            if alias not in keys:
+                keys.append(alias)
+    return keys
+
+
 def get_project(conn: sqlite3.Connection, id_or_slug: str) -> Optional[Project]:
-    """Look up a project by id first, then by slug."""
-    row = (
-        conn.execute("SELECT * FROM projects WHERE id = ?", (id_or_slug,)).fetchone()
-        or conn.execute("SELECT * FROM projects WHERE slug = ?", (str(id_or_slug).lower(),)).fetchone()
-    )
+    """Look up a project by id first, then by slug (and routes.json aliases)."""
+    row = conn.execute("SELECT * FROM projects WHERE id = ?", (id_or_slug,)).fetchone()
+    if row is None:
+        for slug in _slug_lookup_keys(id_or_slug):
+            row = conn.execute("SELECT * FROM projects WHERE slug = ?", (slug,)).fetchone()
+            if row is not None:
+                break
     return None if row is None else _load_project(conn, row)
 
 
@@ -368,8 +433,17 @@ def restore_project(conn: sqlite3.Connection, project_id: str) -> bool:
 
 
 def delete_project(conn: sqlite3.Connection, project_id: str) -> bool:
-    """Hard-delete a project and its folders (cascade)."""
-    return _execute_rowcount(conn, "DELETE FROM projects WHERE id = ?", (project_id,)) > 0
+    """Hard-delete a project, its folders (cascade), and sandboxed conversation bindings."""
+    project = get_project(conn, project_id)
+    if project is None:
+        return False
+    from hermes_cli.project_routes import clear_sandboxed_binding
+
+    if not clear_sandboxed_binding(project.slug):
+        raise RuntimeError(
+            f"could not clear sandboxed.sh binding for project '{project.slug}'"
+        )
+    return _execute_rowcount(conn, "DELETE FROM projects WHERE id = ?", (project.id,)) > 0
 
 
 # --- Active-project pointer + discovery policy (project_meta KV) --------------

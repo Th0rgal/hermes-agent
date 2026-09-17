@@ -12,11 +12,14 @@ import asyncio
 import concurrent.futures
 import contextlib
 import contextvars
+import hashlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
@@ -569,6 +572,152 @@ def _home_target(platform_name: str, chat_id: str, resolved_from: Optional[str] 
     return target
 
 
+# WebUI/Desktop/API/subagent are SessionDB-backed surfaces, not gateway platforms.
+_LOCAL_SESSION_PLATFORMS = frozenset({"desktop", "webui", "api_server", "subagent"})
+_LOCAL_SESSION_TARGET_KIND = "local_session"
+
+_STATE_SIG_EXTRACT_RE = re.compile(r"\[STATE_SIGNATURE:\s*([^\]]*)\]", re.IGNORECASE)
+_STATE_SIG_VOLATILE_NUM_RE = re.compile(r"\d[\d.,_/]*")
+_last_delivered_signature: dict[str, str] = {}
+_last_delivered_signature_lock = threading.Lock()
+
+
+def _normalized_state_signature(text: str) -> Optional[str]:
+    """Extract the ``[STATE_SIGNATURE: …]`` trailer with volatile numerals collapsed."""
+    m = _STATE_SIG_EXTRACT_RE.search(text or "")
+    if not m:
+        return None
+    sig = _STATE_SIG_VOLATILE_NUM_RE.sub("#", m.group(1).strip().lower())
+    return " ".join(sig.split())
+
+
+def _local_session_delivery_target(
+    platform_name: str, session_id: str, thread_id: Optional[str] = None,
+) -> dict:
+    sid = str(session_id)
+    return {
+        "kind": _LOCAL_SESSION_TARGET_KIND,
+        "platform": platform_name,
+        "chat_id": sid,
+        "session_id": sid,
+        "thread_id": thread_id,
+    }
+
+
+def _resolve_project_route_target(job: dict, project_token: str) -> Optional[dict]:
+    """Resolve ``deliver=project:<id|slug>`` via the durable explicit route store.
+
+    Explicit-or-nothing: a missing/broken route drops the target instead of
+    falling back to the current Desktop session, the active project, or a home
+    channel. Compression continuations are handled inside ``resolve_route_target``.
+    """
+    token = (project_token or "").strip()
+    if not token:
+        return None
+    try:
+        from hermes_cli import project_routes as _routes
+        from hermes_cli import projects_db as _pdb
+
+        with _pdb.connect_closing() as conn:
+            target = _routes.resolve_route_target(conn, token)
+    except LookupError as e:
+        logger.warning(
+            "Job '%s': project route unresolved: %s — dropping target "
+            "(explicit routes never fall back to the current Desktop session)",
+            job.get("id", "?"), e,
+        )
+        return None
+    except Exception as e:
+        logger.warning(
+            "Job '%s': project route resolution failed for '%s': %s",
+            job.get("id", "?"), token, e,
+        )
+        return None
+
+    if target.source in _LOCAL_SESSION_PLATFORMS or target.source == "webhook":
+        return _local_session_delivery_target(target.source, target.session_id)
+    logger.warning(
+        "Job '%s': project '%s' routes to session %s with unsupported "
+        "source '%s' — dropping target",
+        job.get("id", "?"), token, target.session_id, target.source,
+    )
+    return None
+
+
+def _deliver_to_local_session(
+    job: dict, platform_name: str, session_id: str, content: str
+) -> Optional[str]:
+    """Persist a cron result into the exact Desktop/WebUI/API session transcript."""
+    from cron.controller_scope import is_observer_controller, sanitize_observer_output
+
+    text = (sanitize_observer_output(content, job=job) or "").strip()
+    if not text:
+        return None
+    label = job.get("name") or job.get("id") or "cron"
+    observer = is_observer_controller(job)
+    delivery_label = "Observer report" if observer else "Cron delivery"
+    delivery_content = f"[{delivery_label}: {label}]\n{text}"
+    try:
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            sid = session_id
+            for resolver_name in (
+                "resolve_session_id",
+                "resolve_resume_session_id",
+                "resolve_delivery_session_id",
+            ):
+                resolver = getattr(db, resolver_name, None)
+                if callable(resolver):
+                    sid = resolver(sid) or sid
+            if not db.get_session(sid):
+                return f"{platform_name} session '{session_id}' not found"
+            try:
+                from hermes_cli.project_routes import reopen_reclaimable_session
+
+                reopen_reclaimable_session(db, sid)
+            except Exception:
+                pass
+            signature_text = (
+                text.replace("[Observer state_signature:", "[STATE_SIGNATURE:")
+                if observer else text
+            )
+            norm_sig = _normalized_state_signature(signature_text)
+            if norm_sig is not None:
+                sig_key = f"{platform_name}:{sid}:{job.get('id', '?')}"
+                with _last_delivered_signature_lock:
+                    if _last_delivered_signature.get(sig_key) == norm_sig:
+                        logger.info(
+                            "Job '%s': suppressing repeat delivery — unchanged "
+                            "state signature (%s)",
+                            job.get("id", "?"), norm_sig,
+                        )
+                        return None
+                    _last_delivered_signature[sig_key] = norm_sig
+            delivery_id = (
+                f"cron:{platform_name}:{sid}:{job.get('id', '?')}:"
+                f"{job.get('_delivery_run_id') or job.get('last_run_at') or hashlib.sha256(delivery_content.encode()).hexdigest()}"
+            )
+            if hasattr(db, "has_delivery_receipt") and db.has_delivery_receipt(delivery_id):
+                return None
+            db.append_message(sid, "assistant", delivery_content, observed=True)
+            if hasattr(db, "record_delivery_receipt"):
+                db.record_delivery_receipt(delivery_id, sid, platform_name)
+            try:
+                from tui_gateway.server import _broadcast_global_event
+
+                _broadcast_global_event("sessions.changed", {"session_id": sid})
+            except Exception:
+                pass
+            return None
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("Job '%s': local session delivery failed: %s", job.get("id", "?"), exc)
+        return str(exc)
+
+
 def _resolve_single_delivery_target(
     job: dict, deliver_value: str, *, from_broadcast: bool = False
 ) -> Optional[dict]:
@@ -585,6 +734,17 @@ def _resolve_single_delivery_target(
     bot_chat_profile = parse_bot_chat_deliver_token(deliver_value)
     if bot_chat_profile is not None:
         return _resolve_bot_chat_target(job, bot_chat_profile)
+
+    explicit_platform, separator, explicit_session_id = deliver_value.partition(":")
+    explicit_platform = explicit_platform.strip().lower()
+    if separator and explicit_platform in _LOCAL_SESSION_PLATFORMS:
+        session_id = explicit_session_id.strip()
+        return (
+            _local_session_delivery_target(explicit_platform, session_id)
+            if session_id else None
+        )
+    if separator and explicit_platform == "project":
+        return _resolve_project_route_target(job, explicit_session_id)
 
     if deliver_value == "origin":
         if origin:
@@ -1761,11 +1921,25 @@ def _deliver_result(
     running) the live adapter is tried first (E2EE rooms can't use the standalone HTTP path), then
     standalone fallback. ``for_failure=True`` routes failure-category notices through the job's
     ``failure_deliver`` override when present (NS-788). Returns None on success, else an error."""
+    from cron.controller_scope import sanitize_observer_output
+
+    content = sanitize_observer_output(content, job=job)
     job.pop("_bot_chat_delivery_receipts", None)
     targets = _resolve_delivery_targets(job, for_failure=for_failure)
     if not targets:
         _record_delivery_verification(job, [])
         return _unresolved_delivery_outcome(job, for_failure)
+
+    local_targets = [target for target in targets if target.get("kind") == _LOCAL_SESSION_TARGET_KIND]
+    delivery_errors = [
+        error for target in local_targets
+        if (error := _sched._deliver_to_local_session(
+            job, target["platform"], target.get("session_id") or target["chat_id"], content
+        ))
+    ]
+    targets = [target for target in targets if target.get("kind") != _LOCAL_SESSION_TARGET_KIND]
+    if not targets:
+        return "; ".join(delivery_errors) if delivery_errors else None
 
     # Restart-safe workers have no live gateway adapters: hand the send back through a durable
     # queue so the current or replacement gateway performs it with relay/E2EE parity. The execution
@@ -1783,7 +1957,9 @@ def _deliver_result(
         from cron.jobs import get_job
         refreshed = get_job(job["id"]) or {}
         job["last_delivery_queued"] = refreshed.get("last_delivery_queued")
-        return error
+        if error:
+            delivery_errors.append(error)
+        return "; ".join(delivery_errors) if delivery_errors else None
 
     from gateway.config import load_gateway_config
 
@@ -1845,7 +2021,6 @@ def _deliver_result(
         logger.error("Job '%s': %s", job["id"], msg)
         return msg
 
-    delivery_errors = []
     for target in targets:
         # Bot Chat owns admission; never concurrently resume a live owner's transcript.
         if target["platform"] == BOT_CHAT_PLATFORM:

@@ -1344,8 +1344,11 @@ def _bundled_default_on(dir_path) -> bool:
     if manifest_file is None:
         return False
     try:
-        kind = str(_load_yaml_manifest(manifest_file).get("kind", "standalone")).strip().lower()
-        return kind in _BUNDLED_DEFAULT_ON_KINDS
+        manifest = _load_yaml_manifest(manifest_file)
+        kind = str(manifest.get("kind", "standalone")).strip().lower()
+        if kind in _BUNDLED_DEFAULT_ON_KINDS:
+            return True
+        return bool(manifest.get("default_enabled"))
     except Exception:
         return False
 

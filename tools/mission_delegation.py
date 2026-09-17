@@ -1,0 +1,575 @@
+"""Dispatch a delegation to a sandboxed.sh *mission* (``backend="mission"``).
+
+This module owns only the OUTBOUND concern: turn a ``delegate_task`` request into
+a ``start_mission`` MCP call on the ``sandboxed_assistant`` server and register a
+durable pending slot in the async-delegation ledger. The INBOUND concern —
+folding the mission's terminal webhook back into the delegating turn as an
+``async_delegation_complete`` row — lives in ``gateway/platforms/webhook.py`` and
+reuses the very same ledger (see ``tools/async_delegation.py`` and the plan
+``transient-rolling-volcano.md``).
+
+Design: a mission-backed delegation has NO local runner/thread. We register the
+pending ledger slot FIRST (so a racing completion is resolvable), then POST the
+mission and bind the returned mission id onto the slot. The slot is the
+authentication anchor: only a webhook whose ``mission_id`` resolves to a
+Hermes-created pending row is folded in, and parent/origin routing is read from
+the row, never from the (untrusted) webhook payload.
+"""
+
+from __future__ import annotations
+
+import json
+import hashlib
+import logging
+import uuid
+from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+# The sandboxed.sh MCP server + tool that create+start a mission (server-fixes
+# origin="hermes"; we pass origin_session_id so the completion routes home).
+_MCP_SERVER_NAME = "sandboxed_assistant"
+_START_MISSION_TOOL = "start_mission"
+_START_MISSION_TIMEOUT = 60.0
+
+
+def _build_mission_prompt(goal: str, context: Optional[str], role: Optional[str]) -> str:
+    """Frame the delegated task for a mission harness.
+
+    A mission runs its own harness with its own tools, so there is no toolset
+    inheritance to carry — only the goal plus optional parent context and a
+    leaf-only directive (a delegated mission should do the task, not spawn its
+    own fan-out)."""
+    parts = [
+        "You are a delegated worker. Complete the task below and report a "
+        "concise result. Do not spawn further sub-delegations.",
+    ]
+    if role:
+        parts.append(f"Role: {role}")
+    if context:
+        parts.append(f"Context from the delegating agent:\n{context}")
+    parts.append(f"Task:\n{goal}")
+    return "\n\n".join(parts)
+
+
+def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """Best-effort parse of a JSON object, including MCP wrappers.
+
+    start_mission results arrive as raw JSON, as ``{"result": "<json>"}``,
+    or wrapped in an ``<untrusted_tool_result>`` fence. Walk those shapes
+    until a dict remains.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    blob = text.strip()
+    if "<untrusted_tool_result" in blob:
+        start = blob.find("{")
+        end = blob.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        blob = blob[start : end + 1]
+    try:
+        data = json.loads(blob)
+    except Exception:
+        return None
+    if isinstance(data, dict):
+        inner = data.get("result")
+        if isinstance(inner, str):
+            nested = _extract_json_object(inner)
+            if nested:
+                return nested
+        return data
+    return None
+
+
+def _extract_mission_id(result_str: str) -> Optional[str]:
+    """Pull the mission id out of the ``start_mission`` tool result.
+
+    The MCP tool returns a JSON blob; tolerate a few shapes: a flat
+    ``{"mission_id"/"id": ...}``, a nested ``{"mission": {"id": ...}}``, or a
+    string-wrapped ``{"result": "<json>"}`` (the MCP text-content convention).
+    """
+    data = _extract_json_object(result_str or "")
+    if not data:
+        return None
+    for key in ("mission_id", "id", "missionId"):
+        val = data.get(key)
+        if val:
+            return str(val)
+    mission = data.get("mission")
+    if isinstance(mission, dict) and mission.get("id"):
+        return str(mission["id"])
+    return None
+
+
+_SEND_MESSAGE_TOOL = "send_message_to_mission"
+_ANSWER_QUESTION_TOOL = "answer_mission_question"
+
+
+def steer_mission_delegation(
+    *,
+    message: str,
+    mission_id: Optional[str] = None,
+    delegation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Forward a steering message from the delegating agent INTO a running
+    mission delegation (next-turn, not mid-turn — a plain message queues behind
+    the mission's current turn; a mission parked on a question needs
+    answer_mission_question instead).
+
+    Accepts either a ``mission_id`` (surfaced in the dispatch return) or a
+    ``delegation_id`` (resolved via the ledger). Returns
+    ``{"status":"sent"/"error", ...}``.
+    """
+    from tools.async_delegation import get_delegation_mission_id
+
+    mid = (mission_id or "").strip()
+    if not mid and delegation_id:
+        mid = get_delegation_mission_id(delegation_id) or ""
+    if not mid:
+        return {
+            "status": "error",
+            "error": "steer requires a known mission_id or delegation_id.",
+        }
+    if not (message or "").strip():
+        return {"status": "error", "error": "steer requires a non-empty message."}
+    try:
+        from tools.mcp_tool import _make_tool_handler
+
+        handler = _make_tool_handler(
+            _MCP_SERVER_NAME, _SEND_MESSAGE_TOOL, _START_MISSION_TIMEOUT
+        )
+        result_str = handler({"mission_id": mid, "content": message})
+    except Exception as exc:  # pragma: no cover
+        return {"status": "error", "error": f"steer dispatch failed: {exc}"}
+    return {"status": "sent", "mission_id": mid, "response": str(result_str)[:500]}
+
+
+def await_mission_completion(
+    *,
+    delegation_id: str,
+    mission_id: str,
+    timeout_seconds: float,
+    poll_interval: float = 2.0,
+) -> Optional[Dict[str, Any]]:
+    """Block up to ``timeout_seconds`` for a dispatched mission delegation to
+    reach a terminal state, then CLAIM its delivery and return the result inline.
+
+    Claiming is the anti-double-delivery arbiter: if the await-loop claims, it
+    owns the delivery and returns the result inline (the async watcher, seeing
+    the same queued event, finds the row already delivered and skips it). On
+    timeout returns None — the caller returns a "dispatched" handle and the
+    watcher folds the result later.
+    """
+    import os
+    import time
+    import uuid
+
+    from tools.async_delegation import (
+        claim_completion_delivery,
+        complete_completion_delivery,
+        find_delegation_by_mission_id,
+    )
+
+    deadline = time.time() + max(0.0, float(timeout_seconds))
+    while True:
+        row = find_delegation_by_mission_id(mission_id)
+        state = str((row or {}).get("state") or "running").lower()
+        if row is not None and state not in ("running", "finalizing"):
+            claim_id = f"await:{os.getpid()}:{uuid.uuid4().hex}"
+            if claim_completion_delivery(delegation_id, claim_id):
+                complete_completion_delivery(delegation_id, claim_id)
+                try:
+                    evt = json.loads(row.get("event_json") or "{}")
+                except Exception:
+                    evt = {}
+                return {
+                    "status": evt.get("status") or "completed",
+                    "results": evt.get("results") or [],
+                    "delegation_id": delegation_id,
+                    "mission_id": mission_id,
+                    "delivered": "inline",
+                }
+            # The async watcher already claimed this completion — it will inject
+            # the result as a message. Don't return it inline too (double).
+            return {
+                "status": "delivered_async",
+                "delegation_id": delegation_id,
+                "mission_id": mission_id,
+                "note": "The mission result was delivered to the conversation.",
+            }
+        now = time.time()
+        if now >= deadline:
+            return None
+        time.sleep(min(poll_interval, max(0.05, deadline - now)))
+
+
+def dispatch_mission_delegation(
+    *,
+    goal: str,
+    context: Optional[str] = None,
+    role: Optional[str] = None,
+    model: Optional[str] = None,
+    session_key: str,
+    parent_session_id: Optional[str] = None,
+    origin_ui_session_id: str = "",
+    origin_session_id: str = "",
+    workspace_id: Optional[str] = None,
+    project: Optional[str] = None,
+    title: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Start a sandboxed.sh mission for a delegated task + register its pending
+    ledger slot.
+
+    Returns ``{"status":"dispatched","delegation_id":...,"mission_id":...}`` on
+    success, or ``{"status":"rejected"/"error","error":...}``.
+    """
+    from tools.async_delegation import (
+        register_mission_delegation,
+        set_delegation_mission_id,
+        abandon_pending_delegation,
+    )
+
+    # 1) Register the pending slot BEFORE the POST so a completion that races
+    #    ahead is resolvable once the mission id is bound (and, if it beats the
+    #    bind, the webhook's durable markers re-POST — self-healing).
+    reg = register_mission_delegation(
+        goal=goal,
+        context=context,
+        role=role,
+        model=model,
+        session_key=session_key,
+        parent_session_id=parent_session_id,
+        origin_ui_session_id=origin_ui_session_id,
+        origin_session_id=origin_session_id,
+        workspace_id=workspace_id,
+        project=project,
+    )
+    if reg.get("status") != "dispatched":
+        return reg
+    delegation_id = reg["delegation_id"]
+
+    # 2) POST the mission via the existing sandboxed_assistant MCP connection.
+    args: Dict[str, Any] = {
+        "title": title or ((goal or "Delegated task")[:80]),
+        "prompt": _build_mission_prompt(goal, context, role),
+        # Route the completion home. start_mission server-fixes origin="hermes".
+        "origin_session_id": origin_session_id or parent_session_id or "",
+        # Leaf-only: a delegated mission does the work, it is not a writer and
+        # holds no merge authority.
+        "writer": False,
+    }
+    if workspace_id:
+        args["workspace_id"] = workspace_id
+    if project:
+        args["project"] = project
+    if model:
+        args["model_override"] = model
+
+    try:
+        from tools.mcp_tool import _make_tool_handler
+
+        handler = _make_tool_handler(
+            _MCP_SERVER_NAME, _START_MISSION_TOOL, _START_MISSION_TIMEOUT
+        )
+        result_str = handler(args)
+    except Exception as exc:  # pragma: no cover - transport failures
+        logger.warning(
+            "mission delegation %s: start_mission call failed: %s",
+            delegation_id, exc,
+        )
+        abandon_pending_delegation(delegation_id)
+        return {"status": "error", "error": f"start_mission dispatch failed: {exc}"}
+
+    mission_id = _extract_mission_id(result_str)
+    if not mission_id:
+        # POST failed / unexpected shape → drop the phantom slot so no stray
+        # webhook can ever resolve to it.
+        abandon_pending_delegation(delegation_id)
+        return {
+            "status": "error",
+            "error": (
+                "start_mission did not return a mission id "
+                f"(response: {str(result_str)[:300]})"
+            ),
+        }
+
+    # 3) Bind the mission id — the authentication anchor for the inbound fork.
+    set_delegation_mission_id(delegation_id, mission_id)
+    logger.info(
+        "mission delegation %s dispatched → mission %s (parent=%s)",
+        delegation_id, mission_id, parent_session_id,
+    )
+    return {
+        "status": "dispatched",
+        "delegation_id": delegation_id,
+        "mission_id": mission_id,
+        "backend": "mission",
+    }
+
+
+_EPHEMERAL_ORIGIN_PREFIXES = ("cron_",)
+
+
+def enroll_conversational_start_mission(
+    *,
+    result: Any,
+    origin_session_id: str = "",
+    parent_session_id: Optional[str] = None,
+    goal: str = "",
+    title: str = "",
+    project: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    session_key: str = "",
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Register a raw conversational ``start_mission`` as a mission delegation.
+
+    ``delegate_task(backend='mission')`` already writes the ledger row.
+    Conversational launches go through MCP ``start_mission`` instead, so
+    without this enroll the terminal webhook cannot fold into the parent
+    turn. Idempotent and fail-open: a rejected enroll never fails the
+    original start_mission (the origin-route safety net still applies).
+
+    Skips missing mission ids, missing/ephemeral origins, and missions
+    already bound to a ledger row.
+    """
+    from tools.async_delegation import (
+        find_delegation_by_mission_id,
+        register_mission_delegation,
+        set_delegation_mission_id,
+    )
+
+    origin = (origin_session_id or parent_session_id or "").strip()
+    if not origin or origin.startswith(_EPHEMERAL_ORIGIN_PREFIXES):
+        return {"status": "skipped", "reason": "no_durable_origin"}
+
+    result_text = result if isinstance(result, str) else json.dumps(result or "")
+    mission_id = _extract_mission_id(result_text)
+    if not mission_id:
+        return {"status": "skipped", "reason": "no_mission_id"}
+
+    existing = find_delegation_by_mission_id(mission_id)
+    if existing is not None:
+        _reconcile_early_callback(mission_id)
+        return {
+            "status": "already_enrolled",
+            "delegation_id": existing.get("delegation_id"),
+            "mission_id": mission_id,
+        }
+
+    if not session_key:
+        try:
+            from tools.approval import get_current_session_key
+
+            session_key = get_current_session_key(default="") or origin
+        except Exception:
+            session_key = origin
+
+    reg = register_mission_delegation(
+        goal=goal or title or f"Mission {mission_id}",
+        role="leaf",
+        model=model,
+        session_key=session_key,
+        parent_session_id=parent_session_id or origin,
+        origin_session_id=origin,
+        workspace_id=workspace_id,
+        project=project,
+    )
+    if reg.get("status") != "dispatched":
+        logger.warning(
+            "start_mission enroll rejected for %s: %s",
+            mission_id,
+            reg.get("error") or reg,
+        )
+        return {"status": "rejected", "mission_id": mission_id, **reg}
+
+    set_delegation_mission_id(reg["delegation_id"], mission_id)
+    logger.info(
+        "start_mission enroll %s → mission %s (origin=%s)",
+        reg["delegation_id"],
+        mission_id,
+        origin,
+    )
+    _reconcile_early_callback(mission_id)
+    return {
+        "status": "enrolled",
+        "delegation_id": reg["delegation_id"],
+        "mission_id": mission_id,
+        "backend": "mission",
+    }
+
+
+_EARLY_CALLBACK_STATUS = {
+    "completed": "completed",
+    "failed": "failed",
+    "not_feasible": "failed",
+    "notfeasible": "failed",
+    "blocked": "failed",
+    "interrupted": "failed",
+    "awaiting_user": "needs_input",
+    "awaitinguser": "needs_input",
+}
+
+
+def enroll_conversational_resume_mission(
+    *, result: Any, origin_session_id: str, tool_call_id: str,
+) -> Dict[str, Any]:
+    """Arm a distinct receipt only after a confirmed conversational resume.
+
+    The prior terminal run anchors the generation floor. Old unversioned
+    receipts require reconciliation; no timestamp or model-supplied run id is
+    used as a substitute for native execution identity.
+    """
+    text = result if isinstance(result, str) else json.dumps(result or "")
+    data = _extract_json_object(text)
+    if not data or data.get("resume_accepted") is not True or data.get("error") or data.get("isError"):
+        return {"status": "skipped", "reason": "resume_not_confirmed"}
+    mission_id = _extract_mission_id(text)
+    return _enroll_conversational_continuation(
+        mission_id=mission_id, origin_session_id=origin_session_id,
+        tool_call_id=tool_call_id,
+    )
+
+
+def enroll_conversational_message_mission(
+    *, result: Any, origin_session_id: str, tool_call_id: str,
+) -> Dict[str, Any]:
+    """Track only a native-confirmed idle message continuation.
+
+    Queued is not proof of a new run. Native admission captures the terminal
+    predecessor before delivery; active steering and legacy replies omit it.
+    The top-level id is a message UUID, so only mission_id identifies the worker.
+    """
+    text = result if isinstance(result, str) else json.dumps(result or "")
+    data = _extract_json_object(text)
+    if not data or data.get("message_accepted") is not True or data.get("error") or data.get("isError"):
+        return {"status": "skipped", "reason": "message_not_confirmed"}
+    previous = data.get("previous_execution")
+    if not isinstance(previous, dict):
+        return {"status": "skipped", "reason": "not_idle_continuation"}
+    try:
+        mission_id = str(uuid.UUID(data["mission_id"]))
+        run_id = str(uuid.UUID(previous["run_id"]))
+        generation = previous["generation"]
+        if type(generation) is not int or generation < 1:
+            raise ValueError("invalid generation")
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return {"status": "reconciliation_required", "reason": "invalid_previous_execution"}
+    return _enroll_conversational_continuation(
+        mission_id=mission_id, origin_session_id=origin_session_id,
+        tool_call_id=tool_call_id,
+        expected_previous_execution={"run_id": run_id, "generation": generation},
+    )
+
+
+def _enroll_conversational_continuation(
+    *, mission_id: Optional[str], origin_session_id: str, tool_call_id: str,
+    expected_previous_execution: Optional[dict] = None,
+) -> Dict[str, Any]:
+    from tools.async_delegation import arm_mission_resume, find_delegation_by_mission_id
+
+    origin = (origin_session_id or "").strip()
+    if not mission_id or not origin or origin.startswith(_EPHEMERAL_ORIGIN_PREFIXES):
+        return {"status": "skipped", "reason": "no_durable_origin_or_mission"}
+    prior = find_delegation_by_mission_id(mission_id)
+    if prior is None:
+        return {"status": "reconciliation_required", "reason": "not_enrolled"}
+    owner = prior.get("origin_session_id") or prior.get("parent_session_id")
+    if owner != origin:
+        # Continuation rollover is explicit in the existing session store. A
+        # foreign caller cannot replace the ledger's parent using tool args.
+        from gateway.platforms.mission_status_route import resolve_live_session_id
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            if resolve_live_session_id(owner, db) != origin:
+                return {"status": "reconciliation_required", "reason": "parent_mismatch"}
+        finally:
+            db.close()
+    if not tool_call_id:
+        return {"status": "reconciliation_required", "reason": "missing_resume_identity"}
+    key = hashlib.sha256((origin + "\0" + tool_call_id).encode()).hexdigest()
+    enrolled = arm_mission_resume(mission_id=mission_id, resume_key=key,
+                                  expected_previous_execution=expected_previous_execution)
+    if enrolled.get("status") in ("enrolled", "already_enrolled"):
+        _reconcile_early_callback(mission_id)
+    else:
+        logger.warning("resume_mission enrollment requires reconciliation for %s: %s",
+                       mission_id, enrolled.get("reason"))
+    return enrolled
+
+
+def _reconcile_early_callback(mission_id: str) -> None:
+    """Fold a terminal webhook that arrived before this enroll created the row."""
+    try:
+        from gateway.platforms.mission_status_route import (
+            extract_status,
+            take_stashed_callback,
+        )
+        from tools.async_delegation import fold_mission_completion
+    except Exception:
+        return
+    pending = take_stashed_callback(mission_id)
+    if not pending:
+        return
+    raw = extract_status(pending)
+    mapped = _EARLY_CALLBACK_STATUS.get(raw)
+    if mapped is None:
+        return
+    bits = [
+        pending.get("summary"),
+        pending.get("result_summary"),
+        pending.get("short_description"),
+        pending.get("recommended_action"),
+        pending.get("terminal_evidence") if mapped != "completed" else None,
+    ]
+    summary = "\n".join(str(b).strip() for b in bits if b and str(b).strip())
+    if not summary:
+        summary = str(pending.get("title") or f"Mission {raw}")
+    error = (
+        pending.get("error") or pending.get("terminal_reason")
+        if mapped == "failed"
+        else None
+    )
+    try:
+        outcome = fold_mission_completion(
+            mission_id=mission_id,
+            status=mapped,
+            summary=summary,
+            error=str(error) if error else None,
+            live_transcript=pending.get("transcript") or pending.get("transcript_url"),
+            execution=pending.get("execution"),
+            event_id=str(pending.get("event_id") or pending.get("delivery_id") or ""),
+        )
+        if outcome in ("awaiting_enrollment", "reconciliation_required", "identity_mismatch"):
+            from gateway.platforms.mission_status_route import stash_unroutable_callback
+
+            stash_unroutable_callback(mission_id, pending)
+    except Exception:
+        from gateway.platforms.mission_status_route import stash_unroutable_callback
+
+        stash_unroutable_callback(mission_id, pending)
+        logger.warning(
+            "early-callback reconcile failed for mission %s", mission_id, exc_info=True
+        )
+
+
+def enroll_existing_mission(
+    *,
+    mission_id: str,
+    origin_session_id: str,
+    goal: str = "",
+    project: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Backfill a ledger row for a mission that was started without enroll."""
+    return enroll_conversational_start_mission(
+        result=json.dumps({"mission_id": mission_id}),
+        origin_session_id=origin_session_id,
+        parent_session_id=origin_session_id,
+        goal=goal or f"Mission {mission_id}",
+        project=project,
+        workspace_id=workspace_id,
+    )

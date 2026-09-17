@@ -1999,7 +1999,19 @@ def _prepare_job_prompt(
             )
             return (True, silent_doc, SILENT_MARKER, None), None
 
+    callback_event_ids: list = []
     try:
+        if (job.get("controller") or {}).get("callback_relay") is True:
+            from cron.controller_callbacks import pending_callbacks
+
+            snapshot = pending_callbacks(job_id)
+            callback_event_ids = snapshot["event_ids"]
+            callback_prompt = snapshot["prompt"]
+            if callback_prompt:
+                extra_prompt = "\n\n".join(
+                    part for part in (extra_prompt, callback_prompt) if part
+                )
+        job["_controller_callback_ids"] = callback_event_ids
         prompt = _build_job_prompt(
             job, prerun_script=prerun_script, extra_prompt=extra_prompt,
             runtime_data_prompt=monitor_context,
@@ -2023,6 +2035,8 @@ def _prepare_job_prompt(
             "the threat pattern (`tools/cronjob_tools.py::_CRON_THREAT_PATTERNS`)."
         )
         return (False, blocked_doc, "", str(block_exc)), None
+    except Exception as exc:
+        return (False, f"Cron prompt preparation failed: {exc}", "", str(exc)), None
     if prompt is None:
         logger.info("Job '%s': script produced no output, skipping AI call.", job_name)
         return (True, "", SILENT_MARKER, None), None
@@ -2241,6 +2255,32 @@ def run_job(
     job: dict, *, defer_agent_teardown: Optional[list] = None, extra_prompt: Optional[str] = None,
     cancel_event: Optional[_CancelEventLike] = None, execution_id: Optional[str] = None,
 ) -> tuple[bool, str, str, Optional[str]]:
+    """Run under this job's opt-in controller authority, restoring the caller on every exit."""
+    from cron.controller_scope import (
+        ControllerScopeError, bind_controller_scope, sanitize_observer_output, scope_from_job,
+    )
+
+    try:
+        scope = scope_from_job(job)
+    except ControllerScopeError as exc:
+        return False, f"Controller configuration rejected: {exc}", "", str(exc)
+    with bind_controller_scope(scope):
+        success, output, final_response, error = _run_job(
+            job, defer_agent_teardown=defer_agent_teardown, extra_prompt=extra_prompt,
+            cancel_event=cancel_event, execution_id=execution_id,
+        )
+        return (
+            success,
+            sanitize_observer_output(output),
+            sanitize_observer_output(final_response),
+            sanitize_observer_output(error),
+        )
+
+
+def _run_job(
+    job: dict, *, defer_agent_teardown: Optional[list] = None, extra_prompt: Optional[str] = None,
+    cancel_event: Optional[_CancelEventLike] = None, execution_id: Optional[str] = None,
+) -> tuple[bool, str, str, Optional[str]]:
     """Execute a single cron job. Returns (success, full_output_doc, final_response, error).
     ``defer_agent_teardown``: if a list, the live agent is appended instead of torn down; the caller
     MUST call ``_teardown_cron_agent(agent)`` AFTER delivery (a torn-down async client can't
@@ -2304,6 +2344,11 @@ def run_job(
         output = _run_doc_header(job, job_name, job_id, prompt) + f"## Response\n\n{logged_response}\n"
         logger.info("Job '%s' completed successfully", job_name)
         _audit.write(dict(result, response_silent=_is_cron_silence_response(final_response or "")), None)
+        callback_event_ids = job.get("_controller_callback_ids") or []
+        if callback_event_ids and result.get("completed") is True and (final_response or "").strip():
+            from cron.controller_callbacks import acknowledge_callbacks
+
+            acknowledge_callbacks(job_id, callback_event_ids, success=True)
         return True, output, final_response, None
 
     except Exception as e:
@@ -3819,8 +3864,10 @@ from cron.scheduler_tick import tick  # noqa: E402
 # ``_sched``). Only names this module itself calls; everything else lives in the split module.
 # ---------------------------------------------------------------------------
 from cron.scheduler_delivery import (  # noqa: E402
-    _deliver_result, _delivery_lane_value, _normalize_deliver_value, _resolve_delivery_target,
-    _resolve_delivery_targets,
+    _LOCAL_SESSION_TARGET_KIND, _deliver_result, _deliver_to_local_session,
+    _delivery_lane_value, _last_delivered_signature, _last_delivered_signature_lock,
+    _normalize_deliver_value, _normalized_state_signature, _resolve_delivery_target,
+    _resolve_delivery_targets, _resolve_project_route_target,
 )
 from cron.scheduler_script import (  # noqa: E402
     _get_session_db_timeout, _run_job_script_with_claim_heartbeat, _start_heartbeat_thread,

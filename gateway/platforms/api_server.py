@@ -323,6 +323,34 @@ def _resolve_request_runtime_agent_kwargs(provider: str, target_model: Optional[
         "credential_pool": runtime.get("credential_pool")}
 
 
+_SYNTHETIC_DISPLAY_KIND_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+def _synthetic_turn_display_typing(
+    body: Any, authenticated_continuation: bool
+) -> Optional[tuple]:
+    """``body["hermes"]`` -> ``(display_kind, display_metadata | None)``.
+
+    The in-pod mission wake self-posts ``/v1/chat/completions`` with
+    ``{"hermes": {"display_kind": "mission_callback_wake", ...}}`` so the
+    persisted user row is typed at turn start. Ignored unless the request is
+    an authenticated session continuation (an anonymous caller must not be
+    able to disguise a prompt as a system event).
+    """
+    if not authenticated_continuation or not isinstance(body, dict):
+        return None
+    block = body.get("hermes")
+    if not isinstance(block, dict):
+        return None
+    kind = str(block.get("display_kind") or "").strip()
+    if not kind or not _SYNTHETIC_DISPLAY_KIND_RE.match(kind):
+        return None
+    metadata = block.get("display_metadata")
+    if not isinstance(metadata, dict) or not metadata:
+        metadata = None
+    return kind, metadata
+
+
 def _request_agent_overrides(
     body: Any, *, virtual_model: Optional[str] = None, allow_bare_model: bool = True
 ) -> Dict[str, Any]:
@@ -1136,6 +1164,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.API_SERVER)
         extra = config.extra or {}
+        # Explicit operator opt-in, scoped to durable conversations. Ordinary
+        # API clients still own the next turn after event.complete (#85957).
+        background_sessions = extra.get("background_delegation_sessions", [])
+        if not isinstance(background_sessions, list) or any(
+            not isinstance(sid, str) or not sid.strip() for sid in background_sessions
+        ):
+            raise ValueError("background_delegation_sessions must be a list of session IDs")
+        self._background_delegation_sessions = frozenset(background_sessions)
         self._host: str = extra.get("host", os.getenv("API_SERVER_HOST", DEFAULT_HOST))
         raw_port = extra.get("port")
         if raw_port is None:
@@ -3609,25 +3645,70 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 code="rate_limit_exceeded", headers={"Retry-After": "1"})
         return None
 
-    @staticmethod
+    def background_delegation_target(self, session_id: str) -> Optional[str]:
+        """Resolve an explicitly authorized conversation's live compression tip.
+
+        Config belongs to this adapter/profile, not a process-wide env flag.
+        Only verified compression descendants inherit authorization; /new,
+        branches, unknown sessions and ended tips cannot start a wake turn.
+        """
+        roots = self._background_delegation_sessions
+        if not roots or not session_id:
+            return None
+        db = self._ensure_session_db()
+        if db is None:
+            raise RuntimeError("SessionDB unavailable for background delegation policy")
+        for root in roots:
+            chain = db.get_compression_chain(root)
+            if session_id not in chain:
+                continue
+            tip = chain[-1]
+            row = db.get_session(tip)
+            if row and not row.get("ended_at"):
+                return tip
+        return None
+
+    def background_delegation_busy(self, session_id: str) -> bool:
+        """Defer a completion while this API adapter is running its parent."""
+        agents = list(self._active_run_agents.values()) + list(
+            self._shutdown_interruptible_agents.values()
+        )
+        return any(getattr(agent, "session_id", None) == session_id for agent in agents)
+
     def _bind_api_server_session(
-        *, chat_id: str = "", session_key: str = "", session_id: str = "", profile: str = "",
+        self=None, *, chat_id: str = "", session_key: str = "", session_id: str = "", profile: str = "",
         browser_control_principal: str = "", browser_control_transport_family: str = "",
         session_history_delivery: str = "") -> list:
-        """Bind an API turn with push disabled and history delivery default-denied.
+        """Bind an API turn with history delivery default-denied.
 
         Only routes whose continuation reads SessionDB may pass "1". An omitted
         declaration or fingerprint-derived identity keeps delegation synchronous.
+        Stateless requests cannot promise async delivery; only an operator-configured
+        durable session (or its verified compression continuation) can opt into it.
 
         ``profile`` is the ``/p/<profile>/`` prefix serving the request (``""`` = default). It must
         reach ``HERMES_SESSION_PROFILE``: the persistent-Docker container key is derived from it, so an
         unbound profile collapses every profile's turns onto the default sandbox (#96370)."""
         from gateway.session_context import set_session_vars
+
+        # Optional autonomy must not make ordinary API turns depend on an
+        # available policy DB. Delivery itself still raises/retries on lookup
+        # failures, rather than acknowledging an undelivered wake.
+        try:
+            background_delivery = bool(self.background_delegation_target(session_id)) if self is not None else False
+        except Exception:
+            logger.warning(
+                "Background delegation policy unavailable for session %s; "
+                "disabling async delivery for this request", session_id,
+                exc_info=True,
+            )
+            background_delivery = False
+
         return set_session_vars(
             platform="api_server", chat_id=chat_id, session_key=session_key, session_id=session_id,
             profile=profile, browser_control_principal=browser_control_principal,
             browser_control_transport_family=browser_control_transport_family,
-            async_delivery=False, cron_session="", session_history_delivery=session_history_delivery)
+            async_delivery=background_delivery, cron_session="", session_history_delivery=session_history_delivery)
 
     def _turn_runtime_metadata(
         self, agent: Any, *, route: Optional[Dict[str, Any]], requested_runtime: Optional[Dict[str, Any]],
@@ -3703,7 +3784,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         requested_runtime: Optional[Dict[str, Any]] = None, route_source: str = "global",
         confirmed_runtime_lock: bool = False, bind_declared_conversation: bool = False,
         session_history_delivery: str = "", turn_author: Optional[Dict[str, Any]] = None,
-        relay_metadata: Optional[Dict[str, Any]] = None) -> tuple:
+        relay_metadata: Optional[Dict[str, Any]] = None,
+        persist_user_display_kind: Optional[str] = None,
+        persist_user_display_metadata: Optional[Dict[str, Any]] = None) -> tuple:
         """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
         ``agent_ref[0]`` receives the agent so SSE writers can interrupt it; ``active_run_id``
         registers it in ``_active_run_agents``. Under a confirmed model lock the actual
@@ -3763,9 +3846,34 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         task_id=effective_task_id,
                         **author_kwargs,
                     )
+                    if persist_user_display_kind:
+                        conversation_kwargs["persist_user_display_kind"] = persist_user_display_kind
+                        conversation_kwargs["persist_user_display_metadata"] = persist_user_display_metadata
                     if relay_metadata:
                         conversation_kwargs["relay_metadata"] = relay_metadata
                     result = agent.run_conversation(**conversation_kwargs)
+                    if (
+                        isinstance(result, dict)
+                        and result.get("compression_exhausted")
+                        and getattr(agent, "_exhaustion_rotated_from", None)
+                        != getattr(agent, "session_id", None)
+                    ):
+                        from agent.conversation_compression import (
+                            fork_session_after_compression_exhaustion,
+                        )
+
+                        parent_sid = getattr(agent, "session_id", None) or session_id
+                        new_sid = fork_session_after_compression_exhaustion(agent)
+                        if new_sid:
+                            agent._exhaustion_rotated_from = parent_sid
+                            effective_task_id = new_sid
+                            retry_kwargs = dict(conversation_kwargs)
+                            retry_kwargs["conversation_history"] = []
+                            retry_kwargs["task_id"] = effective_task_id
+                            result = agent.run_conversation(**retry_kwargs)
+                            if isinstance(result, dict):
+                                result["session_rotated_after_exhaustion"] = True
+                                result["parent_session_id"] = session_id
                     return self._finish_turn_result(
                         agent, result, session_id, route=route, requested_runtime=requested_runtime,
                         route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock)

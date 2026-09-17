@@ -510,7 +510,11 @@ class SessionSearchMixin:
         carrying ``tool_calls`` (``_db_needs_fts_storage_upgrade``), an interrupted optimize
         (markers/trash), a CJK backfill on this tokenizer-capable host, or an empty external
         index without markers. False when FTS5 is unavailable."""
-        if not self._fts_enabled or self.read_only:
+        if self.read_only:
+            return False
+        if getattr(self, "_fts_stale", False):
+            return True
+        if not self._fts_enabled:
             return False
         with self._read_ctx() as conn:
             return (

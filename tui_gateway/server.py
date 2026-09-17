@@ -1262,6 +1262,114 @@ def _clear_session_context(tokens: list) -> None:
             clear_session_vars(tokens)
 
 
+def _merge_observed_session_messages(session: dict) -> int:
+    """Merge externally persisted local deliveries into live history.
+
+    A scheduler may append to SessionDB from another process while Desktop or
+    WebUI keeps an in-memory transcript. Before the next turn snapshot, import
+    only missing ``observed`` messages so the model sees what the operator
+    already sees.
+    """
+    if _session_source(session) not in {"desktop", "webui"}:
+        return 0
+    session_key = str(session.get("session_key") or "")
+    if not session_key:
+        return 0
+    try:
+        with _session_db(session) as db:
+            if db is None or not db.get_session(session_key):
+                return 0
+            stored = db.get_messages_as_conversation(session_key)
+    except Exception:
+        logger.debug(
+            "failed to load observed local-session messages for %s",
+            session_key,
+            exc_info=True,
+        )
+        return 0
+
+    def identity(message: dict) -> tuple[str, str, str]:
+        try:
+            content = json.dumps(
+                message.get("content"), ensure_ascii=False, sort_keys=True, default=str,
+            )
+        except Exception:
+            content = str(message.get("content"))
+        return (
+            str(message.get("role") or ""),
+            content,
+            str(message.get("timestamp") or ""),
+        )
+
+    with session["history_lock"]:
+        known = [
+            identity(message)
+            for message in session.get("history", [])
+            if message.get("observed")
+        ]
+        missing = []
+        for message in stored:
+            if not message.get("observed"):
+                continue
+            marker = identity(message)
+            if marker in known:
+                known.remove(marker)
+                continue
+            missing.append(dict(message))
+        if not missing:
+            return 0
+        session["history"].extend(missing)
+        session["history_version"] = int(session.get("history_version", 0)) + 1
+    logger.info(
+        "merged %d observed delivery message(s) into live %s session %s",
+        len(missing), _session_source(session), session_key,
+    )
+    return len(missing)
+
+
+def _as_epoch(value: Any) -> float | None:
+    """Row/snapshot timestamps: epoch floats, or ISO / SQLite text."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            from datetime import timezone
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except ValueError:
+        return None
+
+
+def _error_snapshot_is_stale(turn: Any, history: list) -> bool:
+    """A retained failed turn is stale once the session moved on.
+
+    Turns that arrive by another path (mission-callback wake, cron delivery)
+    persist rows without touching this process's snapshot, so every later
+    resume would replay the dead prompt as a pending bubble.
+    """
+    if not isinstance(turn, dict) or turn.get("status") != "error":
+        return False
+    failed_at = _as_epoch(turn.get("updated_at") or turn.get("started_at"))
+    if failed_at is None:
+        return False
+    for row in reversed(history or []):
+        if not isinstance(row, dict):
+            continue
+        stamp = _as_epoch(row.get("timestamp"))
+        if stamp is None:
+            continue
+        return stamp > failed_at + 1.0
+    return False
+
+
 def _enable_gateway_prompts() -> None:
     """Route approvals through gateway callbacks instead of CLI input()."""
     os.environ.update(HERMES_GATEWAY_SESSION="1", HERMES_EXEC_ASK="1", HERMES_INTERACTIVE="1")
@@ -2727,6 +2835,7 @@ def _live_visible_history(session: dict, db, in_memory_fallback: list[dict]) -> 
 def _live_session_payload(
     sid: str, session: dict, *, cols: int | None = None, touch: bool = False,
     transport: Transport | None = None, omit_messages: bool = False) -> dict:
+    _merge_observed_session_messages(session)
     with session["history_lock"]:
         if cols is not None:
             session["cols"] = cols
@@ -2737,6 +2846,7 @@ def _live_session_payload(
             # self-duplicate after settle.
             session["last_active"] = time.time()
         in_memory_history = list(session.get("display_history_prefix") or []) + list(session.get("history") or [])
+        inflight_turn = session.get("inflight_turn")
         inflight, queued = _inflight_snapshot(session), _queued_prompt_snapshot(session)
         running, turn_started_at = bool(session.get("running")), _turn_started_at(session)
     # Persisted display lineage via the session's profile-aware DB (not the launch ``_get_db()``), read
@@ -2746,6 +2856,12 @@ def _live_session_payload(
     else:
         with _session_db(session) as db:
             history = _live_visible_history(session, db, in_memory_history)
+    if inflight and _error_snapshot_is_stale(inflight_turn, history):
+        with session["history_lock"]:
+            if session.get("inflight_turn") is inflight_turn:
+                _clear_inflight_turn(session)
+        inflight = None
+        turn_started_at = None
     # message_count follows _resume_response: the stored size when messages are omitted, else the wire count
     # (a hidden seed row is in ``history`` but never on the wire).
     messages = [] if omit_messages else _history_to_messages(history)

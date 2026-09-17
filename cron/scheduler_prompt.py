@@ -226,6 +226,12 @@ def _build_job_prompt(
     omitted, the script (if any) runs inline as before. extra_prompt: Optional per-run context (from
     ``cronjob(action='run')``, 57331 — salvaged from #57342 by @liuhao1024).
     """
+    from cron.controller_scope import check_prompt_budget, current_controller_scope, scope_from_job
+
+    controller_scope = current_controller_scope()
+    if controller_scope is None or controller_scope.job_id != job.get("id"):
+        controller_scope = scope_from_job(job)
+    controller_prefix = controller_scope.prompt_prefix() if controller_scope else ""
     user_prompt = str(job.get("prompt") or "")
     if extra_prompt:
         user_prompt = f"{user_prompt}\n\n## Run Context\n{extra_prompt}"
@@ -267,12 +273,15 @@ def _build_job_prompt(
     prompt = _CRON_HINT + prompt
     skill_names = _job_skill_names(job)
     if not skill_names:
-        return _scan_assembled_cron_prompt(
-            prompt, job, has_skills=False, has_injected_data=has_injected_data,
+        assembled = _scan_assembled_cron_prompt(
+            controller_prefix + prompt, job, has_skills=False, has_injected_data=has_injected_data,
             user_prompt=user_prompt,
         )
+        return check_prompt_budget(controller_scope, assembled)
 
     parts = _load_cron_skill_parts(job, skill_names)
+    if controller_prefix:
+        parts = [controller_prefix.rstrip(), ""] + parts
     stable_prefix = None
     if prompt:
         from agent.skill_commands import append_user_instruction
@@ -284,6 +293,7 @@ def _build_job_prompt(
         # See #81867.
         stable_prefix = append_user_instruction(parts, prompt)
     assembled = _scan_assembled_cron_prompt("\n".join(parts), job, has_skills=True)
+    check_prompt_budget(controller_scope, assembled)
     if (
         stable_prefix
         and len(assembled) > len(stable_prefix)

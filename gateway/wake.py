@@ -6,8 +6,10 @@ matches the raw ``X-Hermes-Session-Id`` real turns use (invisible parallel sessi
 async-delegation completions: the CLIENT owns the next turn, so they are never self-POSTed as a
 new ``role=user`` prompt (could cross a pending human-confirmation gate); instead
 ``persist_delegation_delivery`` writes a durable DELIVERY row (``display_kind=
-"async_delegation_complete"``, read by TUI/desktop pollers). Failures RAISE (after bounded retries
-on transient errors) so callers can rewind cursors / retry instead of silently losing the event."""
+"async_delegation_complete"``, read by TUI/desktop pollers). Operators can opt named
+conversations into autonomous continuation via ``background_delegation_sessions``.
+Failures RAISE (after bounded retries on transient errors) so callers can rewind
+cursors / retry instead of silently losing the event."""
 
 from __future__ import annotations
 
@@ -51,7 +53,10 @@ async def admit_internal_event(adapter: Any, event: Any) -> None:
         raise WakeNotAccepted("internal wake not accepted by adapter")
 
 
-async def deliver_wake(adapter: Any, *, text: str, session_id: str = "", source: Any = None) -> None:
+async def deliver_wake(
+    adapter: Any, *, text: str, session_id: str = "", source: Any = None,
+    display_kind: Optional[str] = None, display_metadata: Optional[dict] = None,
+) -> None:
     """Deliver a wake turn to the session behind ``adapter``. ``session_id`` is the RAW session id
     (``X-Hermes-Session-Id`` / state.db key) — required for non-push adapters. ``source`` is the
     ``SessionSource`` for the synthetic event — required for push-capable adapters. Raises on
@@ -66,7 +71,11 @@ async def deliver_wake(adapter: Any, *, text: str, session_id: str = "", source:
     if not session_id:
         raise ValueError("deliver_wake: non-push adapter (supports_async_delivery=False) "
                          "requires the raw session id to self-post the wake turn")
-    await _self_post_chat_completion(adapter, text=text, session_id=session_id)
+    typed_kwargs = {}
+    if display_kind:
+        typed_kwargs["display_kind"] = display_kind
+        typed_kwargs["display_metadata"] = display_metadata
+    await _self_post_chat_completion(adapter, text=text, session_id=session_id, **typed_kwargs)
 
 
 def _delegation_display_metadata(evt: dict) -> dict:
@@ -87,6 +96,33 @@ def _delegation_display_metadata(evt: dict) -> dict:
     if isinstance(duration, (int, float)):
         metadata["duration_seconds"] = duration
     return metadata
+
+
+async def deliver_api_delegation(
+    adapter: Any, *, text: str, session_id: str, evt: Optional[dict] = None
+) -> None:
+    """Continue an opted-in API parent; otherwise persist a client-owned delivery.
+
+    The operator's session allowlist is checked again at delivery, so removing
+    an opt-in stops future autonomous turns, including after a restart. The
+    existing durable delegation claim owns retries and duplicate suppression.
+    """
+    resolve = getattr(adapter, "background_delegation_target", None)
+    target = await asyncio.to_thread(resolve, session_id) if callable(resolve) else None
+    if target:
+        parent = str((evt or {}).get("parent_session_id") or session_id)
+        if await asyncio.to_thread(resolve, parent) != target:
+            raise RuntimeError("Background delegation parent/origin mismatch")
+        busy = getattr(adapter, "background_delegation_busy", None)
+        if callable(busy) and busy(target):
+            raise RuntimeError("Background delegation parent still running; retry later")
+        await deliver_wake(
+            adapter, text=text, session_id=target,
+            display_kind="async_delegation_complete",
+            display_metadata=_delegation_display_metadata(evt or {}),
+        )
+        return
+    await persist_delegation_delivery(adapter, text=text, session_id=session_id, evt=evt)
 
 
 async def persist_delegation_delivery(adapter: Any, *, text: str, session_id: str, evt: Optional[dict] = None) -> None:
@@ -132,7 +168,10 @@ async def persist_delegation_delivery(adapter: Any, *, text: str, session_id: st
     )
 
 
-async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str) -> None:
+async def _self_post_chat_completion(
+    adapter: Any, *, text: str, session_id: str,
+    display_kind: Optional[str] = None, display_metadata: Optional[dict] = None,
+) -> None:
     """POST the wake text to the in-pod API server as a normal session turn, using the adapter's
     own bind host/port/key. Session continuation via ``X-Hermes-Session-Id`` is 403-gated on
     ``API_SERVER_KEY``, so a missing key is a hard error rather than a wake in a fresh session
@@ -153,6 +192,14 @@ async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str
     headers = {"Authorization": f"Bearer {api_key}", "X-Hermes-Session-Id": session_id}
     payload = {"model": str(getattr(adapter, "_model_name", "") or "hermes-agent"),
                "messages": [{"role": "user", "content": text}], "stream": False}
+    if display_kind:
+        # Type the synthetic turn at persist time so no client ever paints the
+        # wake prompt as an operator bubble (api_server forwards this to
+        # run_conversation(persist_user_display_kind=...)). Accepted only on an
+        # authenticated session continuation, which this self-post is.
+        payload["hermes"] = {"display_kind": display_kind}
+        if isinstance(display_metadata, dict) and display_metadata:
+            payload["hermes"]["display_metadata"] = display_metadata
     last_err: Optional[BaseException] = None
     attempts = 1 + len(_RETRY_DELAYS_SECONDS)
     for attempt in range(attempts):

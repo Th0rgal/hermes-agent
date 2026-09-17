@@ -638,6 +638,52 @@ def save_goal(session_id: str, state: GoalState) -> None:
         logger.debug("GoalManager: set_meta failed: %s", exc)
 
 
+def _publish_bound_session_goal(session_id: str, goal: str) -> None:
+    """Best-effort: surface an active /goal on the bound project's next_action."""
+    sid = (session_id or "").strip()
+    text = (goal or "").strip()
+    if not sid or not text:
+        return
+    try:
+        import threading
+
+        threading.Thread(
+            target=_publish_bound_session_goal_sync,
+            args=(sid, text),
+            daemon=True,
+            name="publish-bound-goal",
+        ).start()
+    except Exception:
+        logger.debug("bound-session goal publish not scheduled", exc_info=True)
+
+
+def _publish_bound_session_goal_sync(session_id: str, goal: str) -> None:
+    if not os.environ.get("HERMES_SANDBOXED_API_URL") or not os.environ.get("JWT_SECRET"):
+        return
+    try:
+        import asyncio
+        import importlib.util
+        from pathlib import Path
+
+        plugin = (
+            Path(__file__).resolve().parents[1]
+            / "plugins"
+            / "projects-board"
+            / "dashboard"
+            / "plugin_api.py"
+        )
+        spec = importlib.util.spec_from_file_location(
+            "projects_board_plugin_api_goal_publish", plugin
+        )
+        if spec is None or spec.loader is None:
+            return
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        asyncio.run(mod.publish_bound_session_goal(session_id, goal))
+    except Exception:
+        logger.debug("bound-session goal publish failed", exc_info=True)
+
+
 def clear_goal(session_id: str) -> None:
     """Mark a goal cleared in the DB (preserved for audit, status=cleared)."""
     state = load_goal(session_id)
@@ -1138,7 +1184,9 @@ class GoalManager:
             max_turns=int(max_turns) if max_turns else self.default_max_turns,
             contract=contract if contract is not None else GoalContract(),
         )
-        return self._save()
+        saved = self._save()
+        _publish_bound_session_goal(self.session_id, self._state.goal)
+        return saved
 
     def set_contract(self, contract: GoalContract) -> Optional[GoalState]:
         """Attach or replace the completion contract on the active goal."""

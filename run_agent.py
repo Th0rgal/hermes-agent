@@ -1329,6 +1329,8 @@ class AIAgent(
             background=not (getattr(self, "_delegate_depth", 0) > 0), images=function_args.get("images"),
             action=function_args.get("action"),
             subagent_id=function_args.get("subagent_id"), message=function_args.get("message"), parent_agent=self,
+            backend=function_args.get("backend"), workspace_id=function_args.get("workspace_id"),
+            project=function_args.get("project"), await_seconds=function_args.get("await_seconds"),
         )
 
     _invoke_tool = _forward("agent.agent_runtime_helpers", "invoke_tool")

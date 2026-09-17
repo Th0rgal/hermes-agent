@@ -500,6 +500,12 @@ class OpenAICompatRoutesMixin:
             model_alias=model_name)
         if selection_error is not None:
             return selection_error
+        from gateway.platforms.api_server import _synthetic_turn_display_typing
+        display_typing = _synthetic_turn_display_typing(body, bool(provided_session_id))
+        if display_typing is not None:
+            agent_overrides["persist_user_display_kind"] = display_typing[0]
+            if display_typing[1] is not None:
+                agent_overrides["persist_user_display_metadata"] = display_typing[1]
         run_kwargs = dict(
             user_message=user_message, conversation_history=history,
             ephemeral_system_prompt=system_prompt, session_id=session_id,

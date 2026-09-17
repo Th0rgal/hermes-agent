@@ -1,0 +1,9 @@
+name: controller_events
+version: 0.1.0
+description: "Structured controller-event delivery (batching, dedupe, structured silence). Houses the controller-event delivery helper out of the core gateway so its fork delta lives in a plugin, not patched into gateway/delivery.py."
+author: NousResearch
+kind: standalone
+platforms:
+  - linux
+  - macos
+  - windows

@@ -1,0 +1,8 @@
+{
+  "name": "projects",
+  "label": "Projects API",
+  "description": "Read-only proxy to the sandboxed.sh mission inventory (/api/projects, /api/sessions/{id}/missions, /api/missions/{id}/message) so desktop clients need no backend credential of their own. API-only — no UI tab.",
+  "version": "0.1.0",
+  "api": "plugin_api.py",
+  "api_prefix": ""
+}

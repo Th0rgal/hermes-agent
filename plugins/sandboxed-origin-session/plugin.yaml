@@ -1,0 +1,17 @@
+name: sandboxed-origin-session
+version: "1.2.0"
+description: >-
+  Stamp the current Hermes conversation onto the missions it starts, and
+  enroll conversational start_mission calls in the async-delegation ledger
+  so the terminal webhook folds back into this chat instead of a throwaway
+  webhook session.
+author: thomas
+kind: standalone
+# Fork-critical: conversational start_mission fold must work without a
+# manual `hermes plugins enable`. Bundled standalone plugins are opt-in
+# unless default_enabled is set (see hermes_cli/plugins.py).
+default_enabled: true
+platforms:
+  - linux
+  - macos
+  - windows

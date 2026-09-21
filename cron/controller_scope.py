@@ -236,11 +236,17 @@ def bind_controller_scope(scope: ControllerScope | None) -> Iterator[None]:
         _current_scope.reset(token)
 
 
-def check_prompt_budget(scope: ControllerScope | None, prompt: str) -> str:
-    if scope is not None and len(prompt) > CONTROLLER_PROMPT_MAX_CHARS:
+def check_prompt_budget(scope: ControllerScope | None, prompt: str, *, measured: str | None = None) -> str:
+    """Cap the operator-authored job prompt, not inlined skills.
+
+    Preloaded skills (controllers-policy is ~26k) are infrastructure. Counting
+    them against 16k made every real controller fail before the first tool call.
+    """
+    text = measured if measured is not None else prompt
+    if scope is not None and len(text) > CONTROLLER_PROMPT_MAX_CHARS:
         raise ControllerScopeError(
-            f"Controller initial prompt is {len(prompt)} chars; maximum is "
-            f"{CONTROLLER_PROMPT_MAX_CHARS} including context and preloaded skills"
+            f"Controller job prompt is {len(text)} chars; maximum is "
+            f"{CONTROLLER_PROMPT_MAX_CHARS} (job prompt only; preloaded skills are separate)"
         )
     return prompt
 

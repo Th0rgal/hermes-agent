@@ -277,7 +277,7 @@ def _build_job_prompt(
             controller_prefix + prompt, job, has_skills=False, has_injected_data=has_injected_data,
             user_prompt=user_prompt,
         )
-        return check_prompt_budget(controller_scope, assembled)
+        return check_prompt_budget(controller_scope, assembled, measured=user_prompt)
 
     parts = _load_cron_skill_parts(job, skill_names)
     if controller_prefix:
@@ -293,7 +293,7 @@ def _build_job_prompt(
         # See #81867.
         stable_prefix = append_user_instruction(parts, prompt)
     assembled = _scan_assembled_cron_prompt("\n".join(parts), job, has_skills=True)
-    check_prompt_budget(controller_scope, assembled)
+    check_prompt_budget(controller_scope, assembled, measured=user_prompt)
     if (
         stable_prefix
         and len(assembled) > len(stable_prefix)

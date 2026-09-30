@@ -70,3 +70,9 @@ if it was cancelled.
 These tools reach every project on the box. When the conversation is about
 one project, do not mutate another one's state without naming it and getting
 the owner's confirmation first. Reads are always fine.
+
+## Delegating from an Orb host session
+
+For a child created through `create_worker_mission`, keep `parent_mission_id` lineage: the server inherits the parent's actual machine and working directory. `create_worker_mission` accepts an optional existing `working_directory` and a stable `idempotency_key`; reuse the key after a lost response. Changing a workspace is not a request to move to another machine. Explicit remote execution uses `remote_node_id` (or `placement: "core"` for the API host).
+
+Git is optional. Prepare separate Git worktrees only when concurrent repository writers need them; otherwise assign disjoint files or serialize writes in an ordinary directory. Pass context and skill source paths in the assignment, and have the worker check its available tools. Do not assume the parent's MCP inventory or loaded skills are copied automatically. `start_mission` through the assistant MCP remains an explicitly targeted executor launch, not an Orb child launch.

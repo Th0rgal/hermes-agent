@@ -58,9 +58,12 @@ class RunIdempotencyStore:
 
     RETENTION_SECONDS = 24 * 60 * 60
     ACKNOWLEDGED_RETENTION_SECONDS = 24 * 60 * 60
-    MAX_PENDING_EVENTS = 256
+    MAX_PENDING_BATCHES = 256
     MAX_PENDING_BYTES = 8 * 1024 * 1024
-    MAX_RUN_PENDING_EVENTS = 64
+    MAX_RUN_PENDING_BATCHES = 64
+    MAX_BATCH_EVENTS = 128
+    MAX_COALESCED_BYTES = 64 * 1024
+    REPLAY_WAIT_SECONDS = 10
 
     @property
     def durable(self) -> bool:
@@ -124,6 +127,7 @@ class RunIdempotencyStore:
         self._pending_bytes = 0
         self._run_pending = {}
         self._terminal_writes = {}
+        self._open_batches = {}
         self._tighten_permissions()
 
     def _submit_event(self, run_id, payload, writer, *args):
@@ -132,12 +136,13 @@ class RunIdempotencyStore:
         Caller holds _enqueue_lock. Overflow fails this run's replay closed rather
         than silently dropping a frame or retaining an unbounded executor backlog.
         """
-        size = len(payload.encode("utf-8")) + sum(len(arg.encode("utf-8")) for arg in args)
+        size = (payload["size"] if isinstance(payload, dict) else len(payload.encode("utf-8")))
+        size += sum(len(arg.encode("utf-8")) for arg in args)
         failure = self._event_errors.get(run_id)
         if failure is None and (
-            self._pending_events >= self.MAX_PENDING_EVENTS
+            self._pending_events >= self.MAX_PENDING_BATCHES
             or self._pending_bytes + size > self.MAX_PENDING_BYTES
-            or self._run_pending.get(run_id, 0) >= self.MAX_RUN_PENDING_EVENTS
+            or self._run_pending.get(run_id, 0) >= self.MAX_RUN_PENDING_BATCHES
         ):
             failure = RuntimeError("Run event journal backlog exceeded its capacity")
             self._event_errors[run_id] = failure
@@ -157,7 +162,7 @@ class RunIdempotencyStore:
             finally:
                 with self._enqueue_lock:
                     self._pending_events -= 1
-                    self._pending_bytes -= size
+                    self._pending_bytes -= payload["size"] if isinstance(payload, dict) else size
                     remaining = self._run_pending[run_id] - 1
                     if remaining:
                         self._run_pending[run_id] = remaining
@@ -169,27 +174,62 @@ class RunIdempotencyStore:
         return future
 
     def append_event(self, run_id: str, event: dict) -> None:
-        """Queue public frames in order; SQLite I/O never runs on the API event loop."""
+        """Batch queued frames and coalesce adjacent deltas; never block live SSE."""
+        payload = json.dumps(event, ensure_ascii=False)
+        size = len(payload.encode("utf-8"))
         with self._enqueue_lock:
             if run_id in self._event_errors or run_id in self._terminal_writes:
                 return
-            self._submit_event(run_id, json.dumps(event, ensure_ascii=False), self._write_event)
+            batch = self._open_batches.get(run_id)
+            if batch is not None:
+                previous = json.loads(batch["payloads"][-1])
+                def comparable(item):
+                    return {k: v for k, v in item.items() if k not in {"delta", "timestamp"}}
+                merge = (
+                    event.get("event") == "message.delta"
+                    and isinstance(event.get("delta"), str)
+                    and isinstance(previous.get("delta"), str)
+                    and comparable(previous) == comparable(event)
+                    and len(batch["payloads"][-1].encode("utf-8")) + size <= self.MAX_COALESCED_BYTES
+                )
+                if merge:
+                    payload = json.dumps({**event, "delta": previous["delta"] + event["delta"]}, ensure_ascii=False)
+                    size = len(payload.encode("utf-8")) - len(batch["payloads"][-1].encode("utf-8"))
+                if merge or len(batch["payloads"]) < self.MAX_BATCH_EVENTS:
+                    if self._pending_bytes + size > self.MAX_PENDING_BYTES:
+                        self._event_errors[run_id] = RuntimeError("Run event journal byte capacity exceeded")
+                        return
+                    if merge:
+                        batch["payloads"][-1] = payload
+                    else:
+                        batch["payloads"].append(payload)
+                    batch["size"] += size
+                    self._pending_bytes += size
+                    return
+            batch = {"payloads": [payload], "size": size}
+            self._open_batches[run_id] = batch
+            self._submit_event(run_id, batch, self._write_event_batch)
+            if run_id in self._event_errors:
+                self._open_batches.pop(run_id, None)
 
-    def _write_event(self, run_id: str, payload: str) -> None:
-        if run_id in self._event_errors:
-            return
+    def _write_event_batch(self, run_id: str, batch: dict) -> None:
+        with self._enqueue_lock:
+            if self._open_batches.get(run_id) is batch:
+                self._open_batches.pop(run_id, None)
+            payloads = list(batch["payloads"])
         try:
-            with self._lock:
-                self._conn.execute(
-                    "INSERT INTO run_events(run_id,payload) SELECT ?,? "
-                    "WHERE EXISTS (SELECT 1 FROM run_idempotency WHERE run_id=? "
-                    "AND json_extract(status_json, '$.status') NOT IN "
-                    "('completed','failed','cancelled','interrupted'))",
-                    (run_id, payload, run_id))
+            with self._immediate_txn():
+                row = self._conn.execute(
+                    "SELECT status_json FROM run_idempotency WHERE run_id=?", (run_id,)).fetchone()
+                if row is not None and json.loads(row[0]).get("status") not in TERMINAL_STATUSES:
+                    self._conn.executemany(
+                        "INSERT INTO run_events(run_id,payload) VALUES (?,?)",
+                        ((run_id, payload) for payload in payloads))
                 self._conn.commit()
         except Exception as exc:
             self._event_errors[run_id] = exc
             logger.exception("Run event persistence failed; durable replay is unavailable")
+            raise
 
     def finish_run(self, run_id: str, status: dict, event: dict):
         """Queue terminal state and frame as one transaction, after preceding frames."""
@@ -228,7 +268,9 @@ class RunIdempotencyStore:
         pending = self._event_writes.get(run_id)
         if pending is not None:
             try:
-                pending.result(timeout=10)  # callers use to_thread; includes this run's preceding frames
+                pending.result(timeout=self.REPLAY_WAIT_SECONDS)  # callers use to_thread; includes this run's preceding frames
+            except TimeoutError as exc:
+                raise RuntimeError("Run event replay is temporarily unavailable; retry") from exc
             except Exception as exc:
                 self._event_errors.setdefault(run_id, exc)
         if run_id in self._event_errors:
@@ -314,6 +356,7 @@ class RunIdempotencyStore:
             except Exception:
                 terminal = False
             if terminal:
+                self._open_batches.pop(stale_run, None)
                 self._terminal_writes.pop(stale_run, None)
                 self._event_writes.pop(stale_run, None)
                 self._event_errors.pop(stale_run, None)

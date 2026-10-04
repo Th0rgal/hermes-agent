@@ -52,12 +52,12 @@ def test_slow_journal_does_not_block_live_delivery(tmp_path, monkeypatch):
     store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
     store.reserve('alice', 'key', 'fingerprint', 'run_one', {'status': 'running'})
     entered, release = threading.Event(), threading.Event()
-    write = store._write_event
+    write = store._write_event_batch
     def slow_write(*args):
         entered.set()
         release.wait(3)
         write(*args)
-    monkeypatch.setattr(store, '_write_event', slow_write)
+    monkeypatch.setattr(store, '_write_event_batch', slow_write)
     queue = _ReplayQueue(SimpleNamespace(_run_idempotency_ids={'run_one'}, _run_idempotency_store=store), 'run_one')
     try:
         queue.put_nowait({'event': 'message.delta', 'delta': 'live'})
@@ -76,7 +76,7 @@ def test_journal_failure_preserves_live_frame_and_fails_replay(tmp_path, monkeyp
     queue = _ReplayQueue(SimpleNamespace(_run_idempotency_ids={'run_one'}, _run_idempotency_store=store), 'run_one')
     def failed_write(*args):
         store._event_errors['run_one'] = OSError('disk full')
-    monkeypatch.setattr(store, '_write_event', failed_write)
+    monkeypatch.setattr(store, '_write_event_batch', failed_write)
     queue.put_nowait({'event': 'run.completed'})
     assert queue.get_nowait()['event'] == 'run.completed'
     with pytest.raises(RuntimeError, match='replay is unavailable'):
@@ -157,20 +157,21 @@ def test_terminal_enqueue_closes_journal_before_commit(tmp_path, monkeypatch):
     store.close()
 
 
-def test_journal_backlog_is_bounded_and_overflow_is_per_run(tmp_path, monkeypatch):
+def test_delta_burst_is_batched_without_invalidating_replay(tmp_path, monkeypatch):
     import threading
-    import pytest
     store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
     for run in ['bad', 'good']:
         store.reserve('alice', run, 'fingerprint', run, {'status': 'running'})
-    store.MAX_RUN_PENDING_EVENTS = 2
+    store.MAX_RUN_PENDING_BATCHES = 2
     entered, release = threading.Event(), threading.Event()
-    write = store._write_event
+    write = store._write_event_batch
     def blocked_write(*args):
+        with store._enqueue_lock:
+            store._open_batches.pop(args[0], None)
         entered.set()
         assert release.wait(3)
         return write(*args)
-    monkeypatch.setattr(store, '_write_event', blocked_write)
+    monkeypatch.setattr(store, '_write_event_batch', blocked_write)
     try:
         store.append_event('bad', {'event': 'message.delta', 'delta': 'first'})
         assert entered.wait(1)
@@ -181,8 +182,10 @@ def test_journal_backlog_is_bounded_and_overflow_is_per_run(tmp_path, monkeypatc
         assert store._pending_events == 3
     finally:
         release.set()
-    with pytest.raises(RuntimeError, match='replay is unavailable'):
-        store.events('alice', 'bad', 0)
+    replay = store.events('alice', 'bad', 0)
+    assert ''.join(e['data']['delta'] for e in replay) == 'first' + 'more' * 1000
+    store.finish_run('bad', {'status': 'completed'}, {'event': 'run.completed'}).result()
+    assert store.status_for_run('alice', 'bad')['status']['status'] == 'completed'
     assert store.events('alice', 'good', 0)[0]['data']['delta'] == 'healthy'
     store.close()
     assert store._pending_events == store._pending_bytes == 0
@@ -197,4 +200,30 @@ def test_journal_rejects_oversized_frame_without_queuing(tmp_path):
     assert store._pending_events == store._pending_bytes == 0
     with pytest.raises(RuntimeError, match='replay is unavailable'):
         store.events('alice', 'run_one', 0)
+    store.close()
+
+
+def test_replay_wait_timeout_does_not_poison_writer(tmp_path, monkeypatch):
+    import threading
+    import pytest
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    store.reserve('alice', 'key', 'fingerprint', 'run_one', {'status': 'running'})
+    store.REPLAY_WAIT_SECONDS = 0.01
+    entered, release = threading.Event(), threading.Event()
+    write = store._write_event_batch
+    def blocked_write(*args):
+        entered.set()
+        assert release.wait(3)
+        return write(*args)
+    monkeypatch.setattr(store, '_write_event_batch', blocked_write)
+    try:
+        store.append_event('run_one', {'event': 'message.delta', 'delta': 'hello'})
+        assert entered.wait(1)
+        with pytest.raises(RuntimeError, match='temporarily unavailable'):
+            store.events('alice', 'run_one', 0)
+        assert 'run_one' not in store._event_errors
+    finally:
+        release.set()
+    store.finish_run('run_one', {'status': 'completed'}, {'event': 'run.completed'}).result()
+    assert [e['data']['event'] for e in store.events('alice', 'run_one', 0)] == ['message.delta', 'run.completed']
     store.close()

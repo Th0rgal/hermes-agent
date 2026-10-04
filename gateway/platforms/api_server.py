@@ -3952,15 +3952,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     _handle_room_member_grant_refresh = _room_grant_delegate("_handle_room_member_grant_refresh")
     _handle_room_member_grant_revoke = _room_grant_delegate("_handle_room_member_grant_revoke")
 
-    def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, Any] | None:
-        return _api_runs._durable_run_status(self, request, run_id)
+    async def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, Any] | None:
+        return await _api_runs._durable_run_status(self, request, run_id)
 
     @_admit_api_agent_request
     async def _handle_runs(self, request: "web.Request") -> "web.Response":
         return await _api_runs._handle_runs(self, request, _api_server=sys.modules[__name__])
 
-    def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
-        return _api_runs._request_owns_run(self, request, run_id)
+    async def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
+        return await _api_runs._request_owns_run(self, request, run_id)
 
     def _release_run_owner_if_forgotten(self, run_id: str) -> None:
         _api_runs._release_run_owner_if_forgotten(self, run_id)

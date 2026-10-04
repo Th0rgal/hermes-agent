@@ -1530,13 +1530,13 @@ class TestRunIdempotency:
             "status": "running",
         }
         adapter._run_idempotency_ids.add("run_progress")
-        adapter._run_idempotency_store.update_status = MagicMock()
+        adapter._run_idempotency_store.queue_status = MagicMock()
 
         adapter._set_run_status(
             "run_progress", "running", last_event="tool.completed"
         )
 
-        adapter._run_idempotency_store.update_status.assert_not_called()
+        adapter._run_idempotency_store.queue_status.assert_not_called()
 
     def test_status_sweep_prunes_in_memory_ownership_mirrors(self, adapter):
         adapter._run_statuses["run_old"] = {
@@ -2348,3 +2348,111 @@ async def test_json_replay_rejects_legacy_reservation_but_preserves_status(adapt
         status = await cli.get(f'/v1/runs/{run_id}')
         assert status.status == 200
         assert (await status.json())['output'] == 'preserved'
+
+
+@pytest.mark.asyncio
+async def test_slow_journal_does_not_block_status_updates_or_unrelated_requests(adapter, monkeypatch):
+    import os
+    run_id = 'run_slow_journal'
+    request = MagicMock(headers={})
+    store = adapter._run_idempotency_store
+    store.reserve(adapter._run_idempotency_scope(request), 'slow', 'fp', run_id,
+                  {'status': 'running'}, owner_pid=os.getpid())
+    adapter._run_idempotency_ids.add(run_id)
+    entered, release = threading.Event(), threading.Event()
+    write = store._write_event_batch
+    def blocked_write(*args):
+        with store._lock:
+            entered.set()
+            release.wait(3)
+        return write(*args)
+    monkeypatch.setattr(store, '_write_event_batch', blocked_write)
+    app = _create_runs_app(adapter)
+    async def probe(request):
+        return web.json_response({'ok': True})
+    app.router.add_get('/probe', probe)
+    async with TestClient(TestServer(app)) as cli:
+        try:
+            store.append_event(run_id, {'event': 'message.delta', 'delta': 'first'})
+            assert await asyncio.to_thread(entered.wait, 1)
+            before = time.monotonic()
+            adapter._set_run_status(run_id, 'waiting_for_approval', approval={'request_id': 'one'})
+            assert time.monotonic() - before < 0.25
+            adapter._run_statuses.pop(run_id)  # cold ownership and status must read SQLite
+            status_task = asyncio.create_task(cli.get(f'/v1/runs/{run_id}'))
+            await asyncio.sleep(0.02)
+            probe_response = await asyncio.wait_for(cli.get('/probe'), timeout=1)
+            assert probe_response.status == 200
+            assert not status_task.done()
+        finally:
+            release.set()
+        assert (await status_task).status == 200
+        store.events(adapter._run_idempotency_scope(request), run_id, 0)
+        assert store.status_for_run(adapter._run_idempotency_scope(request), run_id)['status']['status'] == 'waiting_for_approval'
+
+
+@pytest.mark.asyncio
+async def test_disconnect_during_reservation_keeps_one_executor_and_drain_slot(adapter, monkeypatch):
+    store = adapter._run_idempotency_store
+    entered, release = threading.Event(), threading.Event()
+    reserve = store.reserve
+    handlers = []
+    original_handle = adapter._handle_runs
+    async def tracked_handle(request):
+        handlers.append(asyncio.current_task())
+        return await original_handle(request)
+    def blocked_reserve(*args, **kwargs):
+        entered.set()
+        release.wait(3)
+        return reserve(*args, **kwargs)
+    monkeypatch.setattr(store, 'reserve', blocked_reserve)
+    monkeypatch.setattr(adapter, '_handle_runs', tracked_handle)
+    agent = MagicMock()
+    agent.run_conversation.return_value = {'final_response': 'done'}
+    agent.session_prompt_tokens = agent.session_completion_tokens = agent.session_total_tokens = 0
+    async with TestClient(TestServer(_create_runs_app(adapter))) as cli:
+        with patch.object(adapter, '_create_agent', return_value=agent) as create:
+            first = asyncio.create_task(cli.post('/v1/runs', json={'input': 'hello'},
+                                                 headers={'Idempotency-Key': 'disconnect-at-reserve'}))
+            try:
+                assert await asyncio.to_thread(entered.wait, 1)
+                original_run_id = next(iter(adapter._run_statuses))
+                handlers[0].cancel()
+                await asyncio.sleep(0)
+                assert adapter._pending_agent_requests == 1
+            finally:
+                release.set()
+            await asyncio.gather(first, return_exceptions=True)
+            replay = await cli.post('/v1/runs', json={'input': 'hello'},
+                                    headers={'Idempotency-Key': 'disconnect-at-reserve'})
+            assert replay.status == 202
+            assert (await replay.json())['run_id'] == original_run_id
+            for _ in range(40):
+                if adapter._run_statuses[original_run_id]['status'] == 'completed':
+                    break
+                await asyncio.sleep(0.025)
+            assert adapter._run_statuses[original_run_id]['status'] == 'completed'
+            assert create.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["tool", "approval"])
+async def test_delayed_agent_callback_cannot_resurrect_terminal_run(adapter, kind):
+    from types import SimpleNamespace
+    from gateway.platforms import api_server, api_server_runs
+
+    run_id = "run_delayed_callback"
+    queue = adapter._run_streams[run_id] = asyncio.Queue()
+    adapter._run_statuses[run_id] = {"status": "running"}
+    if kind == "tool":
+        callback = adapter._make_run_event_callback(run_id, asyncio.get_running_loop())
+        callback("tool.completed", "terminal", result="done")
+    else:
+        run = SimpleNamespace(run_id=run_id, queue=queue, put_event=queue.put_nowait)
+        callback = api_server_runs._make_approval_notify(adapter, run, _api_server=api_server)
+        callback({"command": "echo harmless", "request_id": "request_delayed"})
+    # The executor finished before the queued worker notification reached the loop.
+    adapter._run_statuses[run_id] = {"status": "completed"}
+    await asyncio.sleep(0)
+    assert adapter._run_statuses[run_id] == {"status": "completed"}
+    assert queue.empty()

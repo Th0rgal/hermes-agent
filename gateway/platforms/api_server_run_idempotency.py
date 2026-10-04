@@ -483,14 +483,25 @@ class RunIdempotencyStore:
             self._conn.commit()
             return status
 
-    def update_status(self, run_id: str, status: Dict[str, Any]) -> None:
-        with self._lock:
+    def queue_status(self, run_id: str, status: Dict[str, Any]):
+        """Order status snapshots with journal writes without blocking the API loop."""
+        with self._enqueue_lock:
+            if run_id in self._closed_journals or run_id in self._event_errors:
+                return None
+            return self._submit_event(run_id, _encode_status(status), self._write_status)
+
+    def _write_status(self, run_id: str, payload: str) -> None:
+        with self._immediate_txn():
             self._conn.execute(
                 "UPDATE run_idempotency SET status_json=?, updated_at=? WHERE run_id=? "
                 "AND json_extract(status_json, '$.status') NOT IN "
                 "('completed','failed','cancelled','interrupted')",
-                (_encode_status(status), time.time(), run_id))
+                (payload, time.time(), run_id))
             self._conn.commit()
+
+    def update_status(self, run_id: str, status: Dict[str, Any]) -> None:
+        """Synchronous store API for callers already outside the event loop."""
+        self._write_status(run_id, _encode_status(status))
 
     def close(self) -> None:
         self._event_writer.shutdown(wait=True)

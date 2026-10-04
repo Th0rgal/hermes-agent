@@ -127,9 +127,13 @@ class _ReplayQueue(asyncio.Queue):
         self.owner, self.run_id = owner, run_id
 
     def put_nowait(self, item):
-        if item is not None and self.run_id in self.owner._run_idempotency_ids:
-            self.owner._run_idempotency_store.append_event(self.run_id, item)
-        super().put_nowait(item)
+        try:
+            if item is not None and self.run_id in self.owner._run_idempotency_ids:
+                self.owner._run_idempotency_store.append_event(self.run_id, item)
+        except Exception:
+            logger.exception("Could not enqueue durable run event; preserving live transport")
+        finally:
+            super().put_nowait(item)
 
 
 def _initialize_run_state(self, *, store_factory) -> None:
@@ -775,7 +779,7 @@ async def _handle_get_run(self, request: "web.Request", *, _api_server) -> "web.
 
 async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "web.StreamResponse":
     """GET /v1/runs/{run_id}/events — stream structured agent lifecycle events."""
-    auth_err = self._check_auth(request)
+    auth_err = self._check_run_auth(request, permission="status")
     if auth_err:
         return auth_err
     run_id = request.match_info["run_id"]
@@ -788,8 +792,12 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
                 raise ValueError()
         except ValueError:
             return _json_error(_api_server._openai_error, "Invalid event cursor", status=400)
-        events = await asyncio.to_thread(
-            self._run_idempotency_store.events, self._run_idempotency_scope(request), run_id, after)
+        try:
+            events = await asyncio.to_thread(
+                self._run_idempotency_store.events, self._run_idempotency_scope(request), run_id, after)
+        except Exception:
+            logger.exception("Durable run replay failed for %s", run_id)
+            return _json_error(_api_server._openai_error, "Durable event replay is unavailable", status=503)
         return web.json_response({"events": events, "cursor": events[-1]["id"] if events else str(after),
                                   "has_more": len(events) == 500})
     # Allow subscribing slightly before the run is registered (race window).

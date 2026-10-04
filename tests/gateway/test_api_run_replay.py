@@ -45,3 +45,40 @@ def test_replay_continues_after_transport_retirement(tmp_path):
     assert [e["data"]["event"] for e in store.events("alice", "run_one", 0)] == [
         "message.delta", "message.delta", "run.completed"]
     store.close()
+
+
+def test_slow_journal_does_not_block_live_delivery(tmp_path, monkeypatch):
+    import threading
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    store.reserve('alice', 'key', 'fingerprint', 'run_one', {'status': 'running'})
+    entered, release = threading.Event(), threading.Event()
+    write = store._write_event
+    def slow_write(*args):
+        entered.set()
+        release.wait(3)
+        write(*args)
+    monkeypatch.setattr(store, '_write_event', slow_write)
+    queue = _ReplayQueue(SimpleNamespace(_run_idempotency_ids={'run_one'}, _run_idempotency_store=store), 'run_one')
+    try:
+        queue.put_nowait({'event': 'message.delta', 'delta': 'live'})
+        assert entered.wait(1)
+        assert queue.get_nowait()['delta'] == 'live'
+    finally:
+        release.set()
+    assert store.events('alice', 'run_one', 0)[0]['data']['delta'] == 'live'
+    store.close()
+
+
+def test_journal_failure_preserves_live_frame_and_fails_replay(tmp_path, monkeypatch):
+    import pytest
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    store.reserve('alice', 'key', 'fingerprint', 'run_one', {'status': 'running'})
+    queue = _ReplayQueue(SimpleNamespace(_run_idempotency_ids={'run_one'}, _run_idempotency_store=store), 'run_one')
+    def failed_write(*args):
+        store._event_error = OSError('disk full')
+    monkeypatch.setattr(store, '_write_event', failed_write)
+    queue.put_nowait({'event': 'run.completed'})
+    assert queue.get_nowait()['event'] == 'run.completed'
+    with pytest.raises(RuntimeError, match='replay is unavailable'):
+        store.events('alice', 'run_one', 0)
+    store.close()

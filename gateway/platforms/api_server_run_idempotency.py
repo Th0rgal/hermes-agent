@@ -6,6 +6,7 @@ import logging
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict
@@ -112,18 +113,35 @@ class RunIdempotencyStore:
         self._conn.execute("CREATE INDEX IF NOT EXISTS run_events_run ON run_events(run_id, sequence)")
         self._conn.commit()
         self._lock = threading.Lock()
+        self._event_writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hermes-run-events")
+        self._last_event_write = None
+        self._event_error = None
         self._tighten_permissions()
 
     def append_event(self, run_id: str, event: dict) -> None:
-        """Journal public, already-redacted lifecycle events before delivery."""
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO run_events(run_id,payload) VALUES (?,?)",
-                (run_id, json.dumps(event, ensure_ascii=False)))
-            self._conn.commit()
+        """Queue public frames in order; SQLite I/O never runs on the API event loop."""
+        payload = json.dumps(event, ensure_ascii=False)
+        self._last_event_write = self._event_writer.submit(self._write_event, run_id, payload)
+
+    def _write_event(self, run_id: str, payload: str) -> None:
+        try:
+            with self._lock:
+                self._conn.execute(
+                    "INSERT INTO run_events(run_id,payload) SELECT ?,? "
+                    "WHERE EXISTS (SELECT 1 FROM run_idempotency WHERE run_id=?)",
+                    (run_id, payload, run_id))
+                self._conn.commit()
+        except Exception as exc:
+            self._event_error = exc
+            logger.exception("Run event persistence failed; durable replay is unavailable")
 
     def events(self, scope: str, run_id: str, after: int, limit: int = 500) -> list[dict]:
         """Replay only events whose run belongs to this authenticated principal."""
+        pending = self._last_event_write
+        if pending is not None:
+            pending.result()  # callers use to_thread; includes every previously queued frame
+        if self._event_error is not None:
+            raise RuntimeError("Run event persistence failed; replay is unavailable") from self._event_error
         with self._lock:
             rows = self._conn.execute(
                 """SELECT e.sequence,e.payload FROM run_events e
@@ -250,5 +268,6 @@ class RunIdempotencyStore:
             self._conn.commit()
 
     def close(self) -> None:
+        self._event_writer.shutdown(wait=True)
         with self._lock:
             self._conn.close()

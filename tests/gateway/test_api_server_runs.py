@@ -2074,7 +2074,7 @@ class TestHostedRoomRuns:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("method", "suffix"),
-        [("GET", ""), ("POST", "/stop")],
+        [("GET", ""), ("GET", "/events?format=json"), ("POST", "/stop")],
     )
     async def test_room_grant_cannot_access_ownerless_compat_run(
         self, auth_adapter, tmp_path, method, suffix
@@ -2194,6 +2194,10 @@ class TestHostedRoomRuns:
                     await asyncio.sleep(0.05)
             assert status.status == 200
             assert status_body["output"] == "Scoped room reply."
+            replay = await cli.get(f"/v1/runs/{run_id}/events?format=json",
+                                   headers={"Authorization": f"HermesRoom {grant}"})
+            assert replay.status == 200
+            assert any(e["data"]["event"] == "run.completed" for e in (await replay.json())["events"])
             session_id = status_body["session_id"]
             db = await adapter._ensure_session_db_async()
             row = db.get_session(session_id)

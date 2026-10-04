@@ -319,3 +319,37 @@ def test_migration_does_not_claim_legacy_reservations_have_journals(tmp_path):
     store.reserve('alice', 'new', 'fp2', 'new', {'status': 'queued'})
     assert store.status_for_run('alice', 'new')['journal_enabled'] is True
     store.close()
+
+
+def test_completed_receipts_are_not_retained_in_memory(tmp_path):
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    store.reserve('alice', 'key', 'fp', 'run_one', {'status': 'running'})
+    event = {'event': 'run.completed', 'output': 'x' * 10000}
+    receipt = store.finish_run('run_one', {'status': 'completed', 'output': event['output']}, event).result()
+    store._event_writer.submit(lambda: None).result()  # completion callbacks have run
+    assert 'run_one' not in store._event_writes
+    assert 'run_one' not in store._terminal_writes
+    assert 'run_one' in store._closed_journals
+    store.append_event('run_one', {'event': 'message.delta', 'delta': 'late'})
+    late = store.finish_run('run_one', {'status': 'cancelled'}, {'event': 'run.cancelled'}).result()
+    assert late == receipt
+    assert len(store.events('alice', 'run_one', 0)) == 1
+    store.close()
+
+
+def test_retention_prunes_dead_owner_journals_without_client_reconnect(tmp_path, monkeypatch):
+    import time
+    import gateway.platforms.api_server_run_idempotency as module
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    for run, pid in [('dead', 101), ('live', 102)]:
+        store.reserve('alice', run, run, run, {'status': 'running'}, owner_pid=pid, owner_started=1)
+        store.append_event(run, {'event': 'message.delta', 'delta': run})
+        assert store.events('alice', run, 0)
+    expiry = time.time() + store.RETENTION_SECONDS + 1
+    monkeypatch.setattr(module, '_owner_alive', lambda pid, started: pid == 102)
+    monkeypatch.setattr(module.time, 'time', lambda: expiry)
+    assert store.lookup('alice', 'dead', 'dead') == ('missing', None)
+    assert store.lookup('alice', 'live', 'live')[0] == 'reused'
+    assert store._conn.execute("SELECT count(*) FROM run_events WHERE run_id='dead'").fetchone()[0] == 0
+    assert store.events('alice', 'live', 0)
+    store.close()

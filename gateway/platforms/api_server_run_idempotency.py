@@ -52,6 +52,17 @@ def _outcome(row, fingerprint):
     return ("reused" if hmac.compare_digest(row[0], fingerprint) else "conflict"), _record(*row[1:])
 
 
+def _owner_alive(owner_pid: int, owner_started: int) -> bool:
+    """True when the recorded owner pid still exists and is the same process incarnation."""
+    try:
+        from gateway.status import _pid_exists, get_process_start_time
+        return owner_pid > 0 and bool(_pid_exists(owner_pid)) and (
+            not owner_started or int(get_process_start_time(owner_pid) or 0) == owner_started)
+    except Exception:
+        return False
+
+
+
 class RunIdempotencyStore:
     """Durable, tenant-scoped reservations for ``POST /v1/runs``: a unique ``(scope, key)`` row
     inserted inside ``BEGIN IMMEDIATE`` so separate workers cannot both admit one request. Only
@@ -131,6 +142,7 @@ class RunIdempotencyStore:
         self._run_pending = {}
         self._run_pending_bytes = {}
         self._terminal_writes = {}
+        self._closed_journals = set()
         self._open_batches = {}
         self._journal_runs = set()
         self._tighten_permissions()
@@ -176,21 +188,33 @@ class RunIdempotencyStore:
                     else:
                         self._run_pending.pop(run_id, None)
                         self._run_pending_bytes.pop(run_id, None)
-                        if run_id in self._terminal_writes:
+                        if run_id in self._closed_journals:
                             self._journal_runs.discard(run_id)
                     if isinstance(payload, dict):
                         payload["payloads"].clear()
 
         future = self._event_writer.submit(write)
         self._event_writes[run_id] = future
+        future.add_done_callback(lambda done: self._write_finished(run_id, done))
         return future
+
+    def _write_finished(self, run_id, future):
+        """Keep only in-flight futures; receipts and output live durably in SQLite."""
+        with self._enqueue_lock:
+            if future.cancelled() or future.exception() is not None:
+                # Do not retain writer tracebacks (and their full response payloads).
+                self._event_errors[run_id] = RuntimeError("Run event persistence failed")
+            if self._event_writes.get(run_id) is future:
+                self._event_writes.pop(run_id, None)
+            if self._terminal_writes.get(run_id) is future:
+                self._terminal_writes.pop(run_id, None)
 
     def append_event(self, run_id: str, event: dict) -> None:
         """Batch queued frames and coalesce adjacent deltas; never block live SSE."""
         payload = json.dumps(event, ensure_ascii=False)
         size = len(payload.encode("utf-8"))
         with self._enqueue_lock:
-            if run_id in self._event_errors or run_id in self._terminal_writes:
+            if run_id in self._event_errors or run_id in self._closed_journals:
                 return
             batch = self._open_batches.get(run_id)
             if batch is not None:
@@ -247,15 +271,19 @@ class RunIdempotencyStore:
             payloads.clear()  # failed futures must not retain an entire batch through traceback locals
 
     def finish_run(self, run_id: str, status: dict, event: dict):
-        """Queue terminal state and frame as one transaction, after preceding frames."""
+        """Queue terminal state and frame atomically; late callers read the durable winner."""
         with self._enqueue_lock:
-            if run_id not in self._terminal_writes:
-                self._terminal_writes[run_id] = self._submit_event(
+            self._closed_journals.add(run_id)
+            future = self._terminal_writes.get(run_id)
+            if future is None:
+                future = self._submit_event(
                     run_id, json.dumps(event, ensure_ascii=False), self._write_terminal,
                     _encode_status(status))
+                self._terminal_writes[run_id] = future
+                future.add_done_callback(lambda done: self._write_finished(run_id, done))
             if not self._run_pending.get(run_id):
                 self._journal_runs.discard(run_id)
-            return self._terminal_writes[run_id]
+            return future
 
     def _write_terminal(self, run_id: str, status_json: str, payload: str) -> dict:
         try:
@@ -267,8 +295,13 @@ class RunIdempotencyStore:
                 current = json.loads(row[0])
                 if current.get("status") in TERMINAL_STATUSES:
                     # A concurrent shutdown cannot overwrite an already-committed completion.
+                    terminal = self._conn.execute(
+                        "SELECT payload FROM run_events WHERE run_id=? ORDER BY sequence DESC LIMIT 1",
+                        (run_id,)).fetchone()
                     self._conn.commit()
-                    return {"status": current, "event": {**current, "event": "run." + current["status"], "run_id": run_id}}
+                    event = json.loads(terminal[0]) if terminal else {
+                        **current, "event": "run." + current["status"], "run_id": run_id}
+                    return {"status": current, "event": event}
                 self._conn.execute(
                     "UPDATE run_idempotency SET status_json=?, updated_at=? WHERE run_id=?",
                     (status_json, time.time(), run_id))
@@ -364,26 +397,34 @@ class RunIdempotencyStore:
         return ("missing", None) if row is None else _outcome(row, fingerprint)
 
     def _prune_stale_terminal_locked(self, now: float) -> None:
-        """Prune aged replay records only once their stored run is terminal (caller holds the
-        lock + transaction): a long or disconnected room turn may outlive the retention window."""
+        """Prune expired terminal/dead-owner records while preserving live or unknown owners.
+
+        Caller holds the DB lock/transaction. Long live turns may outlive retention.
+        """
         stale = self._conn.execute(
-            """SELECT scope, idempotency_key, status_json, run_id
+            """SELECT scope, idempotency_key, status_json, run_id, owner_pid, owner_started
                  FROM run_idempotency
                 WHERE acknowledged_at <= ?
                    OR (retention_until > 0 AND retention_until <= ?)
                    OR (retention_until <= 0 AND updated_at < ?)""",
             (now - self.ACKNOWLEDGED_RETENTION_SECONDS, now, now - self.RETENTION_SECONDS),
         ).fetchall()
-        for stale_scope, stale_key, stale_status, stale_run in stale:
+        for stale_scope, stale_key, stale_status, stale_run, owner_pid, owner_started in stale:
             try:
                 terminal = json.loads(stale_status).get("status") in TERMINAL_STATUSES
             except Exception:
                 terminal = False
-            if terminal:
-                self._open_batches.pop(stale_run, None)
-                self._terminal_writes.pop(stale_run, None)
-                self._event_writes.pop(stale_run, None)
-                self._event_errors.pop(stale_run, None)
+            abandoned = int(owner_pid or 0) > 0 and not _owner_alive(int(owner_pid), int(owner_started or 0))
+            if terminal or abandoned:
+                with self._enqueue_lock:
+                    if self._run_pending.get(stale_run):
+                        continue
+                    self._open_batches.pop(stale_run, None)
+                    self._terminal_writes.pop(stale_run, None)
+                    self._closed_journals.discard(stale_run)
+                    self._event_writes.pop(stale_run, None)
+                    self._event_errors.pop(stale_run, None)
+                    self._journal_runs.discard(stale_run)
                 self._conn.execute(
                     "DELETE FROM run_events WHERE run_id IN (SELECT run_id FROM run_idempotency WHERE scope=? AND idempotency_key=?)",
                     (stale_scope, stale_key))

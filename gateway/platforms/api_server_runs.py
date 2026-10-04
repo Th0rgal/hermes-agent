@@ -23,7 +23,7 @@ except ImportError:
     RequestKey = None  # type: ignore[assignment,misc]
 
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response
-from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES
+from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES, _owner_alive
 
 
 logger = logging.getLogger("gateway.platforms.api_server")
@@ -277,16 +277,6 @@ def _check_run_auth(self, request: "web.Request", *, permission: str, _api_serve
     except Exception as exc:
         return _room_grant_error_response(exc, _openai_error=_api_server._openai_error)
     return None
-
-
-def _owner_alive(owner_pid: int, owner_started: int) -> bool:
-    """True when the recorded owner pid still exists and is the same process incarnation."""
-    try:
-        from gateway.status import _pid_exists, get_process_start_time
-        return owner_pid > 0 and bool(_pid_exists(owner_pid)) and (
-            not owner_started or int(get_process_start_time(owner_pid) or 0) == owner_started)
-    except Exception:
-        return False
 
 
 def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, Any] | None:

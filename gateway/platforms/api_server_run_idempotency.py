@@ -33,7 +33,8 @@ _MIGRATIONS = {
     "owner_pid": "INTEGER NOT NULL DEFAULT 0",
     "owner_started": "INTEGER NOT NULL DEFAULT 0",
     "retention_until": "REAL NOT NULL DEFAULT 0",
-    "acknowledged_at": "REAL"}
+    "acknowledged_at": "REAL",
+    "journal_enabled": "INTEGER NOT NULL DEFAULT 0"}
 
 
 def _encode_status(status: Dict[str, Any]) -> str:
@@ -340,8 +341,8 @@ class RunIdempotencyStore:
             self._conn.execute(
                 "INSERT INTO run_idempotency("
                 "scope,idempotency_key,fingerprint,run_id,status_json,"
-                "owner_pid,owner_started,retention_until,created_at,updated_at"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "owner_pid,owner_started,retention_until,created_at,updated_at,journal_enabled"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,1)",
                 (scope, key, fingerprint, run_id, encoded, int(owner_pid or 0), int(owner_started or 0),
                  retention_until, now, now))
             self._conn.commit()
@@ -397,12 +398,12 @@ class RunIdempotencyStore:
                 self._conn.execute(_EXTEND_RETENTION_BY_RUN, (retention_until, scope, run_id))
                 self._conn.commit()
             row = self._conn.execute(
-                "SELECT status_json, owner_pid, owner_started, updated_at "
+                "SELECT status_json, owner_pid, owner_started, updated_at, journal_enabled "
                 "FROM run_idempotency WHERE scope=? AND run_id=?",
                 (scope, run_id)).fetchone()
         if row is None:
             return None
-        return {k: v for k, v in _record(None, *row).items() if k != "run_id"}
+        return {k: v for k, v in _record(None, *row[:-1]).items() if k != "run_id"} | {"journal_enabled": bool(row[-1])}
 
     def extend_retention(self, scope: str, run_id: str, until: float) -> bool:
         """Persist the latest verified recovery horizon for an active grant."""

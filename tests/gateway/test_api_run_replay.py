@@ -297,3 +297,25 @@ def test_journal_admission_preserves_accepted_runs_and_retry_keys(tmp_path):
     assert len(store.events('alice', 'run_one', 0)) == 2
     assert store.reserve('alice', 'next', 'fp2', 'run_two', {'status': 'running'})[0] == 'created'
     store.close()
+
+
+def test_migration_does_not_claim_legacy_reservations_have_journals(tmp_path):
+    import sqlite3
+    import time
+    path = str(tmp_path / 'legacy.db')
+    conn = sqlite3.connect(path)
+    conn.execute('''CREATE TABLE run_idempotency (
+        scope TEXT, idempotency_key TEXT, fingerprint TEXT, run_id TEXT,
+        status_json TEXT, created_at REAL, updated_at REAL,
+        PRIMARY KEY (scope, idempotency_key))''')
+    conn.execute('INSERT INTO run_idempotency VALUES (?,?,?,?,?,?,?)',
+                 ('alice', 'legacy', 'fp', 'old', '{"status":"completed"}', time.time(), time.time()))
+    conn.commit()
+    conn.close()
+    store = RunIdempotencyStore(path)
+    assert store.status_for_run('alice', 'old')['journal_enabled'] is False
+    assert store.reserve('alice', 'legacy', 'fp', 'ignored', {'status': 'queued'})[0] == 'reused'
+    assert store.status_for_run('alice', 'old')['journal_enabled'] is False
+    store.reserve('alice', 'new', 'fp2', 'new', {'status': 'queued'})
+    assert store.status_for_run('alice', 'new')['journal_enabled'] is True
+    store.close()

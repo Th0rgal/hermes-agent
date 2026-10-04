@@ -2330,3 +2330,21 @@ async def test_json_replay_rejects_unjournaled_live_run(adapter):
         assert response.status == 409
         assert (await response.json())['error']['code'] == 'run_replay_unsupported'
         assert adapter._run_streams[run_id].qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_json_replay_rejects_legacy_reservation_but_preserves_status(adapter):
+    run_id = 'run_legacy'
+    request = MagicMock(headers={})
+    scope = adapter._run_idempotency_scope(request)
+    store = adapter._run_idempotency_store
+    store.reserve(scope, 'legacy', 'fp', run_id, {'status': 'completed', 'output': 'preserved'})
+    store._conn.execute('UPDATE run_idempotency SET journal_enabled=0 WHERE run_id=?', (run_id,))
+    store._conn.commit()
+    async with TestClient(TestServer(_create_runs_app(adapter))) as cli:
+        response = await cli.get(f'/v1/runs/{run_id}/events?format=json')
+        assert response.status == 409
+        assert (await response.json())['error']['code'] == 'run_replay_unsupported'
+        status = await cli.get(f'/v1/runs/{run_id}')
+        assert status.status == 200
+        assert (await status.json())['output'] == 'preserved'

@@ -113,6 +113,8 @@ def _uses_room_run_auth(self, request: "web.Request") -> bool:
 
 
 def _publish_run_event(owner, run_id, event):
+    if event is not None and getattr(owner, "_run_statuses", {}).get(run_id, {}).get("status") in TERMINAL_STATUSES:
+        return
     queue = owner._run_streams.get(run_id)
     if queue is not None:
         queue.put_nowait(event)
@@ -187,6 +189,8 @@ def _set_run_status(self, run_id: str, status: str, *, _persist: bool = True, **
     now = time.time()
     current = self._run_statuses.get(run_id, {})
     previous_status = str(current.get("status") or "")
+    if previous_status in TERMINAL_STATUSES and status not in TERMINAL_STATUSES:
+        return current
     field_names = set(fields)
     current.update({"object": "hermes.run", "run_id": run_id, "status": status, "updated_at": now})
     current.setdefault("created_at", fields.pop("created_at", now))
@@ -211,6 +215,8 @@ def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop
     redact_sensitive_text = _api_server.redact_sensitive_text
 
     def _push(event: Dict[str, Any]) -> None:
+        if self._run_statuses.get(run_id, {}).get("status") in TERMINAL_STATUSES:
+            return
         self._set_run_status(
             run_id, self._run_statuses.get(run_id, {}).get("status", "running"), last_event=event.get("event"))
         with suppress(Exception):
@@ -641,6 +647,8 @@ def _make_approval_notify(self, run: _RunLaunch, *, _api_server) -> Callable[[Di
     run_id, q, loop = run.run_id, run.queue, asyncio.get_running_loop()
 
     def _approval_notify(approval_data: Dict[str, Any]) -> None:
+        if self._run_statuses.get(run_id, {}).get("status") in TERMINAL_STATUSES:
+            return
         event = dict(approval_data or {})
         # Clients must never receive the raw flagged command: redact before it hits the stream.
         # Redact credentials from the command before it enters the SSE/API event stream — same egress bug as
@@ -680,9 +688,9 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         if run_id in self._run_idempotency_ids:
             try:
                 pending = self._run_idempotency_store.finish_run(run_id, current, event)
-                event = await asyncio.shield(asyncio.wrap_future(pending))
-                if event.get("status") in TERMINAL_STATUSES:
-                    self._run_statuses[run_id] = {k: v for k, v in event.items() if k != "event"}
+                receipt = await asyncio.shield(asyncio.wrap_future(pending))
+                event = receipt["event"]
+                self._run_statuses[run_id] = receipt["status"]
             except Exception:
                 logger.exception("Could not persist terminal run; preserving live completion")
         # The writer already journals this frame atomically. Do not enqueue it twice.

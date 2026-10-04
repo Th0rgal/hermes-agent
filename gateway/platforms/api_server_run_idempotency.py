@@ -6,7 +6,7 @@ import logging
 import sqlite3
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict
@@ -58,6 +58,9 @@ class RunIdempotencyStore:
 
     RETENTION_SECONDS = 24 * 60 * 60
     ACKNOWLEDGED_RETENTION_SECONDS = 24 * 60 * 60
+    MAX_PENDING_EVENTS = 256
+    MAX_PENDING_BYTES = 8 * 1024 * 1024
+    MAX_RUN_PENDING_EVENTS = 64
 
     @property
     def durable(self) -> bool:
@@ -116,14 +119,61 @@ class RunIdempotencyStore:
         self._event_writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hermes-run-events")
         self._event_writes = {}
         self._event_errors = {}
+        self._enqueue_lock = threading.RLock()
+        self._pending_events = 0
+        self._pending_bytes = 0
+        self._run_pending = {}
+        self._terminal_writes = {}
         self._tighten_permissions()
+
+    def _submit_event(self, run_id, payload, writer, *args):
+        """Bound queued/running work and serialized bytes without blocking live SSE.
+
+        Caller holds _enqueue_lock. Overflow fails this run's replay closed rather
+        than silently dropping a frame or retaining an unbounded executor backlog.
+        """
+        size = len(payload.encode("utf-8")) + sum(len(arg.encode("utf-8")) for arg in args)
+        failure = self._event_errors.get(run_id)
+        if failure is None and (
+            self._pending_events >= self.MAX_PENDING_EVENTS
+            or self._pending_bytes + size > self.MAX_PENDING_BYTES
+            or self._run_pending.get(run_id, 0) >= self.MAX_RUN_PENDING_EVENTS
+        ):
+            failure = RuntimeError("Run event journal backlog exceeded its capacity")
+            self._event_errors[run_id] = failure
+        if failure is not None:
+            future = Future()
+            future.set_exception(failure)
+            return future
+        self._pending_events += 1
+        self._pending_bytes += size
+        self._run_pending[run_id] = self._run_pending.get(run_id, 0) + 1
+
+        def write():
+            try:
+                if run_id in self._event_errors:
+                    raise self._event_errors[run_id]
+                return writer(run_id, *args, payload)
+            finally:
+                with self._enqueue_lock:
+                    self._pending_events -= 1
+                    self._pending_bytes -= size
+                    remaining = self._run_pending[run_id] - 1
+                    if remaining:
+                        self._run_pending[run_id] = remaining
+                    else:
+                        self._run_pending.pop(run_id, None)
+
+        future = self._event_writer.submit(write)
+        self._event_writes[run_id] = future
+        return future
 
     def append_event(self, run_id: str, event: dict) -> None:
         """Queue public frames in order; SQLite I/O never runs on the API event loop."""
-        if run_id in self._event_errors:
-            return  # this stream already fails closed; keep live delivery without queue growth
-        payload = json.dumps(event, ensure_ascii=False)
-        self._event_writes[run_id] = self._event_writer.submit(self._write_event, run_id, payload)
+        with self._enqueue_lock:
+            if run_id in self._event_errors or run_id in self._terminal_writes:
+                return
+            self._submit_event(run_id, json.dumps(event, ensure_ascii=False), self._write_event)
 
     def _write_event(self, run_id: str, payload: str) -> None:
         if run_id in self._event_errors:
@@ -132,7 +182,9 @@ class RunIdempotencyStore:
             with self._lock:
                 self._conn.execute(
                     "INSERT INTO run_events(run_id,payload) SELECT ?,? "
-                    "WHERE EXISTS (SELECT 1 FROM run_idempotency WHERE run_id=?)",
+                    "WHERE EXISTS (SELECT 1 FROM run_idempotency WHERE run_id=? "
+                    "AND json_extract(status_json, '$.status') NOT IN "
+                    "('completed','failed','cancelled','interrupted'))",
                     (run_id, payload, run_id))
                 self._conn.commit()
         except Exception as exc:
@@ -141,9 +193,12 @@ class RunIdempotencyStore:
 
     def finish_run(self, run_id: str, status: dict, event: dict):
         """Queue terminal state and frame as one transaction, after preceding frames."""
-        self._event_writes[run_id] = self._event_writer.submit(
-            self._write_terminal, run_id, _encode_status(status), json.dumps(event, ensure_ascii=False))
-        return self._event_writes[run_id]
+        with self._enqueue_lock:
+            if run_id not in self._terminal_writes:
+                self._terminal_writes[run_id] = self._submit_event(
+                    run_id, json.dumps(event, ensure_ascii=False), self._write_terminal,
+                    _encode_status(status))
+            return self._terminal_writes[run_id]
 
     def _write_terminal(self, run_id: str, status_json: str, payload: str) -> dict:
         try:
@@ -156,13 +211,13 @@ class RunIdempotencyStore:
                 if current.get("status") in TERMINAL_STATUSES:
                     # A concurrent shutdown cannot overwrite an already-committed completion.
                     self._conn.commit()
-                    return {**current, "event": "run." + current["status"], "run_id": run_id}
+                    return {"status": current, "event": {**current, "event": "run." + current["status"], "run_id": run_id}}
                 self._conn.execute(
                     "UPDATE run_idempotency SET status_json=?, updated_at=? WHERE run_id=?",
                     (status_json, time.time(), run_id))
                 self._conn.execute("INSERT INTO run_events(run_id,payload) VALUES (?,?)", (run_id, payload))
                 self._conn.commit()
-                return json.loads(payload)
+                return {"status": json.loads(status_json), "event": json.loads(payload)}
         except Exception as exc:
             self._event_errors[run_id] = exc
             logger.exception("Terminal run persistence failed")
@@ -173,7 +228,7 @@ class RunIdempotencyStore:
         pending = self._event_writes.get(run_id)
         if pending is not None:
             try:
-                pending.result()  # callers use to_thread; includes this run's preceding frames
+                pending.result(timeout=10)  # callers use to_thread; includes this run's preceding frames
             except Exception as exc:
                 self._event_errors.setdefault(run_id, exc)
         if run_id in self._event_errors:
@@ -259,6 +314,7 @@ class RunIdempotencyStore:
             except Exception:
                 terminal = False
             if terminal:
+                self._terminal_writes.pop(stale_run, None)
                 self._event_writes.pop(stale_run, None)
                 self._event_errors.pop(stale_run, None)
                 self._conn.execute(

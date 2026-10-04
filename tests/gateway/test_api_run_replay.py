@@ -91,7 +91,8 @@ def test_terminal_status_and_event_commit_together_and_do_not_regress(tmp_path):
     event = {'event': 'run.completed', 'run_id': 'run_one', 'output': 'done'}
     store.finish_run('run_one', {'status': 'completed', 'output': 'done'}, event).result()
     late = store.finish_run('run_one', {'status': 'cancelled'}, {'event': 'run.cancelled'}).result()
-    assert late['event'] == 'run.completed'
+    assert late['event']['event'] == 'run.completed'
+    assert late['status']['status'] == 'completed'
     store.close()
     reopened = RunIdempotencyStore(path)
     assert reopened.status_for_run('alice', 'run_one')['status']['status'] == 'completed'
@@ -129,4 +130,71 @@ def test_failed_run_does_not_disable_healthy_run_replay(tmp_path):
         store.events('alice', 'bad', 0)
     store.finish_run('good', {'status': 'completed'}, {'event': 'run.completed'}).result()
     assert len(store.events('alice', 'good', 0)) == 2
+    store.close()
+
+
+def test_terminal_enqueue_closes_journal_before_commit(tmp_path, monkeypatch):
+    import threading
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    store.reserve('alice', 'key', 'fingerprint', 'run_one', {'status': 'running'})
+    entered, release = threading.Event(), threading.Event()
+    write = store._write_terminal
+    def blocked_terminal(*args):
+        entered.set()
+        assert release.wait(3)
+        return write(*args)
+    monkeypatch.setattr(store, '_write_terminal', blocked_terminal)
+    try:
+        terminal = store.finish_run('run_one', {'status': 'cancelled'}, {'event': 'run.cancelled'})
+        assert entered.wait(1)
+        for _ in range(100):
+            store.append_event('run_one', {'event': 'message.delta', 'delta': 'late'})
+        assert store._pending_events == 1
+    finally:
+        release.set()
+    terminal.result()
+    assert [e['data']['event'] for e in store.events('alice', 'run_one', 0)] == ['run.cancelled']
+    store.close()
+
+
+def test_journal_backlog_is_bounded_and_overflow_is_per_run(tmp_path, monkeypatch):
+    import threading
+    import pytest
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    for run in ['bad', 'good']:
+        store.reserve('alice', run, 'fingerprint', run, {'status': 'running'})
+    store.MAX_RUN_PENDING_EVENTS = 2
+    entered, release = threading.Event(), threading.Event()
+    write = store._write_event
+    def blocked_write(*args):
+        entered.set()
+        assert release.wait(3)
+        return write(*args)
+    monkeypatch.setattr(store, '_write_event', blocked_write)
+    try:
+        store.append_event('bad', {'event': 'message.delta', 'delta': 'first'})
+        assert entered.wait(1)
+        for _ in range(1000):
+            store.append_event('bad', {'event': 'message.delta', 'delta': 'more'})
+        assert store._pending_events == 2
+        store.append_event('good', {'event': 'message.delta', 'delta': 'healthy'})
+        assert store._pending_events == 3
+    finally:
+        release.set()
+    with pytest.raises(RuntimeError, match='replay is unavailable'):
+        store.events('alice', 'bad', 0)
+    assert store.events('alice', 'good', 0)[0]['data']['delta'] == 'healthy'
+    store.close()
+    assert store._pending_events == store._pending_bytes == 0
+
+
+def test_journal_rejects_oversized_frame_without_queuing(tmp_path):
+    import pytest
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    store.reserve('alice', 'key', 'fingerprint', 'run_one', {'status': 'running'})
+    store.MAX_PENDING_BYTES = 32
+    store.append_event('run_one', {'event': 'message.delta', 'delta': 'x' * 100})
+    assert store._pending_events == store._pending_bytes == 0
+    with pytest.raises(RuntimeError, match='replay is unavailable'):
+        store.events('alice', 'run_one', 0)
     store.close()

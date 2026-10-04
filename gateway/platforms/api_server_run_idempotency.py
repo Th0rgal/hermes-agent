@@ -114,16 +114,20 @@ class RunIdempotencyStore:
         self._conn.commit()
         self._lock = threading.Lock()
         self._event_writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hermes-run-events")
-        self._last_event_write = None
-        self._event_error = None
+        self._event_writes = {}
+        self._event_errors = {}
         self._tighten_permissions()
 
     def append_event(self, run_id: str, event: dict) -> None:
         """Queue public frames in order; SQLite I/O never runs on the API event loop."""
+        if run_id in self._event_errors:
+            return  # this stream already fails closed; keep live delivery without queue growth
         payload = json.dumps(event, ensure_ascii=False)
-        self._last_event_write = self._event_writer.submit(self._write_event, run_id, payload)
+        self._event_writes[run_id] = self._event_writer.submit(self._write_event, run_id, payload)
 
     def _write_event(self, run_id: str, payload: str) -> None:
+        if run_id in self._event_errors:
+            return
         try:
             with self._lock:
                 self._conn.execute(
@@ -132,14 +136,14 @@ class RunIdempotencyStore:
                     (run_id, payload, run_id))
                 self._conn.commit()
         except Exception as exc:
-            self._event_error = exc
+            self._event_errors[run_id] = exc
             logger.exception("Run event persistence failed; durable replay is unavailable")
 
     def finish_run(self, run_id: str, status: dict, event: dict):
         """Queue terminal state and frame as one transaction, after preceding frames."""
-        self._last_event_write = self._event_writer.submit(
+        self._event_writes[run_id] = self._event_writer.submit(
             self._write_terminal, run_id, _encode_status(status), json.dumps(event, ensure_ascii=False))
-        return self._last_event_write
+        return self._event_writes[run_id]
 
     def _write_terminal(self, run_id: str, status_json: str, payload: str) -> dict:
         try:
@@ -160,17 +164,20 @@ class RunIdempotencyStore:
                 self._conn.commit()
                 return json.loads(payload)
         except Exception as exc:
-            self._event_error = exc
+            self._event_errors[run_id] = exc
             logger.exception("Terminal run persistence failed")
             raise
 
     def events(self, scope: str, run_id: str, after: int, limit: int = 500) -> list[dict]:
         """Replay only events whose run belongs to this authenticated principal."""
-        pending = self._last_event_write
+        pending = self._event_writes.get(run_id)
         if pending is not None:
-            pending.result()  # callers use to_thread; includes every previously queued frame
-        if self._event_error is not None:
-            raise RuntimeError("Run event persistence failed; replay is unavailable") from self._event_error
+            try:
+                pending.result()  # callers use to_thread; includes this run's preceding frames
+            except Exception as exc:
+                self._event_errors.setdefault(run_id, exc)
+        if run_id in self._event_errors:
+            raise RuntimeError("Run event persistence failed; replay is unavailable") from self._event_errors[run_id]
         with self._lock:
             rows = self._conn.execute(
                 """SELECT e.sequence,e.payload FROM run_events e
@@ -239,19 +246,21 @@ class RunIdempotencyStore:
         """Prune aged replay records only once their stored run is terminal (caller holds the
         lock + transaction): a long or disconnected room turn may outlive the retention window."""
         stale = self._conn.execute(
-            """SELECT scope, idempotency_key, status_json
+            """SELECT scope, idempotency_key, status_json, run_id
                  FROM run_idempotency
                 WHERE acknowledged_at <= ?
                    OR (retention_until > 0 AND retention_until <= ?)
                    OR (retention_until <= 0 AND updated_at < ?)""",
             (now - self.ACKNOWLEDGED_RETENTION_SECONDS, now, now - self.RETENTION_SECONDS),
         ).fetchall()
-        for stale_scope, stale_key, stale_status in stale:
+        for stale_scope, stale_key, stale_status, stale_run in stale:
             try:
                 terminal = json.loads(stale_status).get("status") in TERMINAL_STATUSES
             except Exception:
                 terminal = False
             if terminal:
+                self._event_writes.pop(stale_run, None)
+                self._event_errors.pop(stale_run, None)
                 self._conn.execute(
                     "DELETE FROM run_events WHERE run_id IN (SELECT run_id FROM run_idempotency WHERE scope=? AND idempotency_key=?)",
                     (stale_scope, stale_key))

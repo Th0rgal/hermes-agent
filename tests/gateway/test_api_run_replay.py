@@ -75,7 +75,7 @@ def test_journal_failure_preserves_live_frame_and_fails_replay(tmp_path, monkeyp
     store.reserve('alice', 'key', 'fingerprint', 'run_one', {'status': 'running'})
     queue = _ReplayQueue(SimpleNamespace(_run_idempotency_ids={'run_one'}, _run_idempotency_store=store), 'run_one')
     def failed_write(*args):
-        store._event_error = OSError('disk full')
+        store._event_errors['run_one'] = OSError('disk full')
     monkeypatch.setattr(store, '_write_event', failed_write)
     queue.put_nowait({'event': 'run.completed'})
     assert queue.get_nowait()['event'] == 'run.completed'
@@ -110,4 +110,23 @@ def test_failed_terminal_frame_rolls_back_the_status(tmp_path):
         store.finish_run('run_one', {'status': 'completed'}, {'event': 'run.completed'}).result()
     assert store.status_for_run('alice', 'run_one')['status']['status'] == 'running'
     assert store._conn.execute('SELECT count(*) FROM run_events').fetchone()[0] == 0
+    store.close()
+
+
+def test_failed_run_does_not_disable_healthy_run_replay(tmp_path):
+    import pytest
+    import sqlite3
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    for run in ['bad', 'good']:
+        store.reserve('alice', run, 'fingerprint', run, {'status': 'running'})
+    store._conn.execute("CREATE TRIGGER fail_bad BEFORE INSERT ON run_events WHEN NEW.run_id='bad' BEGIN SELECT RAISE(ABORT, 'fixture failure'); END")
+    store._conn.commit()
+    store.append_event('good', {'event': 'message.delta', 'delta': 'healthy'})
+    with pytest.raises(sqlite3.IntegrityError):
+        store.finish_run('bad', {'status': 'completed'}, {'event': 'run.completed'}).result()
+    assert store.events('alice', 'good', 0)[0]['data']['delta'] == 'healthy'
+    with pytest.raises(RuntimeError):
+        store.events('alice', 'bad', 0)
+    store.finish_run('good', {'status': 'completed'}, {'event': 'run.completed'}).result()
+    assert len(store.events('alice', 'good', 0)) == 2
     store.close()

@@ -2295,8 +2295,9 @@ async def test_json_event_replay_survives_gateway_reopen_and_validates_cursor(tm
         assert await replay.json() == original
         after = await cli.get(f"/v1/runs/{run_id}/events?format=json&after={original['cursor']}")
         assert (await after.json())["events"] == []
-        invalid = await cli.get(f"/v1/runs/{run_id}/events?format=json&after=-1")
-        assert invalid.status == 400
+        for cursor in ["-1", str(1 << 63), "not-a-number"]:
+            invalid = await cli.get(f"/v1/runs/{run_id}/events?format=json&after={cursor}")
+            assert invalid.status == 400
         unknown = await cli.get("/v1/runs/run_unknown/events?format=json")
         assert unknown.status == 404
     restarted._run_idempotency_store.close()
@@ -2315,3 +2316,17 @@ async def test_journal_capacity_is_retryable_when_api_concurrency_is_unlimited(a
             create.assert_not_called()
             assert not adapter._run_streams
             assert not adapter._run_statuses
+
+
+@pytest.mark.asyncio
+async def test_json_replay_rejects_unjournaled_live_run(adapter):
+    run_id = 'run_unjournaled'
+    _claim_run(adapter, run_id)
+    adapter._run_statuses[run_id] = {'status': 'running'}
+    adapter._run_streams[run_id] = asyncio.Queue()
+    adapter._run_streams[run_id].put_nowait({'event': 'message.delta', 'delta': 'live only'})
+    async with TestClient(TestServer(_create_runs_app(adapter))) as cli:
+        response = await cli.get(f'/v1/runs/{run_id}/events?format=json')
+        assert response.status == 409
+        assert (await response.json())['error']['code'] == 'run_replay_unsupported'
+        assert adapter._run_streams[run_id].qsize() == 1

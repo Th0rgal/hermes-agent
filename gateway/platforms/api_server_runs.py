@@ -815,12 +815,19 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
     if request.query.get("format") == "json":
         try:
             after = int(request.query.get("after", "0"))
-            if after < 0:
+            if not 0 <= after <= (1 << 63) - 1:
                 raise ValueError()
         except ValueError:
             return _json_error(_api_server._openai_error, "Invalid event cursor", status=400)
         try:
             self._durable_run_status(request, run_id)
+            reservation = await asyncio.to_thread(
+                self._run_idempotency_store.status_for_run, self._run_idempotency_scope(request), run_id)
+            if reservation is None:
+                return _json_error(
+                    _api_server._openai_error,
+                    "This run has no event journal. Start runs with an Idempotency-Key to enable replay.",
+                    code="run_replay_unsupported", status=409)
             events = await asyncio.to_thread(
                 self._run_idempotency_store.events, self._run_idempotency_scope(request), run_id, after)
         except Exception:

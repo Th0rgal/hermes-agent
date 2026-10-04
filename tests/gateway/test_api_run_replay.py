@@ -353,3 +353,31 @@ def test_retention_prunes_dead_owner_journals_without_client_reconnect(tmp_path,
     assert store._conn.execute("SELECT count(*) FROM run_events WHERE run_id='dead'").fetchone()[0] == 0
     assert store.events('alice', 'live', 0)
     store.close()
+
+
+def test_read_only_clients_cannot_replay_expired_terminal_journals(tmp_path, monkeypatch):
+    import time
+    import gateway.platforms.api_server_run_idempotency as module
+
+    for access in ("events", "status"):
+        store = RunIdempotencyStore(str(tmp_path / f"{access}.db"))
+        try:
+            for run in ("expired", "retained"):
+                store.reserve("alice", run, run, run, {"status": "running"},
+                              retention_until=time.time() + 3 * store.RETENTION_SECONDS if run == "retained" else 0)
+                store.finish_run(run, {"status": "completed"}, {"event": "run.completed"}).result()
+            store._event_writer.submit(lambda: None).result()
+            expiry = time.time() + store.RETENTION_SECONDS + 1
+            with monkeypatch.context() as patch:
+                patch.setattr(module.time, "time", lambda: expiry)
+                # No POST/lookup/reserve after the clock advances: reading alone expires data.
+                if access == "events":
+                    assert store.events("alice", "expired", 0) == []
+                else:
+                    assert store.status_for_run("alice", "expired") is None
+                assert store.events("alice", "retained", 0)
+                assert store.status_for_run("alice", "retained") is not None
+                assert store._conn.execute("SELECT count(*) FROM run_events WHERE run_id='expired'").fetchone()[0] == 0
+                assert not store.owns_run("alice", "expired")
+        finally:
+            store.close()

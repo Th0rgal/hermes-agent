@@ -325,12 +325,14 @@ class RunIdempotencyStore:
                 self._event_errors.setdefault(run_id, exc)
         if run_id in self._event_errors:
             raise RuntimeError("Run event persistence failed; replay is unavailable") from self._event_errors[run_id]
-        with self._lock:
+        with self._immediate_txn():
+            self._prune_stale_terminal_locked(time.time())
             rows = self._conn.execute(
                 """SELECT e.sequence,e.payload FROM run_events e
                    JOIN run_idempotency r ON r.run_id=e.run_id
                    WHERE r.scope=? AND e.run_id=? AND e.sequence>?
                    ORDER BY e.sequence LIMIT ?""", (scope, run_id, after, limit)).fetchall()
+            self._conn.commit()
         return [{"id": str(seq), "data": json.loads(payload)} for seq, payload in rows]
 
     def _tighten_permissions(self) -> None:
@@ -434,14 +436,15 @@ class RunIdempotencyStore:
     def status_for_run(self, scope: str, run_id: str, *, retention_until: float = 0) -> dict[str, Any] | None:
         """Load one durable run status inside its authenticated scope."""
         retention_until = max(0.0, float(retention_until or 0))
-        with self._lock:
+        with self._immediate_txn():
+            self._prune_stale_terminal_locked(time.time())
             if retention_until:
                 self._conn.execute(_EXTEND_RETENTION_BY_RUN, (retention_until, scope, run_id))
-                self._conn.commit()
             row = self._conn.execute(
                 "SELECT status_json, owner_pid, owner_started, updated_at, journal_enabled "
                 "FROM run_idempotency WHERE scope=? AND run_id=?",
                 (scope, run_id)).fetchone()
+            self._conn.commit()
         if row is None:
             return None
         return {k: v for k, v in _record(None, *row[:-1]).items() if k != "run_id"} | {"journal_enabled": bool(row[-1])}

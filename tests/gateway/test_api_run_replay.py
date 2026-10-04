@@ -381,3 +381,82 @@ def test_read_only_clients_cannot_replay_expired_terminal_journals(tmp_path, mon
                 assert not store.owns_run("alice", "expired")
         finally:
             store.close()
+
+
+def test_new_retention_horizon_does_not_revive_expired_cached_room_run(tmp_path, monkeypatch):
+    import asyncio
+    import time
+    import gateway.platforms.api_server_run_idempotency as module
+    from gateway.platforms.api_server_runs import _durable_run_status
+
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    expiry = time.time() + 10
+    store.reserve('room-member', 'key', 'fp', 'run_one', {'status': 'running'}, retention_until=expiry)
+    store.finish_run('run_one', {'status': 'completed'}, {'event': 'run.completed'}).result()
+    store._event_writer.submit(lambda: None).result()
+    owner = SimpleNamespace(
+        _run_idempotency_store=store, _run_idempotency_ids={'run_one'},
+        _run_statuses={'run_one': {'status': 'completed'}}, _run_owners={'run_one': 'room-member'},
+        _run_idempotency_scope=lambda request: 'room-member', _release_run_owner_if_forgotten=lambda run: None)
+    request = SimpleNamespace(_hermes_room_run_retention_until=expiry + 1000)
+    monkeypatch.setattr(module.time, 'time', lambda: expiry + 1)
+    try:
+        assert asyncio.run(_durable_run_status(owner, request, 'run_one')) is None
+        assert store.events('room-member', 'run_one', 0) == []
+        assert 'run_one' not in owner._run_statuses
+    finally:
+        store.close()
+
+
+def test_lookup_with_new_horizon_does_not_revive_expired_journal(tmp_path, monkeypatch):
+    import time
+    import gateway.platforms.api_server_run_idempotency as module
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    expiry = time.time() + 10
+    store.reserve('alice', 'key', 'fp', 'run_one', {'status': 'completed'}, retention_until=expiry)
+    monkeypatch.setattr(module.time, 'time', lambda: expiry + 1)
+    try:
+        assert store.lookup('alice', 'key', 'fp', retention_until=expiry + 1000) == ('missing', None)
+    finally:
+        store.close()
+
+
+def test_storage_contention_does_not_exhaust_agent_executor_after_disconnects(tmp_path):
+    import asyncio
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    release = threading.Event()
+    started = []
+
+    def blocked_read(number):
+        started.append(number)
+        assert release.wait(5)
+        return number
+
+    async def exercise():
+        # Even a tiny agent executor remains free while many storage clients reconnect.
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+        tasks = [asyncio.create_task(store.call_async(blocked_read, i)) for i in range(32)]
+        try:
+            for _ in range(100):
+                if len(started) == 4:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(started) == 4
+            for task in tasks[:4]:
+                task.cancel()
+            await asyncio.sleep(0)
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: 'agent-ready'), 0.5) == 'agent-ready'
+            # Cancellation cannot free a submission slot while its worker still waits.
+            assert len(started) == 4
+            assert store._io_workers._work_queue.qsize() == 0
+        finally:
+            release.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        store.close()

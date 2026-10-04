@@ -1,5 +1,6 @@
 """Durable idempotency reservations for API server runs."""
 
+import asyncio
 import hmac
 import json
 import logging
@@ -8,6 +9,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict
 
@@ -134,6 +136,9 @@ class RunIdempotencyStore:
         self._conn.commit()
         self._lock = threading.Lock()
         self._event_writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hermes-run-events")
+        # Disk/replay waits must not compete with agents in asyncio's shared executor.
+        self._io_workers = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hermes-run-reads")
+        self._io_slots = asyncio.Semaphore(4)
         self._event_writes = {}
         self._event_errors = {}
         self._enqueue_lock = threading.RLock()
@@ -146,6 +151,23 @@ class RunIdempotencyStore:
         self._open_batches = {}
         self._journal_runs = set()
         self._tighten_permissions()
+
+    async def call_async(self, operation, *args, **kwargs):
+        """Bound DB submissions, including after a requesting HTTP task disconnects."""
+        await self._io_slots.acquire()
+        try:
+            pending = asyncio.wrap_future(self._io_workers.submit(partial(operation, *args, **kwargs)))
+        except BaseException:
+            self._io_slots.release()
+            raise
+
+        def release(done):
+            self._io_slots.release()
+            if not done.cancelled():
+                done.exception()  # Retrieve errors even if the requesting client disconnected.
+
+        pending.add_done_callback(release)
+        return await asyncio.shield(pending)
 
     def _submit_event(self, run_id, payload, writer, *args):
         """Bound queued/running work and serialized bytes without blocking live SSE.
@@ -391,9 +413,9 @@ class RunIdempotencyStore:
         now = time.time()
         retention_until = max(0.0, float(retention_until or 0))
         with self._immediate_txn():
+            self._prune_stale_terminal_locked(now)
             if retention_until:
                 self._conn.execute(_EXTEND_RETENTION_BY_KEY, (retention_until, scope, key, fingerprint))
-            self._prune_stale_terminal_locked(now)
             row = self._conn.execute(_SELECT_BY_KEY, (scope, key)).fetchone()
             self._conn.commit()
         return ("missing", None) if row is None else _outcome(row, fingerprint)
@@ -454,7 +476,8 @@ class RunIdempotencyStore:
         checked_until = max(0.0, float(until or 0))
         if not checked_until:
             return False
-        with self._lock:
+        with self._immediate_txn():
+            self._prune_stale_terminal_locked(time.time())
             changed = self._conn.execute(_EXTEND_RETENTION_BY_RUN, (checked_until, scope, run_id)).rowcount
             self._conn.commit()
         return changed == 1
@@ -508,5 +531,6 @@ class RunIdempotencyStore:
 
     def close(self) -> None:
         self._event_writer.shutdown(wait=True)
+        self._io_workers.shutdown(wait=True)
         with self._lock:
             self._conn.close()

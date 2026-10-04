@@ -291,10 +291,14 @@ async def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict
             scope = self._run_idempotency_scope(request)
             until = _room_retention_until(request)
             if until:
-                await asyncio.to_thread(self._run_idempotency_store.extend_retention, scope, run_id, until)
+                retained = await self._run_idempotency_store.call_async(
+                    self._run_idempotency_store.extend_retention, scope, run_id, until)
+                if not retained:
+                    _forget_run(self, run_id, self._run_statuses, self._run_idempotency_ids, self._run_owners)
+                    return None
         return status
     scope = self._run_idempotency_scope(request)
-    record = await asyncio.to_thread(
+    record = await self._run_idempotency_store.call_async(
         self._run_idempotency_store.status_for_run, scope, run_id, retention_until=_room_retention_until(request))
     if record is None:
         return None
@@ -304,7 +308,7 @@ async def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict
         status.update(
             status="interrupted", error="The gateway restarted before this run settled.",
             last_event="run.interrupted", updated_at=time.time())
-        status = await asyncio.to_thread(
+        status = await self._run_idempotency_store.call_async(
             self._run_idempotency_store.interrupt_stale_run, scope, run_id, status, _run_event(run_id, "run.interrupted", error=status["error"]))
     self._run_statuses[run_id] = status
     self._run_idempotency_ids.add(run_id)
@@ -506,7 +510,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     # A lost-acceptance replay must resolve even while the original run holds the last
     # concurrency slot; this read reserves nothing (the atomic reserve below closes the race).
     if idempotency_key:
-        outcome, record = await asyncio.to_thread(
+        outcome, record = await self._run_idempotency_store.call_async(
             self._run_idempotency_store.lookup, idempotency_scope, idempotency_key, idempotency_fingerprint,
             retention_until=_room_retention_until(request))
         if outcome == "conflict" or (outcome == "reused" and record is not None):
@@ -547,7 +551,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         run_id, "queued", created_at=created_at, session_id=session_id, model=body.get("model", self._model_name))
     admission_cancelled = False
     if idempotency_key:
-        admission = asyncio.create_task(asyncio.to_thread(
+        admission = asyncio.create_task(self._run_idempotency_store.call_async(
             self._run_idempotency_store.reserve,
             idempotency_scope, idempotency_key, idempotency_fingerprint, run_id, initial_status,
             owner_pid=self._run_owner_pid, owner_started=self._run_owner_started,
@@ -795,7 +799,7 @@ async def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
     # Run state that exists without an owner stamp is an unanswered authorization question, not a run anyone
     # may control — under gateway.multiplex_profiles every served profile holds a valid key, so admitting it
     # would make the boundary allow-all (#93689).
-    return await asyncio.to_thread(self._run_idempotency_store.owns_run, scope, run_id)
+    return await self._run_idempotency_store.call_async(self._run_idempotency_store.owns_run, scope, run_id)
 
 
 async def _load_owned_run(self, request, *, _api_server, permission: Optional[str], active_fallback: bool):
@@ -843,14 +847,14 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
             return _json_error(_api_server._openai_error, "Invalid event cursor", status=400)
         try:
             await self._durable_run_status(request, run_id)
-            reservation = await asyncio.to_thread(
+            reservation = await self._run_idempotency_store.call_async(
                 self._run_idempotency_store.status_for_run, self._run_idempotency_scope(request), run_id)
             if reservation is None or not reservation.get("journal_enabled"):
                 return _json_error(
                     _api_server._openai_error,
                     "This run has no event journal. Only runs started with an Idempotency-Key after the replay upgrade support replay.",
                     code="run_replay_unsupported", status=409)
-            events = await asyncio.to_thread(
+            events = await self._run_idempotency_store.call_async(
                 self._run_idempotency_store.events, self._run_idempotency_scope(request), run_id, after)
         except Exception:
             logger.exception("Durable run replay failed for %s", run_id)

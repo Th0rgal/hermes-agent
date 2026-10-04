@@ -135,6 +135,35 @@ class RunIdempotencyStore:
             self._event_error = exc
             logger.exception("Run event persistence failed; durable replay is unavailable")
 
+    def finish_run(self, run_id: str, status: dict, event: dict):
+        """Queue terminal state and frame as one transaction, after preceding frames."""
+        self._last_event_write = self._event_writer.submit(
+            self._write_terminal, run_id, _encode_status(status), json.dumps(event, ensure_ascii=False))
+        return self._last_event_write
+
+    def _write_terminal(self, run_id: str, status_json: str, payload: str) -> dict:
+        try:
+            with self._immediate_txn():
+                row = self._conn.execute(
+                    "SELECT status_json FROM run_idempotency WHERE run_id=?", (run_id,)).fetchone()
+                if row is None:
+                    raise KeyError("Run reservation no longer exists")
+                current = json.loads(row[0])
+                if current.get("status") in TERMINAL_STATUSES:
+                    # A concurrent shutdown cannot overwrite an already-committed completion.
+                    self._conn.commit()
+                    return {**current, "event": "run." + current["status"], "run_id": run_id}
+                self._conn.execute(
+                    "UPDATE run_idempotency SET status_json=?, updated_at=? WHERE run_id=?",
+                    (status_json, time.time(), run_id))
+                self._conn.execute("INSERT INTO run_events(run_id,payload) VALUES (?,?)", (run_id, payload))
+                self._conn.commit()
+                return json.loads(payload)
+        except Exception as exc:
+            self._event_error = exc
+            logger.exception("Terminal run persistence failed")
+            raise
+
     def events(self, scope: str, run_id: str, after: int, limit: int = 500) -> list[dict]:
         """Replay only events whose run belongs to this authenticated principal."""
         pending = self._last_event_write

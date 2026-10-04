@@ -182,7 +182,7 @@ def _close_run_state(self) -> None:
         logger.debug("Failed to close run idempotency store for %s", self.name, exc_info=True)
 
 
-def _set_run_status(self, run_id: str, status: str, **fields: Any) -> Dict[str, Any]:
+def _set_run_status(self, run_id: str, status: str, *, _persist: bool = True, **fields: Any) -> Dict[str, Any]:
     """Update pollable run status without exposing private agent objects."""
     now = time.time()
     current = self._run_statuses.get(run_id, {})
@@ -198,7 +198,7 @@ def _set_run_status(self, run_id: str, status: str, **fields: Any) -> Dict[str, 
         status != previous_status
         or status in TERMINAL_STATUSES
         or bool(field_names & {"output", "error", "usage", "pending_steer", "session_id"}))
-    if run_id in self._run_idempotency_ids and should_persist:
+    if _persist and run_id in self._run_idempotency_ids and should_persist:
         try:
             self._run_idempotency_store.update_status(run_id, current)
         except Exception:
@@ -671,17 +671,29 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         with suppress(Exception):
             loop.call_soon_threadsafe(run.put_event, _run_event(run_id, "message.delta", delta=delta))
 
-    def _finish(status: str, extra: Optional[dict] = None, **fields: Any) -> None:
-        """Terminal status, then best-effort ``run.<status>`` event; key order is wire shape."""
+    async def _finish(status: str, extra: Optional[dict] = None, **fields: Any) -> None:
+        """Commit terminal status with its replay frame before publishing live completion."""
         extra = extra or {}
-        self._set_run_status(run_id, status, **fields, last_event=f"run.{status}", **extra)
-        with suppress(Exception):
-            run.put_event(_run_event(run_id, f"run.{status}", **fields, **extra))
+        event = _run_event(run_id, f"run.{status}", **fields, **extra)
+        current = self._set_run_status(
+            run_id, status, _persist=False, **fields, last_event=f"run.{status}", **extra)
+        if run_id in self._run_idempotency_ids:
+            try:
+                pending = self._run_idempotency_store.finish_run(run_id, current, event)
+                event = await asyncio.shield(asyncio.wrap_future(pending))
+                if event.get("status") in TERMINAL_STATUSES:
+                    self._run_statuses[run_id] = {k: v for k, v in event.items() if k != "event"}
+            except Exception:
+                logger.exception("Could not persist terminal run; preserving live completion")
+        # The writer already journals this frame atomically. Do not enqueue it twice.
+        q = self._run_streams.get(run_id)
+        if q is not None:
+            asyncio.Queue.put_nowait(q, event)
 
     try:
         self._set_run_status(run_id, "running")
         if run_id in self._stopping_run_ids:
-            _finish("cancelled")
+            await _finish("cancelled")
             return
         with self._profile_scope(run.request_profile):
             agent = self._create_agent(
@@ -695,22 +707,22 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             result = {}
         status, fields = terminal_run_status(result)
         if status == "cancelled":
-            _finish("cancelled", fields)
+            await _finish("cancelled", fields)
         elif result.get("failed"):
             # Non-retryable client errors (401/400) return failed=True rather than raising.
-            _finish("failed", fields, error=_redact_api_error_text(result.get("error") or "agent run failed"))
+            await _finish("failed", fields, error=_redact_api_error_text(result.get("error") or "agent run failed"))
         else:
-            _finish(status, fields, output=result.get("final_response", ""), usage=usage)
+            await _finish(status, fields, output=result.get("final_response", ""), usage=usage)
     except asyncio.CancelledError:
-        _finish("cancelled")
+        await _finish("cancelled")
         raise
     except _api_server._ProviderAuthResolutionError as exc:
         # Same controlled provider-auth message the _run_agent() endpoints give.
         logger.warning("Provider authentication failed for run=%s: %s", run_id, exc)
-        _finish("failed", error=f"⚠️ Provider authentication failed: {exc}")
+        await _finish("failed", error=f"⚠️ Provider authentication failed: {exc}")
     except Exception as exc:
         logger.exception("[api_server] run %s failed", run_id)
-        _finish("failed", error=_redact_api_error_text(exc))
+        await _finish("failed", error=_redact_api_error_text(exc))
     finally:
         # On cancellation (/stop) the executor thread may still block on an approval
         # Event; unregistering releases it. Idempotent on normal completion.

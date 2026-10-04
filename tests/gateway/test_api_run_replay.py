@@ -82,3 +82,32 @@ def test_journal_failure_preserves_live_frame_and_fails_replay(tmp_path, monkeyp
     with pytest.raises(RuntimeError, match='replay is unavailable'):
         store.events('alice', 'run_one', 0)
     store.close()
+
+
+def test_terminal_status_and_event_commit_together_and_do_not_regress(tmp_path):
+    path = str(tmp_path / 'runs.db')
+    store = RunIdempotencyStore(path)
+    store.reserve('alice', 'key', 'fingerprint', 'run_one', {'status': 'running'})
+    event = {'event': 'run.completed', 'run_id': 'run_one', 'output': 'done'}
+    store.finish_run('run_one', {'status': 'completed', 'output': 'done'}, event).result()
+    late = store.finish_run('run_one', {'status': 'cancelled'}, {'event': 'run.cancelled'}).result()
+    assert late['event'] == 'run.completed'
+    store.close()
+    reopened = RunIdempotencyStore(path)
+    assert reopened.status_for_run('alice', 'run_one')['status']['status'] == 'completed'
+    assert [e['data'] for e in reopened.events('alice', 'run_one', 0)] == [event]
+    reopened.close()
+
+
+def test_failed_terminal_frame_rolls_back_the_status(tmp_path):
+    import pytest
+    import sqlite3
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    store.reserve('alice', 'key', 'fingerprint', 'run_one', {'status': 'running'})
+    store._conn.execute("CREATE TRIGGER fail_events BEFORE INSERT ON run_events BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END")
+    store._conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        store.finish_run('run_one', {'status': 'completed'}, {'event': 'run.completed'}).result()
+    assert store.status_for_run('alice', 'run_one')['status']['status'] == 'running'
+    assert store._conn.execute('SELECT count(*) FROM run_events').fetchone()[0] == 0
+    store.close()

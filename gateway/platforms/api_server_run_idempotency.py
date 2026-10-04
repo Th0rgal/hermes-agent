@@ -106,9 +106,31 @@ class RunIdempotencyStore:
                 add_column_if_missing(self._conn, "run_idempotency", column, f"{column} {ddl}")
         self._conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS run_idempotency_run_id ON run_idempotency(run_id)")
+        self._conn.execute("""CREATE TABLE IF NOT EXISTS run_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL, payload TEXT NOT NULL)""")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS run_events_run ON run_events(run_id, sequence)")
         self._conn.commit()
         self._lock = threading.Lock()
         self._tighten_permissions()
+
+    def append_event(self, run_id: str, event: dict) -> None:
+        """Journal public, already-redacted lifecycle events before delivery."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO run_events(run_id,payload) VALUES (?,?)",
+                (run_id, json.dumps(event, ensure_ascii=False)))
+            self._conn.commit()
+
+    def events(self, scope: str, run_id: str, after: int, limit: int = 500) -> list[dict]:
+        """Replay only events whose run belongs to this authenticated principal."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT e.sequence,e.payload FROM run_events e
+                   JOIN run_idempotency r ON r.run_id=e.run_id
+                   WHERE r.scope=? AND e.run_id=? AND e.sequence>?
+                   ORDER BY e.sequence LIMIT ?""", (scope, run_id, after, limit)).fetchall()
+        return [{"id": str(seq), "data": json.loads(payload)} for seq, payload in rows]
 
     def _tighten_permissions(self) -> None:
         for suffix in ("", "-wal", "-shm") if self._db_path else ():
@@ -183,6 +205,9 @@ class RunIdempotencyStore:
             except Exception:
                 terminal = False
             if terminal:
+                self._conn.execute(
+                    "DELETE FROM run_events WHERE run_id IN (SELECT run_id FROM run_idempotency WHERE scope=? AND idempotency_key=?)",
+                    (stale_scope, stale_key))
                 self._conn.execute(
                     "DELETE FROM run_idempotency WHERE scope=? AND idempotency_key=?", (stale_scope, stale_key))
 

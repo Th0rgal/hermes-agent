@@ -2256,3 +2256,38 @@ class TestHostedRoomRuns:
                 )
             assert rejected.status == 403
             create.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_json_event_replay_survives_gateway_reopen_and_validates_cursor(tmp_path):
+    path = tmp_path / "replay.db"
+    adapter = _make_adapter()
+    _use_idempotency_db(adapter, path)
+    async with TestClient(TestServer(_create_runs_app(adapter))) as cli:
+        with patch.object(adapter, "_create_agent") as create:
+            agent = MagicMock()
+            agent.run_conversation.return_value = {"final_response": "replayed answer"}
+            agent.session_prompt_tokens = agent.session_completion_tokens = agent.session_total_tokens = 0
+            create.return_value = agent
+            started = await cli.post("/v1/runs", json={"input": "hello"}, headers={"Idempotency-Key": "replay"})
+            run_id = (await started.json())["run_id"]
+            for _ in range(40):
+                status = await cli.get(f"/v1/runs/{run_id}")
+                if (await status.json()).get("status") == "completed":
+                    break
+                await asyncio.sleep(0.05)
+            first = await cli.get(f"/v1/runs/{run_id}/events?format=json&after=0")
+            original = await first.json()
+            assert any(e["data"]["event"] == "run.completed" for e in original["events"])
+    adapter._run_idempotency_store.close()
+    restarted = _make_adapter()
+    _use_idempotency_db(restarted, path)
+    async with TestClient(TestServer(_create_runs_app(restarted))) as cli:
+        replay = await cli.get(f"/v1/runs/{run_id}/events?format=json&after=0")
+        assert await replay.json() == original
+        after = await cli.get(f"/v1/runs/{run_id}/events?format=json&after={original['cursor']}")
+        assert (await after.json())["events"] == []
+        invalid = await cli.get(f"/v1/runs/{run_id}/events?format=json&after=-1")
+        assert invalid.status == 400
+        unknown = await cli.get("/v1/runs/run_unknown/events?format=json")
+        assert unknown.status == 404
+    restarted._run_idempotency_store.close()

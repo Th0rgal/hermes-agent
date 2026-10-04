@@ -112,6 +112,26 @@ def _uses_room_run_auth(self, request: "web.Request") -> bool:
     return request.path.endswith("/v1/runs") and bool(self._room_grant_token(request))
 
 
+def _publish_run_event(owner, run_id, event):
+    queue = owner._run_streams.get(run_id)
+    if queue is not None:
+        queue.put_nowait(event)
+    elif event is not None and run_id in owner._run_idempotency_ids:
+        owner._run_idempotency_store.append_event(run_id, event)
+
+
+class _ReplayQueue(asyncio.Queue):
+    """Keep durable replay independent of the transient SSE consumer."""
+    def __init__(self, owner, run_id):
+        super().__init__()
+        self.owner, self.run_id = owner, run_id
+
+    def put_nowait(self, item):
+        if item is not None and self.run_id in self.owner._run_idempotency_ids:
+            self.owner._run_idempotency_store.append_event(self.run_id, item)
+        super().put_nowait(item)
+
+
 def _initialize_run_state(self, *, store_factory) -> None:
     """Initialize adapter-owned durable and live ``/v1/runs`` state."""
     self._run_idempotency_store = store_factory()
@@ -189,10 +209,8 @@ def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop
     def _push(event: Dict[str, Any]) -> None:
         self._set_run_status(
             run_id, self._run_statuses.get(run_id, {}).get("status", "running"), last_event=event.get("event"))
-        q = self._run_streams.get(run_id)
-        if q is not None:
-            with suppress(Exception):
-                loop.call_soon_threadsafe(q.put_nowait, event)
+        with suppress(Exception):
+            loop.call_soon_threadsafe(_publish_run_event, self, run_id, event)
 
     def _callback(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs):
         # _thinking / subagent.tool / subagent_progress are deliberately dropped (UI noise);
@@ -377,9 +395,8 @@ class _RunLaunch:
         return self.run_id
 
     def put_event(self, event: Optional[Dict]) -> None:
-        """Enqueue only while this run still owns live transport state."""
-        if self.owner._run_streams.get(self.run_id) is self.queue:
-            self.queue.put_nowait(event)
+        """Persist events even after the transient SSE transport is retired."""
+        _publish_run_event(self.owner, self.run_id, event)
 
 
 def _forget_run(self, run_id: str, *tables) -> None:
@@ -510,7 +527,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     session_history_delivery = not previous_response_id and not conversation_history
     if not conversation_history and selected_session_id and not previous_response_id:
         conversation_history = await self._conversation_history_for_session(str(selected_session_id))
-    q = self._run_streams[run_id] = asyncio.Queue()
+    q = self._run_streams[run_id] = _ReplayQueue(self, run_id)
     created_at = self._run_streams_created[run_id] = time.time()
     self._run_approval_sessions[run_id] = run_id  # approval session key (see _RunLaunch)
     initial_status = self._set_run_status(
@@ -633,7 +650,7 @@ def _make_approval_notify(self, run: _RunLaunch, *, _api_server) -> Callable[[Di
             allow_permanent=event.get("allow_permanent") is not False)))
         self._set_run_status(run_id, "waiting_for_approval", last_event="approval.request", approval=event)
         with suppress(Exception):
-            loop.call_soon_threadsafe(q.put_nowait, event)
+            loop.call_soon_threadsafe(run.put_event, event)
 
     return _approval_notify
 
@@ -644,7 +661,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
     run_id, loop = run.run_id, asyncio.get_running_loop()
 
     def _text_cb(delta: Optional[str]) -> None:
-        if delta is None or run_id not in self._run_streams:
+        if delta is None:
             return
         with suppress(Exception):
             loop.call_soon_threadsafe(run.put_event, _run_event(run_id, "message.delta", delta=delta))
@@ -764,6 +781,17 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
     run_id = request.match_info["run_id"]
     if not self._request_owns_run(request, run_id):
         return _run_not_found(_api_server._openai_error, run_id)
+    if request.query.get("format") == "json":
+        try:
+            after = int(request.query.get("after", "0"))
+            if after < 0:
+                raise ValueError()
+        except ValueError:
+            return _json_error(_api_server._openai_error, "Invalid event cursor", status=400)
+        events = await asyncio.to_thread(
+            self._run_idempotency_store.events, self._run_idempotency_scope(request), run_id, after)
+        return web.json_response({"events": events, "cursor": events[-1]["id"] if events else str(after),
+                                  "has_more": len(events) == 500})
     # Allow subscribing slightly before the run is registered (race window).
     # Confirm the force-kill actually reaped the process before we clear its PID file / scoped locks.
     # SIGKILL can fail to take (e.g. an uninterruptible-sleep or zombie-reaping parent), and if we blindly
@@ -803,10 +831,8 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
 def _mark_run_event(self, run_id: str, name: str, **fields: Any) -> None:
     """Record a control-plane event on the run status and (best effort) its SSE stream."""
     self._set_run_status(run_id, "running", last_event=name)
-    q = self._run_streams.get(run_id)
-    if q is not None:
-        with suppress(Exception):
-            q.put_nowait(_run_event(run_id, name, **fields))
+    with suppress(Exception):
+        _publish_run_event(self, run_id, _run_event(run_id, name, **fields))
 
 
 _APPROVAL_CHOICE_ALIASES = {"approve": "once", "approved": "once", "allow": "once"}

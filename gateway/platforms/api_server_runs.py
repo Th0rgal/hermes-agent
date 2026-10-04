@@ -23,7 +23,7 @@ except ImportError:
     RequestKey = None  # type: ignore[assignment,misc]
 
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response
-from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES
+from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES, _owner_alive
 
 
 logger = logging.getLogger("gateway.platforms.api_server")
@@ -112,6 +112,32 @@ def _uses_room_run_auth(self, request: "web.Request") -> bool:
     return request.path.endswith("/v1/runs") and bool(self._room_grant_token(request))
 
 
+def _publish_run_event(owner, run_id, event):
+    if event is not None and getattr(owner, "_run_statuses", {}).get(run_id, {}).get("status") in TERMINAL_STATUSES:
+        return
+    queue = owner._run_streams.get(run_id)
+    if queue is not None:
+        queue.put_nowait(event)
+    elif event is not None and run_id in owner._run_idempotency_ids:
+        owner._run_idempotency_store.append_event(run_id, event)
+
+
+class _ReplayQueue(asyncio.Queue):
+    """Keep durable replay independent of the transient SSE consumer."""
+    def __init__(self, owner, run_id):
+        super().__init__()
+        self.owner, self.run_id = owner, run_id
+
+    def put_nowait(self, item):
+        try:
+            if item is not None and self.run_id in self.owner._run_idempotency_ids:
+                self.owner._run_idempotency_store.append_event(self.run_id, item)
+        except Exception:
+            logger.exception("Could not enqueue durable run event; preserving live transport")
+        finally:
+            super().put_nowait(item)
+
+
 def _initialize_run_state(self, *, store_factory) -> None:
     """Initialize adapter-owned durable and live ``/v1/runs`` state."""
     self._run_idempotency_store = store_factory()
@@ -158,11 +184,13 @@ def _close_run_state(self) -> None:
         logger.debug("Failed to close run idempotency store for %s", self.name, exc_info=True)
 
 
-def _set_run_status(self, run_id: str, status: str, **fields: Any) -> Dict[str, Any]:
+def _set_run_status(self, run_id: str, status: str, *, _persist: bool = True, **fields: Any) -> Dict[str, Any]:
     """Update pollable run status without exposing private agent objects."""
     now = time.time()
     current = self._run_statuses.get(run_id, {})
     previous_status = str(current.get("status") or "")
+    if previous_status in TERMINAL_STATUSES and status not in TERMINAL_STATUSES:
+        return current
     field_names = set(fields)
     current.update({"object": "hermes.run", "run_id": run_id, "status": status, "updated_at": now})
     current.setdefault("created_at", fields.pop("created_at", now))
@@ -174,9 +202,9 @@ def _set_run_status(self, run_id: str, status: str, **fields: Any) -> Dict[str, 
         status != previous_status
         or status in TERMINAL_STATUSES
         or bool(field_names & {"output", "error", "usage", "pending_steer", "session_id"}))
-    if run_id in self._run_idempotency_ids and should_persist:
+    if _persist and run_id in self._run_idempotency_ids and should_persist:
         try:
-            self._run_idempotency_store.update_status(run_id, current)
+            self._run_idempotency_store.queue_status(run_id, current)
         except Exception:
             logger.exception("[api_server] failed to persist idempotent run status %s", run_id)
     return current
@@ -187,12 +215,16 @@ def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop
     redact_sensitive_text = _api_server.redact_sensitive_text
 
     def _push(event: Dict[str, Any]) -> None:
-        self._set_run_status(
-            run_id, self._run_statuses.get(run_id, {}).get("status", "running"), last_event=event.get("event"))
-        q = self._run_streams.get(run_id)
-        if q is not None:
-            with suppress(Exception):
-                loop.call_soon_threadsafe(q.put_nowait, event)
+        def emit() -> None:
+            # Agent callbacks run on worker threads; serialize status with terminal commits.
+            if self._run_statuses.get(run_id, {}).get("status") in TERMINAL_STATUSES:
+                return
+            self._set_run_status(
+                run_id, self._run_statuses.get(run_id, {}).get("status", "running"), last_event=event.get("event"))
+            _publish_run_event(self, run_id, event)
+
+        with suppress(Exception):
+            loop.call_soon_threadsafe(emit)
 
     def _callback(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs):
         # _thinking / subagent.tool / subagent_progress are deliberately dropped (UI noise);
@@ -251,27 +283,23 @@ def _check_run_auth(self, request: "web.Request", *, permission: str, _api_serve
     return None
 
 
-def _owner_alive(owner_pid: int, owner_started: int) -> bool:
-    """True when the recorded owner pid still exists and is the same process incarnation."""
-    try:
-        from gateway.status import _pid_exists, get_process_start_time
-        return owner_pid > 0 and bool(_pid_exists(owner_pid)) and (
-            not owner_started or int(get_process_start_time(owner_pid) or 0) == owner_started)
-    except Exception:
-        return False
-
-
-def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, Any] | None:
+async def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, Any] | None:
     """Hydrate a scoped run status and fail stale owners closed."""
     status = self._run_statuses.get(run_id)
     if status is not None:
         if run_id in self._run_idempotency_ids:
             scope = self._run_idempotency_scope(request)
-            self._run_idempotency_store.extend_retention(scope, run_id, _room_retention_until(request))
+            until = _room_retention_until(request)
+            if until:
+                retained = await self._run_idempotency_store.call_async(
+                    self._run_idempotency_store.extend_retention, scope, run_id, until)
+                if not retained:
+                    _forget_run(self, run_id, self._run_statuses, self._run_idempotency_ids, self._run_owners)
+                    return None
         return status
     scope = self._run_idempotency_scope(request)
-    record = self._run_idempotency_store.status_for_run(
-        scope, run_id, retention_until=_room_retention_until(request))
+    record = await self._run_idempotency_store.call_async(
+        self._run_idempotency_store.status_for_run, scope, run_id, retention_until=_room_retention_until(request))
     if record is None:
         return None
     status = dict(record["status"])
@@ -280,7 +308,8 @@ def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, 
         status.update(
             status="interrupted", error="The gateway restarted before this run settled.",
             last_event="run.interrupted", updated_at=time.time())
-        self._run_idempotency_store.update_status(run_id, status)
+        status = await self._run_idempotency_store.call_async(
+            self._run_idempotency_store.interrupt_stale_run, scope, run_id, status, _run_event(run_id, "run.interrupted", error=status["error"]))
     self._run_statuses[run_id] = status
     self._run_idempotency_ids.add(run_id)
     self._run_owners[run_id] = scope
@@ -336,14 +365,20 @@ def _accepted_response(run_id: str, status: str, gateway_session_key, *, replaye
         {"run_id": run_id, "status": status, "replayed": replayed}, status=202, headers=headers)
 
 
-def _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error) -> "web.Response":
+async def _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error) -> "web.Response":
     """409 for a fingerprint conflict, else a 202 replay of the already-admitted run."""
+    if outcome == "capacity":
+        response = _json_error(
+            _openai_error, "Run journal capacity reached; retry shortly with the same Idempotency-Key",
+            code="run_journal_capacity", status=429)
+        response.headers["Retry-After"] = "5"
+        return response
     if outcome == "conflict":
         return _json_error(
             _openai_error, "Idempotency-Key was already used with a different request payload",
             code="idempotency_key_conflict", status=409)
     original_id = str(record["run_id"])
-    status = self._durable_run_status(request, original_id) or record["status"]
+    status = await self._durable_run_status(request, original_id) or record["status"]
     return _accepted_response(original_id, status.get("status", "queued"), gateway_session_key, replayed=True)
 
 
@@ -377,9 +412,8 @@ class _RunLaunch:
         return self.run_id
 
     def put_event(self, event: Optional[Dict]) -> None:
-        """Enqueue only while this run still owns live transport state."""
-        if self.owner._run_streams.get(self.run_id) is self.queue:
-            self.queue.put_nowait(event)
+        """Persist events even after the transient SSE transport is retired."""
+        _publish_run_event(self.owner, self.run_id, event)
 
 
 def _forget_run(self, run_id: str, *tables) -> None:
@@ -476,11 +510,11 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     # A lost-acceptance replay must resolve even while the original run holds the last
     # concurrency slot; this read reserves nothing (the atomic reserve below closes the race).
     if idempotency_key:
-        outcome, record = self._run_idempotency_store.lookup(
-            idempotency_scope, idempotency_key, idempotency_fingerprint,
+        outcome, record = await self._run_idempotency_store.call_async(
+            self._run_idempotency_store.lookup, idempotency_scope, idempotency_key, idempotency_fingerprint,
             retention_until=_room_retention_until(request))
         if outcome == "conflict" or (outcome == "reused" and record is not None):
-            return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
+            return await _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
     # Enforce concurrency only for a genuinely new run.
     limited = self._concurrency_limited_response()
     if limited is not None:
@@ -510,21 +544,40 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     session_history_delivery = not previous_response_id and not conversation_history
     if not conversation_history and selected_session_id and not previous_response_id:
         conversation_history = await self._conversation_history_for_session(str(selected_session_id))
-    q = self._run_streams[run_id] = asyncio.Queue()
+    q = self._run_streams[run_id] = _ReplayQueue(self, run_id)
     created_at = self._run_streams_created[run_id] = time.time()
     self._run_approval_sessions[run_id] = run_id  # approval session key (see _RunLaunch)
     initial_status = self._set_run_status(
         run_id, "queued", created_at=created_at, session_id=session_id, model=body.get("model", self._model_name))
+    admission_cancelled = False
     if idempotency_key:
-        outcome, record = self._run_idempotency_store.reserve(
+        admission = asyncio.create_task(self._run_idempotency_store.call_async(
+            self._run_idempotency_store.reserve,
             idempotency_scope, idempotency_key, idempotency_fingerprint, run_id, initial_status,
             owner_pid=self._run_owner_pid, owner_started=self._run_owner_started,
-            retention_until=_room_retention_until(request))
+            retention_until=_room_retention_until(request)))
+        # Keep the request's admission/drain slot until the atomic reservation resolves.
+        # A disconnect must not leave an accepted key with no executor and a live owner.
+        try:
+            while True:
+                try:
+                    outcome, record = await asyncio.shield(admission)
+                    break
+                except asyncio.CancelledError:
+                    if admission.cancelled():
+                        raise
+                    admission_cancelled = True
+        except Exception:
+            _forget_run(self, run_id, self._run_streams, self._run_streams_created,
+                        self._run_approval_sessions, self._run_statuses, self._run_owners)
+            raise
         if outcome != "created":
             _forget_run(
                 self, run_id, self._run_streams, self._run_streams_created, self._run_approval_sessions,
                 self._run_statuses, self._run_owners)
-            return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
+            if admission_cancelled:
+                raise asyncio.CancelledError
+            return await _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
         self._run_idempotency_ids.add(run_id)
     launch = _RunLaunch(
         self, run_id, q, session_id, gateway_session_key, _declared_selected, user_message,
@@ -543,6 +596,8 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         self._background_tasks.add(task)  # tracked for shutdown drain
     if hasattr(task, "add_done_callback"):
         task.add_done_callback(self._background_tasks.discard)
+    if admission_cancelled:
+        raise asyncio.CancelledError
     return _accepted_response(run_id, "started", gateway_session_key, replayed=False)
 
 
@@ -619,6 +674,8 @@ def _make_approval_notify(self, run: _RunLaunch, *, _api_server) -> Callable[[Di
     run_id, q, loop = run.run_id, run.queue, asyncio.get_running_loop()
 
     def _approval_notify(approval_data: Dict[str, Any]) -> None:
+        if self._run_statuses.get(run_id, {}).get("status") in TERMINAL_STATUSES:
+            return
         event = dict(approval_data or {})
         # Clients must never receive the raw flagged command: redact before it hits the stream.
         # Redact credentials from the command before it enters the SSE/API event stream — same egress bug as
@@ -631,9 +688,14 @@ def _make_approval_notify(self, run: _RunLaunch, *, _api_server) -> Callable[[Di
             smart_denied=bool(event.get("smart_denied")),
             allow_session=event.get("allow_session") is not False,
             allow_permanent=event.get("allow_permanent") is not False)))
-        self._set_run_status(run_id, "waiting_for_approval", last_event="approval.request", approval=event)
+        def publish_approval() -> None:
+            if self._run_statuses.get(run_id, {}).get("status") in TERMINAL_STATUSES:
+                return
+            self._set_run_status(run_id, "waiting_for_approval", last_event="approval.request", approval=event)
+            run.put_event(event)
+
         with suppress(Exception):
-            loop.call_soon_threadsafe(q.put_nowait, event)
+            loop.call_soon_threadsafe(publish_approval)
 
     return _approval_notify
 
@@ -644,22 +706,34 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
     run_id, loop = run.run_id, asyncio.get_running_loop()
 
     def _text_cb(delta: Optional[str]) -> None:
-        if delta is None or run_id not in self._run_streams:
+        if delta is None:
             return
         with suppress(Exception):
             loop.call_soon_threadsafe(run.put_event, _run_event(run_id, "message.delta", delta=delta))
 
-    def _finish(status: str, extra: Optional[dict] = None, **fields: Any) -> None:
-        """Terminal status, then best-effort ``run.<status>`` event; key order is wire shape."""
+    async def _finish(status: str, extra: Optional[dict] = None, **fields: Any) -> None:
+        """Commit terminal status with its replay frame before publishing live completion."""
         extra = extra or {}
-        self._set_run_status(run_id, status, **fields, last_event=f"run.{status}", **extra)
-        with suppress(Exception):
-            run.put_event(_run_event(run_id, f"run.{status}", **fields, **extra))
+        event = _run_event(run_id, f"run.{status}", **fields, **extra)
+        current = self._set_run_status(
+            run_id, status, _persist=False, **fields, last_event=f"run.{status}", **extra)
+        if run_id in self._run_idempotency_ids:
+            try:
+                pending = self._run_idempotency_store.finish_run(run_id, current, event)
+                receipt = await asyncio.shield(asyncio.wrap_future(pending))
+                event = receipt["event"]
+                self._run_statuses[run_id] = receipt["status"]
+            except Exception:
+                logger.exception("Could not persist terminal run; preserving live completion")
+        # The writer already journals this frame atomically. Do not enqueue it twice.
+        q = self._run_streams.get(run_id)
+        if q is not None:
+            asyncio.Queue.put_nowait(q, event)
 
     try:
         self._set_run_status(run_id, "running")
         if run_id in self._stopping_run_ids:
-            _finish("cancelled")
+            await _finish("cancelled")
             return
         with self._profile_scope(run.request_profile):
             agent = self._create_agent(
@@ -673,22 +747,22 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             result = {}
         status, fields = terminal_run_status(result)
         if status == "cancelled":
-            _finish("cancelled", fields)
+            await _finish("cancelled", fields)
         elif result.get("failed"):
             # Non-retryable client errors (401/400) return failed=True rather than raising.
-            _finish("failed", fields, error=_redact_api_error_text(result.get("error") or "agent run failed"))
+            await _finish("failed", fields, error=_redact_api_error_text(result.get("error") or "agent run failed"))
         else:
-            _finish(status, fields, output=result.get("final_response", ""), usage=usage)
+            await _finish(status, fields, output=result.get("final_response", ""), usage=usage)
     except asyncio.CancelledError:
-        _finish("cancelled")
+        await _finish("cancelled")
         raise
     except _api_server._ProviderAuthResolutionError as exc:
         # Same controlled provider-auth message the _run_agent() endpoints give.
         logger.warning("Provider authentication failed for run=%s: %s", run_id, exc)
-        _finish("failed", error=f"⚠️ Provider authentication failed: {exc}")
+        await _finish("failed", error=f"⚠️ Provider authentication failed: {exc}")
     except Exception as exc:
         logger.exception("[api_server] run %s failed", run_id)
-        _finish("failed", error=_redact_api_error_text(exc))
+        await _finish("failed", error=_redact_api_error_text(exc))
     finally:
         # On cancellation (/stop) the executor thread may still block on an approval
         # Event; unregistering releases it. Idempotent on normal completion.
@@ -715,7 +789,7 @@ def _release_run_owner_if_forgotten(self, run_id: str) -> None:
         self._run_owners.pop(run_id, None)
 
 
-def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
+async def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
     scope = self._run_idempotency_scope(request)
     owner = self._run_owners.get(run_id)
     if owner is not None:
@@ -725,10 +799,10 @@ def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
     # Run state that exists without an owner stamp is an unanswered authorization question, not a run anyone
     # may control — under gateway.multiplex_profiles every served profile holds a valid key, so admitting it
     # would make the boundary allow-all (#93689).
-    return self._run_idempotency_store.owns_run(scope, run_id)
+    return await self._run_idempotency_store.call_async(self._run_idempotency_store.owns_run, scope, run_id)
 
 
-def _load_owned_run(self, request, *, _api_server, permission: Optional[str], active_fallback: bool):
+async def _load_owned_run(self, request, *, _api_server, permission: Optional[str], active_fallback: bool):
     """Authenticate (*permission* -> room-grant aware; ``None`` -> API key only) and resolve
     ``(run_id, status, agent, task, error)``; *active_fallback* reports a live in-process run
     without pollable status as ``running`` instead of 404."""
@@ -737,11 +811,11 @@ def _load_owned_run(self, request, *, _api_server, permission: Optional[str], ac
         return None, None, None, None, auth_err
     _openai_error = _api_server._openai_error
     run_id = request.match_info["run_id"]
-    if not self._request_owns_run(request, run_id):
+    if not await self._request_owns_run(request, run_id):
         return run_id, None, None, None, _run_not_found(_openai_error, run_id)
     agent = self._active_run_agents.get(run_id)
     task = self._active_run_tasks.get(run_id)
-    status = self._durable_run_status(request, run_id)
+    status = await self._durable_run_status(request, run_id)
     if status is None and active_fallback and (agent is not None or task is not None):
         status = self._set_run_status(run_id, "running")
     if status is None:
@@ -751,19 +825,42 @@ def _load_owned_run(self, request, *, _api_server, permission: Optional[str], ac
 
 async def _handle_get_run(self, request: "web.Request", *, _api_server) -> "web.Response":
     """GET /v1/runs/{run_id} — return pollable run status for external UIs."""
-    _, status, _, _, err = _load_owned_run(
+    _, status, _, _, err = await _load_owned_run(
         self, request, _api_server=_api_server, permission="status", active_fallback=True)
     return err or web.json_response(status)
 
 
 async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "web.StreamResponse":
     """GET /v1/runs/{run_id}/events — stream structured agent lifecycle events."""
-    auth_err = self._check_auth(request)
+    auth_err = self._check_run_auth(request, permission="status")
     if auth_err:
         return auth_err
     run_id = request.match_info["run_id"]
-    if not self._request_owns_run(request, run_id):
+    if not await self._request_owns_run(request, run_id):
         return _run_not_found(_api_server._openai_error, run_id)
+    if request.query.get("format") == "json":
+        try:
+            after = int(request.query.get("after", "0"))
+            if not 0 <= after <= (1 << 63) - 1:
+                raise ValueError()
+        except ValueError:
+            return _json_error(_api_server._openai_error, "Invalid event cursor", status=400)
+        try:
+            await self._durable_run_status(request, run_id)
+            reservation = await self._run_idempotency_store.call_async(
+                self._run_idempotency_store.status_for_run, self._run_idempotency_scope(request), run_id)
+            if reservation is None or not reservation.get("journal_enabled"):
+                return _json_error(
+                    _api_server._openai_error,
+                    "This run has no event journal. Only runs started with an Idempotency-Key after the replay upgrade support replay.",
+                    code="run_replay_unsupported", status=409)
+            events = await self._run_idempotency_store.call_async(
+                self._run_idempotency_store.events, self._run_idempotency_scope(request), run_id, after)
+        except Exception:
+            logger.exception("Durable run replay failed for %s", run_id)
+            return _json_error(_api_server._openai_error, "Durable event replay is unavailable", status=503)
+        return web.json_response({"events": events, "cursor": events[-1]["id"] if events else str(after),
+                                  "has_more": len(events) == 500})
     # Allow subscribing slightly before the run is registered (race window).
     # Confirm the force-kill actually reaped the process before we clear its PID file / scoped locks.
     # SIGKILL can fail to take (e.g. an uninterruptible-sleep or zombie-reaping parent), and if we blindly
@@ -803,10 +900,8 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
 def _mark_run_event(self, run_id: str, name: str, **fields: Any) -> None:
     """Record a control-plane event on the run status and (best effort) its SSE stream."""
     self._set_run_status(run_id, "running", last_event=name)
-    q = self._run_streams.get(run_id)
-    if q is not None:
-        with suppress(Exception):
-            q.put_nowait(_run_event(run_id, name, **fields))
+    with suppress(Exception):
+        _publish_run_event(self, run_id, _run_event(run_id, name, **fields))
 
 
 _APPROVAL_CHOICE_ALIASES = {"approve": "once", "approved": "once", "allow": "once"}
@@ -815,7 +910,7 @@ _APPROVAL_CHOICE_ALIASES = {"approve": "once", "approved": "once", "allow": "onc
 async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> "web.Response":
     """POST /v1/runs/{run_id}/approval — resolve a pending run approval."""
     _openai_error = _api_server._openai_error
-    run_id, _, _, _, err = _load_owned_run(
+    run_id, _, _, _, err = await _load_owned_run(
         self, request, _api_server=_api_server, permission="approve", active_fallback=False)
     if err is not None:
         return err
@@ -866,7 +961,7 @@ async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> 
 async def _handle_steer_run(self, request: "web.Request", *, _api_server) -> "web.Response":
     """POST /v1/runs/{run_id}/steer — inject guidance into a running agent."""
     _openai_error = _api_server._openai_error
-    run_id, status, agent, _, err = _load_owned_run(
+    run_id, status, agent, _, err = await _load_owned_run(
         self, request, _api_server=_api_server, permission=None, active_fallback=False)
     if err is not None:
         return err
@@ -900,7 +995,7 @@ async def _handle_steer_run(self, request: "web.Request", *, _api_server) -> "we
 async def _handle_stop_run(self, request: "web.Request", *, _api_server) -> "web.Response":
     """POST /v1/runs/{run_id}/stop — interrupt a running agent."""
     _openai_error = _api_server._openai_error
-    run_id, status, agent, task, err = _load_owned_run(
+    run_id, status, agent, task, err = await _load_owned_run(
         self, request, _api_server=_api_server, permission="stop", active_fallback=True)
     if err is not None:
         return err

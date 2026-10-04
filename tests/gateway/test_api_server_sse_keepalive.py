@@ -5,6 +5,7 @@ window closes (issue #111512)."""
 
 import asyncio
 import types
+from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp import web
@@ -71,7 +72,7 @@ async def test_idle_run_events_stream_uses_shared_keepalive_cadence(monkeypatch,
     queue: asyncio.Queue = asyncio.Queue()
     adapter._run_streams["run_idle"] = queue
     adapter._set_run_status("run_idle", "running")
-    monkeypatch.setattr(adapter, "_request_owns_run", lambda request, run_id: True)
+    monkeypatch.setattr(adapter, "_request_owns_run", AsyncMock(return_value=True))
 
     app = web.Application()
     app["api_server_adapter"] = adapter

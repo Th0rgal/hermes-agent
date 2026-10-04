@@ -4141,7 +4141,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 self._response_store.close()
             except Exception:
                 logger.debug("Failed to close response store for %s", self.name, exc_info=True)
-        _api_runs._close_run_state(self)
         try:
             if self._site:
                 await self._site.stop()
@@ -4150,8 +4149,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 await self._runner.cleanup()
                 self._runner = None
         finally:
-            self._close_cached_session_dbs()
-            self._app = None
+            # The journal may be draining slow SQLite writes. Keep teardown cancellable.
+            try:
+                await asyncio.to_thread(_api_runs._close_run_state, self)
+            finally:
+                self._close_cached_session_dbs()
+                self._app = None
         logger.info("[%s] API server stopped", self.name)
 
     async def send(

@@ -197,7 +197,7 @@ def test_journal_rejects_oversized_frame_without_queuing(tmp_path):
     import pytest
     store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
     store.reserve('alice', 'key', 'fingerprint', 'run_one', {'status': 'running'})
-    store.MAX_PENDING_BYTES = 32
+    store.MAX_RUN_PENDING_BYTES = 32
     store.append_event('run_one', {'event': 'message.delta', 'delta': 'x' * 100})
     assert store._pending_events == store._pending_bytes == 0
     with pytest.raises(RuntimeError, match='replay is unavailable'):
@@ -229,3 +229,57 @@ def test_replay_wait_timeout_does_not_poison_writer(tmp_path, monkeypatch):
     store.finish_run('run_one', {'status': 'completed'}, {'event': 'run.completed'}).result()
     assert [e['data']['event'] for e in store.events('alice', 'run_one', 0)] == ['message.delta', 'run.completed']
     store.close()
+
+
+def test_noisy_run_cannot_consume_another_runs_byte_budget(tmp_path, monkeypatch):
+    import threading
+    import pytest
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    for run in ['noisy', 'healthy']:
+        store.reserve('alice', run, 'fingerprint', run, {'status': 'running'})
+    store.MAX_RUN_PENDING_BYTES = 512
+    entered, release = threading.Event(), threading.Event()
+    write = store._write_event_batch
+    def blocked_write(*args):
+        entered.set()
+        assert release.wait(3)
+        return write(*args)
+    monkeypatch.setattr(store, '_write_event_batch', blocked_write)
+    try:
+        store.append_event('noisy', {'event': 'message.delta', 'delta': 'x' * 400})
+        assert entered.wait(1)
+        store.append_event('noisy', {'event': 'message.delta', 'delta': 'x' * 400})
+        store.append_event('healthy', {'event': 'message.delta', 'delta': 'hello'})
+        terminal = store.finish_run('healthy', {'status': 'completed'}, {'event': 'run.completed'})
+        assert 'healthy' not in store._event_errors
+    finally:
+        release.set()
+    terminal.result()
+    with pytest.raises(RuntimeError, match='replay is unavailable'):
+        store.events('alice', 'noisy', 0)
+    assert [e['data']['event'] for e in store.events('alice', 'healthy', 0)] == ['message.delta', 'run.completed']
+    store.close()
+
+
+def test_adapter_disconnect_does_not_block_event_loop():
+    import asyncio
+    import threading
+    from gateway.platforms.api_server import APIServerAdapter
+    entered, release = threading.Event(), threading.Event()
+    def close():
+        entered.set()
+        release.wait(3)
+    owner = SimpleNamespace(
+        _mark_disconnected=lambda: None, _response_store=None,
+        _run_idempotency_store=SimpleNamespace(close=close),
+        _site=None, _runner=None, _app=None, name='test',
+        _close_cached_session_dbs=lambda: None)
+    async def exercise():
+        task = asyncio.create_task(APIServerAdapter.disconnect(owner))
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 1), timeout=1.5)
+            assert not task.done()  # timer ran while the writer was still draining
+        finally:
+            release.set()
+            await task
+    asyncio.run(exercise())

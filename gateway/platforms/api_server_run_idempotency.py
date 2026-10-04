@@ -58,8 +58,9 @@ class RunIdempotencyStore:
 
     RETENTION_SECONDS = 24 * 60 * 60
     ACKNOWLEDGED_RETENTION_SECONDS = 24 * 60 * 60
-    MAX_PENDING_BATCHES = 256
-    MAX_PENDING_BYTES = 8 * 1024 * 1024
+    # Per-run budgets compose with the API admission cap (10 concurrent runs by default).
+    # A busy conversation must not consume another conversation's journal allowance.
+    MAX_RUN_PENDING_BYTES = 8 * 1024 * 1024
     MAX_RUN_PENDING_BATCHES = 64
     MAX_BATCH_EVENTS = 128
     MAX_COALESCED_BYTES = 64 * 1024
@@ -126,6 +127,7 @@ class RunIdempotencyStore:
         self._pending_events = 0
         self._pending_bytes = 0
         self._run_pending = {}
+        self._run_pending_bytes = {}
         self._terminal_writes = {}
         self._open_batches = {}
         self._tighten_permissions()
@@ -140,8 +142,7 @@ class RunIdempotencyStore:
         size += sum(len(arg.encode("utf-8")) for arg in args)
         failure = self._event_errors.get(run_id)
         if failure is None and (
-            self._pending_events >= self.MAX_PENDING_BATCHES
-            or self._pending_bytes + size > self.MAX_PENDING_BYTES
+            self._run_pending_bytes.get(run_id, 0) + size > self.MAX_RUN_PENDING_BYTES
             or self._run_pending.get(run_id, 0) >= self.MAX_RUN_PENDING_BATCHES
         ):
             failure = RuntimeError("Run event journal backlog exceeded its capacity")
@@ -152,6 +153,7 @@ class RunIdempotencyStore:
             return future
         self._pending_events += 1
         self._pending_bytes += size
+        self._run_pending_bytes[run_id] = self._run_pending_bytes.get(run_id, 0) + size
         self._run_pending[run_id] = self._run_pending.get(run_id, 0) + 1
 
         def write():
@@ -162,12 +164,15 @@ class RunIdempotencyStore:
             finally:
                 with self._enqueue_lock:
                     self._pending_events -= 1
-                    self._pending_bytes -= payload["size"] if isinstance(payload, dict) else size
+                    written_size = payload["size"] if isinstance(payload, dict) else size
+                    self._pending_bytes -= written_size
+                    self._run_pending_bytes[run_id] -= written_size
                     remaining = self._run_pending[run_id] - 1
                     if remaining:
                         self._run_pending[run_id] = remaining
                     else:
                         self._run_pending.pop(run_id, None)
+                        self._run_pending_bytes.pop(run_id, None)
 
         future = self._event_writer.submit(write)
         self._event_writes[run_id] = future
@@ -196,7 +201,7 @@ class RunIdempotencyStore:
                     payload = json.dumps({**event, "delta": previous["delta"] + event["delta"]}, ensure_ascii=False)
                     size = len(payload.encode("utf-8")) - len(batch["payloads"][-1].encode("utf-8"))
                 if merge or len(batch["payloads"]) < self.MAX_BATCH_EVENTS:
-                    if self._pending_bytes + size > self.MAX_PENDING_BYTES:
+                    if self._run_pending_bytes.get(run_id, 0) + size > self.MAX_RUN_PENDING_BYTES:
                         self._event_errors[run_id] = RuntimeError("Run event journal byte capacity exceeded")
                         return
                     if merge:
@@ -205,6 +210,7 @@ class RunIdempotencyStore:
                         batch["payloads"].append(payload)
                     batch["size"] += size
                     self._pending_bytes += size
+                    self._run_pending_bytes[run_id] += size
                     return
             batch = {"payloads": [payload], "size": size}
             self._open_batches[run_id] = batch

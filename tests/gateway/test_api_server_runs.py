@@ -1513,8 +1513,13 @@ class TestRunIdempotency:
         _use_idempotency_db(restarted, path)
         app = _create_runs_app(restarted)
         async with TestClient(TestServer(app)) as cli:
+            first = await cli.get("/v1/runs/run_stale/events?format=json")
+            frames = (await first.json())["events"]
+            assert [e["data"]["event"] for e in frames] == ["run.interrupted"]
             response = await cli.get("/v1/runs/run_stale")
             body = await response.json()
+            again = await cli.get("/v1/runs/run_stale/events?format=json")
+            assert (await again.json())["events"] == frames
         assert response.status == 200
         assert body["status"] == "interrupted"
         assert body["last_event"] == "run.interrupted"

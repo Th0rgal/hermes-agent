@@ -260,6 +260,27 @@ class RunIdempotencyStore:
                 "SELECT 1 FROM run_idempotency WHERE scope=? AND run_id=?", (scope, run_id)).fetchone()
         return row is not None
 
+    def interrupt_stale_run(self, scope: str, run_id: str, status: dict, event: dict) -> dict:
+        """Atomically publish the recovered terminal status and its replay event, once."""
+        with self._immediate_txn():
+            row = self._conn.execute(
+                "SELECT status_json FROM run_idempotency WHERE scope=? AND run_id=?",
+                (scope, run_id)).fetchone()
+            if row is None:
+                self._conn.commit()
+                raise KeyError("Run reservation no longer exists")
+            current = json.loads(row[0])
+            if current.get("status") in TERMINAL_STATUSES:
+                self._conn.commit()
+                return current
+            self._conn.execute(
+                "UPDATE run_idempotency SET status_json=?, updated_at=? WHERE scope=? AND run_id=?",
+                (_encode_status(status), time.time(), scope, run_id))
+            self._conn.execute("INSERT INTO run_events(run_id,payload) VALUES (?,?)",
+                               (run_id, json.dumps(event, ensure_ascii=False)))
+            self._conn.commit()
+            return status
+
     def update_status(self, run_id: str, status: Dict[str, Any]) -> None:
         with self._lock:
             self._conn.execute(

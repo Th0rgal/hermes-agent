@@ -302,7 +302,8 @@ def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, 
         status.update(
             status="interrupted", error="The gateway restarted before this run settled.",
             last_event="run.interrupted", updated_at=time.time())
-        self._run_idempotency_store.update_status(run_id, status)
+        status = self._run_idempotency_store.interrupt_stale_run(
+            scope, run_id, status, _run_event(run_id, "run.interrupted", error=status["error"]))
     self._run_statuses[run_id] = status
     self._run_idempotency_ids.add(run_id)
     self._run_owners[run_id] = scope
@@ -793,6 +794,7 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
         except ValueError:
             return _json_error(_api_server._openai_error, "Invalid event cursor", status=400)
         try:
+            self._durable_run_status(request, run_id)
             events = await asyncio.to_thread(
                 self._run_idempotency_store.events, self._run_idempotency_scope(request), run_id, after)
         except Exception:

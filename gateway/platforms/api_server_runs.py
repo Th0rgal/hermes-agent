@@ -367,6 +367,12 @@ def _accepted_response(run_id: str, status: str, gateway_session_key, *, replaye
 
 def _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error) -> "web.Response":
     """409 for a fingerprint conflict, else a 202 replay of the already-admitted run."""
+    if outcome == "capacity":
+        response = _json_error(
+            _openai_error, "Run journal capacity reached; retry shortly with the same Idempotency-Key",
+            code="run_journal_capacity", status=429)
+        response.headers["Retry-After"] = "5"
+        return response
     if outcome == "conflict":
         return _json_error(
             _openai_error, "Idempotency-Key was already used with a different request payload",

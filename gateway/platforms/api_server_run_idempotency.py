@@ -58,8 +58,9 @@ class RunIdempotencyStore:
 
     RETENTION_SECONDS = 24 * 60 * 60
     ACKNOWLEDGED_RETENTION_SECONDS = 24 * 60 * 60
-    # Per-run budgets compose with the API admission cap (10 concurrent runs by default).
-    # A busy conversation must not consume another conversation's journal allowance.
+    # Reserve a journal allowance before admitting work, even if API concurrency is unlimited.
+    # Existing runs retain their budget when admission is saturated.
+    MAX_JOURNAL_RUNS = 32
     MAX_RUN_PENDING_BYTES = 8 * 1024 * 1024
     MAX_RUN_PENDING_BATCHES = 64
     MAX_BATCH_EVENTS = 128
@@ -130,6 +131,7 @@ class RunIdempotencyStore:
         self._run_pending_bytes = {}
         self._terminal_writes = {}
         self._open_batches = {}
+        self._journal_runs = set()
         self._tighten_permissions()
 
     def _submit_event(self, run_id, payload, writer, *args):
@@ -173,6 +175,10 @@ class RunIdempotencyStore:
                     else:
                         self._run_pending.pop(run_id, None)
                         self._run_pending_bytes.pop(run_id, None)
+                        if run_id in self._terminal_writes:
+                            self._journal_runs.discard(run_id)
+                    if isinstance(payload, dict):
+                        payload["payloads"].clear()
 
         future = self._event_writer.submit(write)
         self._event_writes[run_id] = future
@@ -236,6 +242,8 @@ class RunIdempotencyStore:
             self._event_errors[run_id] = exc
             logger.exception("Run event persistence failed; durable replay is unavailable")
             raise
+        finally:
+            payloads.clear()  # failed futures must not retain an entire batch through traceback locals
 
     def finish_run(self, run_id: str, status: dict, event: dict):
         """Queue terminal state and frame as one transaction, after preceding frames."""
@@ -244,6 +252,8 @@ class RunIdempotencyStore:
                 self._terminal_writes[run_id] = self._submit_event(
                     run_id, json.dumps(event, ensure_ascii=False), self._write_terminal,
                     _encode_status(status))
+            if not self._run_pending.get(run_id):
+                self._journal_runs.discard(run_id)
             return self._terminal_writes[run_id]
 
     def _write_terminal(self, run_id: str, status_json: str, payload: str) -> dict:
@@ -323,6 +333,10 @@ class RunIdempotencyStore:
                     self._conn.execute(_EXTEND_RETENTION_BY_KEY, (retention_until, scope, key, fingerprint))
                 self._conn.commit()
                 return _outcome(row, fingerprint)
+            with self._enqueue_lock:
+                if len(self._journal_runs) >= self.MAX_JOURNAL_RUNS:
+                    self._conn.commit()
+                    return "capacity", None
             self._conn.execute(
                 "INSERT INTO run_idempotency("
                 "scope,idempotency_key,fingerprint,run_id,status_json,"
@@ -331,6 +345,9 @@ class RunIdempotencyStore:
                 (scope, key, fingerprint, run_id, encoded, int(owner_pid or 0), int(owner_started or 0),
                  retention_until, now, now))
             self._conn.commit()
+            if status.get("status") not in TERMINAL_STATUSES:
+                with self._enqueue_lock:
+                    self._journal_runs.add(run_id)
             return "created", _record(run_id, encoded, owner_pid, owner_started, now) | {"status": status}
 
     def lookup(self, scope: str, key: str, fingerprint: str, *, retention_until: float = 0):

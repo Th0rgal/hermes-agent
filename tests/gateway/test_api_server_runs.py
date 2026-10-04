@@ -2300,3 +2300,18 @@ async def test_json_event_replay_survives_gateway_reopen_and_validates_cursor(tm
         unknown = await cli.get("/v1/runs/run_unknown/events?format=json")
         assert unknown.status == 404
     restarted._run_idempotency_store.close()
+
+
+@pytest.mark.asyncio
+async def test_journal_capacity_is_retryable_when_api_concurrency_is_unlimited(adapter):
+    adapter._max_concurrent_runs = 0
+    adapter._run_idempotency_store.MAX_JOURNAL_RUNS = 0
+    async with TestClient(TestServer(_create_runs_app(adapter))) as cli:
+        with patch.object(adapter, '_create_agent') as create:
+            response = await cli.post('/v1/runs', json={'input': 'hello'}, headers={'Idempotency-Key': 'journal-capacity'})
+            assert response.status == 429
+            assert response.headers['Retry-After'] == '5'
+            assert (await response.json())['error']['code'] == 'run_journal_capacity'
+            create.assert_not_called()
+            assert not adapter._run_streams
+            assert not adapter._run_statuses

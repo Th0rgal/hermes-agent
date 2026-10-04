@@ -283,3 +283,17 @@ def test_adapter_disconnect_does_not_block_event_loop():
             release.set()
             await task
     asyncio.run(exercise())
+
+
+def test_journal_admission_preserves_accepted_runs_and_retry_keys(tmp_path):
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    store.MAX_JOURNAL_RUNS = 1
+    assert store.reserve('alice', 'first', 'fp1', 'run_one', {'status': 'running'})[0] == 'created'
+    assert store.reserve('alice', 'next', 'fp2', 'run_two', {'status': 'running'}) == ('capacity', None)
+    assert store.lookup('alice', 'next', 'fp2') == ('missing', None)
+    assert store.reserve('alice', 'first', 'fp1', 'ignored', {'status': 'running'})[0] == 'reused'
+    store.append_event('run_one', {'event': 'message.delta', 'delta': 'still healthy'})
+    store.finish_run('run_one', {'status': 'completed'}, {'event': 'run.completed'}).result()
+    assert len(store.events('alice', 'run_one', 0)) == 2
+    assert store.reserve('alice', 'next', 'fp2', 'run_two', {'status': 'running'})[0] == 'created'
+    store.close()

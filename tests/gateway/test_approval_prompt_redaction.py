@@ -120,7 +120,7 @@ class TestApprovalCommandWiring:
         from gateway.platforms import api_server_runs
 
         self._assert_redacts_then_uses(
-            api_server_runs, "_approval_notify", "put_nowait"
+            api_server_runs, "_approval_notify", "put_event"
         )
 
 
@@ -150,3 +150,35 @@ class TestApprovalTextFallbackContract:
         for step in ("`/approve`", "`/approve session`", "`/approve always`", "`/deny`"):
             assert step in text
 
+
+
+def test_approval_replay_journal_contains_only_redacted_command(tmp_path):
+    import asyncio
+    import json
+    from types import SimpleNamespace
+    from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
+    from gateway.platforms.api_server_runs import _make_approval_notify, _publish_run_event, _ReplayQueue
+
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    store.reserve('alice', 'key', 'fp', 'run_one', {'status': 'running'})
+    statuses = []
+    owner = SimpleNamespace(
+        _run_idempotency_store=store, _run_idempotency_ids={'run_one'},
+        _run_statuses={'run_one': {'status': 'running'}}, _run_streams={},
+        _set_run_status=lambda *args, **fields: statuses.append(fields))
+    queue = owner._run_streams['run_one'] = _ReplayQueue(owner, 'run_one')
+    run = SimpleNamespace(run_id='run_one', queue=queue,
+                          put_event=lambda event: _publish_run_event(owner, 'run_one', event))
+    async def exercise():
+        notify = _make_approval_notify(owner, run, _api_server=SimpleNamespace(
+            _approval_event_choices=lambda **kwargs: ['once', 'deny']))
+        notify({'command': 'echo ' + _FAKE_GHP, 'request_id': 'request_one'})
+        await asyncio.sleep(0)
+        live = queue.get_nowait()
+        assert _FAKE_GHP not in json.dumps(live)
+        assert _FAKE_GHP not in json.dumps(statuses)
+        assert store.events('alice', 'run_one', 0)[0]['data'] == live
+    try:
+        asyncio.run(exercise())
+    finally:
+        store.close()

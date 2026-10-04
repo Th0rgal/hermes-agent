@@ -421,7 +421,9 @@ class RunIdempotencyStore:
     def update_status(self, run_id: str, status: Dict[str, Any]) -> None:
         with self._lock:
             self._conn.execute(
-                "UPDATE run_idempotency SET status_json=?, updated_at=? WHERE run_id=?",
+                "UPDATE run_idempotency SET status_json=?, updated_at=? WHERE run_id=? "
+                "AND json_extract(status_json, '$.status') NOT IN "
+                "('completed','failed','cancelled','interrupted')",
                 (_encode_status(status), time.time(), run_id))
             self._conn.commit()
 

@@ -93,6 +93,8 @@ def test_terminal_status_and_event_commit_together_and_do_not_regress(tmp_path):
     late = store.finish_run('run_one', {'status': 'cancelled'}, {'event': 'run.cancelled'}).result()
     assert late['event']['event'] == 'run.completed'
     assert late['status']['status'] == 'completed'
+    # A worker callback that entered update_status before cancellation may commit late.
+    store.update_status('run_one', {'status': 'waiting_for_approval'})
     store.close()
     reopened = RunIdempotencyStore(path)
     assert reopened.status_for_run('alice', 'run_one')['status']['status'] == 'completed'

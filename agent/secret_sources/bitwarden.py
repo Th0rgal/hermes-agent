@@ -82,6 +82,8 @@ _BWS_RUN_TIMEOUT = 30
 
 # In-process cache so repeated load_hermes_dotenv() calls (CLI startup,
 # gateway hot-reload, test suites) don't re-fetch from BSM.
+ALL_PROJECTS = "*"
+
 _CacheKey = Tuple[str, str, str]  # (access_token_fingerprint, project_id, server_url)
 _CACHE: Dict[_CacheKey, _CachedFetch] = {}
 
@@ -666,7 +668,12 @@ def _summarize_bws_stderr(raw: str) -> str:
 def _run_bws_list(
     bws: Path, access_token: str, project_id: str, server_url: str = ""
 ) -> Tuple[Dict[str, str], List[str]]:
-    cmd = [str(bws), "secret", "list", project_id, "--output", "json"]
+    cmd = [str(bws), "secret", "list"]
+    # "*" lists every project the machine account can read, so secrets can be
+    # split across several Bitwarden projects without reconfiguring Hermes.
+    if project_id != ALL_PROJECTS:
+        cmd.append(project_id)
+    cmd += ["--output", "json"]
     env = os.environ.copy()
     env["BWS_ACCESS_TOKEN"] = access_token
     # Make sure we're not echoing telemetry / colour codes into json.
@@ -874,7 +881,7 @@ class BitwardenSource(SecretSource):
                 "description": "Env var holding the machine-account access token",
                 "default": "BWS_ACCESS_TOKEN",
             },
-            "project_id": {"description": "BSM project UUID", "default": ""},
+            "project_id": {"description": "BSM project UUID, or \"*\" for every project the token can read", "default": ""},
             "cache_ttl_seconds": {
                 "description": "Fresh disk+memory cache TTL; 0 disables fresh-cache reuse",
                 "default": 300,

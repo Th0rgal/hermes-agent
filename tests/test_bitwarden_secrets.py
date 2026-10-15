@@ -283,6 +283,26 @@ def test_fetch_happy_path(monkeypatch, tmp_path):
     assert warnings == []
 
 
+def test_fetch_all_projects_omits_project_argument(monkeypatch, tmp_path):
+    fake_binary = tmp_path / "bws"
+    fake_binary.write_text("")
+    payload = _fake_bws_payload([{"key": "K", "value": "v"}])
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[1:] == ["secret", "list", "--output", "json"]
+        return mock.Mock(returncode=0, stdout=payload, stderr="")
+
+    monkeypatch.setattr(bw.subprocess, "run", fake_run)
+
+    secrets, _ = bw.fetch_bitwarden_secrets(
+        access_token="0.fake.token",
+        project_id=bw.ALL_PROJECTS,
+        binary=fake_binary,
+        use_cache=False,
+    )
+    assert secrets == {"K": "v"}
+
+
 def test_fetch_skips_invalid_env_names(monkeypatch, tmp_path):
     fake_binary = tmp_path / "bws"
     fake_binary.write_text("")

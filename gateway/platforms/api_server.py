@@ -3354,7 +3354,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     _JOB_ID_RE = re.compile(r"[a-f0-9]{12}")
     # Update whitelist — prevents clients injecting arbitrary keys.
-    _UPDATE_ALLOWED_FIELDS = {"name", "schedule", "prompt", "deliver", "skills", "skill", "repeat", "enabled"}
+    _UPDATE_ALLOWED_FIELDS = {
+        "name", "schedule", "prompt", "deliver", "skills", "skill", "repeat", "enabled",
+        "model", "provider", "reasoning_effort", "workdir", "context_from", "failure_deliver",
+    }
     _MAX_NAME_LENGTH = 200
     _MAX_PROMPT_LENGTH = 5000
 
@@ -3448,7 +3451,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "prompt": prompt, "schedule": schedule, "name": name,
                 "deliver": body.get("deliver", "local"),
                 "origin": self._cron_origin_from_request(request)}
-            for key in ("paused", "paused_reason"):
+            for key in (
+                "paused", "paused_reason", "model", "provider", "reasoning_effort",
+                "workdir", "context_from", "failure_deliver",
+            ):
                 if key in body:
                     kwargs[key] = body[key]
             if skills:

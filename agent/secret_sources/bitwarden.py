@@ -49,6 +49,8 @@ _BWS_RUN_TIMEOUT = 30
 
 # <hermes_home>/cache/bws_cache.json holds only secret VALUES (never the access
 # token); kept out of .env so users editing .env don't commit BSM-sourced secrets.
+ALL_PROJECTS = "*"
+
 _CacheKey = Tuple[str, str, str]  # (access_token_fingerprint, project_id, server_url)
 _DISK_CACHE_BASENAME = "bws_cache.json"
 _ENCRYPTED_CACHE_BASENAME = "bws_cache.enc.json"
@@ -398,7 +400,12 @@ def _summarize_bws_stderr(raw: str) -> str:
 
 
 def _run_bws_list(bws: Path, access_token: str, project_id: str, server_url: str = "") -> Tuple[Dict[str, str], List[str]]:
-    cmd = [str(bws), "secret", "list", project_id, "--output", "json"]
+    cmd = [str(bws), "secret", "list"]
+    # "*" lists every project the machine account can read, so secrets can be
+    # split across several Bitwarden projects without reconfiguring Hermes.
+    if project_id != ALL_PROJECTS:
+        cmd.append(project_id)
+    cmd += ["--output", "json"]
     # The bws child intentionally receives the access token; a profile-local
     # fetch must not inherit sibling credentials (source_child_env).
     env = source_child_env()

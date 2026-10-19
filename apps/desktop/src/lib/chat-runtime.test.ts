@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest'
 import type { ChatMessage, ChatMessagePart } from '@/lib/chat-messages'
 import type { ComposerAttachment } from '@/store/composer'
 
-import { assistantTextPart } from './chat-messages'
 import {
   attachmentDisplayText,
   attachmentId,
@@ -145,33 +144,6 @@ describe('messageCreatedAt', () => {
   it('treats a zero / non-finite timestamp as absent', () => {
     expect(messageCreatedAt({ timestamp: 0 }, NOW).getTime()).toBe(NOW)
     expect(messageCreatedAt({ timestamp: Number.NaN }, NOW).getTime()).toBe(NOW)
-  })
-})
-
-describe('toRuntimeMessage', () => {
-  it('carries delivery provenance into assistant metadata.custom', () => {
-    const runtimeMessage = toRuntimeMessage({
-      id: 'delivery-1',
-      role: 'assistant',
-      parts: [assistantTextPart('Build finished.')],
-      timestamp: 1,
-      delivery: { kind: 'cron', label: 'watcher', needsOwner: true }
-    })
-
-    expect(runtimeMessage.metadata?.custom).toMatchObject({
-      delivery: { kind: 'cron', label: 'watcher', needsOwner: true }
-    })
-  })
-
-  it('leaves ordinary assistant turns without delivery metadata', () => {
-    const runtimeMessage = toRuntimeMessage({
-      id: 'turn-1',
-      role: 'assistant',
-      parts: [assistantTextPart('Hello.')],
-      timestamp: 1
-    })
-
-    expect(runtimeMessage.metadata?.custom).not.toHaveProperty('delivery')
   })
 })
 

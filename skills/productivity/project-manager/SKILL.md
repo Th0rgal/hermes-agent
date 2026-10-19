@@ -76,3 +76,25 @@ the owner's confirmation first. Reads are always fine.
 For a child created through `create_worker_mission`, keep `parent_mission_id` lineage: the server inherits the parent's actual machine and working directory. `create_worker_mission` accepts an optional existing `working_directory` and a stable `idempotency_key`; reuse the key after a lost response. Changing a workspace is not a request to move to another machine. Explicit remote execution uses `remote_node_id` (or `placement: "core"` for the API host).
 
 Git is optional. Prepare separate Git worktrees only when concurrent repository writers need them; otherwise assign disjoint files or serialize writes in an ordinary directory. Pass context and skill source paths in the assignment, and have the worker check its available tools. Do not assume the parent's MCP inventory or loaded skills are copied automatically. `start_mission` through the assistant MCP remains an explicitly targeted executor launch, not an Orb child launch.
+
+### Hosted cloud attempts
+
+Discover accounts and effective capabilities with `list_cloud_accounts`. An
+available account can be selected through `start_mission.cloud` with provider
+`chatgpt`, `grok_bot`, or `cursor_cloud`, an account reference, optional supported
+model/repository/ref, and a stable `idempotency_key`. Never send credentials or
+local directory contents in that selection. Connecting an account starts no work.
+
+Read `get_cloud_execution` for durable provider identities, turns and results.
+A transport disconnect is not completion; `submission_uncertain` requires
+reconciliation before a new submission. Continue the same mission using
+`send_message_to_mission` and a stable `client_message_id` UUID. Response completion,
+archive and track acceptance are distinct. Cancellation must be provider-confirmed.
+
+The initial hosted route does not implement track leases, writer grants or
+scheduled admission: do not use it for autonomous track dispatch. Unsupported
+connectors remain unavailable until their bounded real-provider canaries pass.
+
+### Cloud model selection and verified Grok Bot
+
+Use `list_cloud_models` with `provider: chatgpt | cursor_cloud` before selecting a model. Creation accepts `cloud.model` and Cursor `cloud.model_params: [{id,value}]`. Follow-ups accept `cloud_model` and `cloud_model_params` in `send_message_to_mission`; these settings belong to that turn, not earlier turns. Keep the same `client_message_id` on retries, including the same model parameters. Grok Bot has no model selector or attachment capability. Its dedicated Bots share the account computer: archiving an Orb mission must not delete provider files. Never replace an uncertain submission with a new mission.

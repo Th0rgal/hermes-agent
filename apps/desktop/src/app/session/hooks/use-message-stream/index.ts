@@ -15,7 +15,6 @@ import {
   reasoningPart,
   renderMediaTags,
   sealOpenToolParts,
-  stripStateSignature,
   toolCallOwnerMessageId,
   upsertToolPart
 } from '@/lib/chat-messages'
@@ -114,26 +113,6 @@ export function useMessageStream({
             return state
           }
 
-          const prev = state.messages
-          const seeded = seed()
-          // After message.interim the stream id is cleared so a later *different*
-          // sentence (or a tool call) opens its own bubble. A re-emit of the
-          // same sentence still belongs to that sealed turn — opening a twin
-          // bubble would reprint the narration, so drop it.
-          const lastAssistant = [...prev].reverse().find(message => message.role === 'assistant' && !message.hidden)
-          const lastText = lastAssistant ? chatMessageText(lastAssistant).trim() : ''
-          const seedText = seeded
-            .filter(part => part.type === 'text')
-            .map(part => part.text)
-            .join('')
-            .trim()
-          const sameNarration = (left: string, right: string) =>
-            Boolean(left && right && (left === right || right.startsWith(left) || left.startsWith(right)))
-
-          if (!state.streamId && lastAssistant?.interim && sameNarration(lastText, seedText)) {
-            return state
-          }
-
           const reconciledId = opts.eventTarget?.(state) ?? null
           const streamId = reconciledId ?? state.streamId ?? nextStreamMessageId('assistant-stream')
           // The event landed on a bubble that is NOT the live stream (sealed
@@ -142,6 +121,7 @@ export function useMessageStream({
           // and the turn's stream bookkeeping is neither consulted nor changed.
           const patchesSealedBubble = reconciledId !== null && reconciledId !== state.streamId
           const groupId = state.pendingBranchGroup ?? undefined
+          const prev = state.messages
           let nextMessages: ChatMessage[]
 
           if (!prev.some(m => m.id === streamId)) {
@@ -150,7 +130,7 @@ export function useMessageStream({
               {
                 id: streamId,
                 role: 'assistant',
-                parts: seeded,
+                parts: seed(),
                 timestamp: occurredAt,
                 pending: true,
                 branchGroupId: groupId
@@ -551,7 +531,7 @@ export function useMessageStream({
           return state
         }
 
-        const authoritativeText = stripStateSignature(renderMediaTags(text)).trim()
+        const authoritativeText = renderMediaTags(text).trim()
 
         if (!authoritativeText) {
           return state

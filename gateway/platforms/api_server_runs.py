@@ -38,6 +38,8 @@ logger = logging.getLogger("gateway.platforms.api_server")
 # in the worker thread's own ``finally``, which also keeps it visible past ``adapters.clear()``.
 _API_WORKER_LOCK = threading.Lock()
 _API_WORKER_LIVE = 0
+# Slots free from the journal writer thread too, so a queued run re-checks on a short tick.
+_JOURNAL_SLOT_POLL_SECONDS = 0.1
 
 
 def api_worker_live_count() -> int:
@@ -299,19 +301,22 @@ def _close_run_state(self) -> None:
         logger.debug("Failed to close run idempotency store for %s", self.name, exc_info=True)
 
 
-def _account_journal_slot(self, run_id: str, status: str) -> None:
-    """Only an executing run holds a journal slot: queued and approval-waiting runs do not, and
-    terminal runs give theirs back through ``finish_run`` / the executor's ``finally``."""
+def _acquire_journal_slot(self, run_id: str) -> bool:
+    """Take the journal slot an executing run holds until its executor exits; ``False`` when the
+    global or per-scope budget is full. A run with no journal needs no slot."""
     if run_id not in getattr(self, "_run_idempotency_ids", ()):
-        return
-    store = self._run_idempotency_store
-    try:
-        if status == "running":
-            store.acquire_journal(run_id, self._run_owners.get(run_id, ""))
-        elif status not in TERMINAL_STATUSES:
-            store.release_journal(run_id)
-    except Exception:
-        logger.debug("Journal slot accounting failed for %s", run_id, exc_info=True)
+        return True
+    return self._run_idempotency_store.acquire_journal(run_id, self._run_owners.get(run_id, ""))
+
+
+async def _await_journal_slot(self, run_id: str) -> bool:
+    """Keep an admitted run queued until it gets a journal slot; ``False`` if it is stopped or
+    the gateway shuts down first. Runs admitted together all pass admission, so this is the cap."""
+    while not _acquire_journal_slot(self, run_id):
+        if run_id in self._stopping_run_ids or run_id in self._shutdown_interrupted_run_ids:
+            return False
+        await asyncio.sleep(_JOURNAL_SLOT_POLL_SECONDS)
+    return True
 
 
 def _release_journal_slot(self, run_id: str) -> None:
@@ -338,7 +343,6 @@ def _set_run_status(self, run_id: str, status: str, *, _persist: bool = True, **
     if status != "waiting_for_approval":
         current.pop("approval", None)
     self._run_statuses[run_id] = current
-    _account_journal_slot(self, run_id, status)
     should_persist = (
         status != previous_status
         or status in TERMINAL_STATUSES
@@ -1096,6 +1100,9 @@ async def _execute_run_via_live_owner(self, run: _RunLaunch, home, record: dict[
                 _put_live_terminal(q, event)
 
     try:
+        if not await _await_journal_slot(self, run_id):
+            _finish("cancelled", completed=False, partial=False, interrupted=True)
+            return
         self._set_run_status(run_id, "running", delivery_id=delivery_id)
         record = await await_live_delivery(
             self, home, record, None, should_stop=lambda: run_id in self._stopping_run_ids)
@@ -1178,6 +1185,9 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         # interrupt yet, and starting a turn now would outlive the gateway.
         if run_id in self._shutdown_interrupted_run_ids:
             await _finish("interrupted")
+            return
+        if not await _await_journal_slot(self, run_id):
+            await _finish("cancelled")
             return
         self._set_run_status(run_id, "running")
         if run_id in self._stopping_run_ids:
@@ -1492,6 +1502,14 @@ async def _handle_run_approval(self, request: web.Request, *, _api_server) -> we
          f"Run has no active approval session: {run_id}", "approval_not_active", 409)):
         if failed:
             return _json_error(_openai_error, message, code=code, status=status)
+    # Resolving wakes the executor, so approval -> running takes its slot first. A parked run
+    # keeps the slot it started with (the approval timeout resumes it unannounced); a run without
+    # one stays parked when the budget is full instead of executing past it.
+    if (self._run_statuses.get(run_id, {}).get("status") == "waiting_for_approval"
+            and not _acquire_journal_slot(self, run_id)):
+        return _json_error(
+            _openai_error, "Run journal capacity reached; retry the approval shortly",
+            code="run_journal_capacity", status=429)
     try:
         from tools.approval import resolve_gateway_approval
         resolved = resolve_gateway_approval(

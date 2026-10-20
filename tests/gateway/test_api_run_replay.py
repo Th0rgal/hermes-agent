@@ -471,15 +471,15 @@ def test_storage_contention_does_not_exhaust_agent_executor_after_disconnects(tm
         store.close()
 
 
-def test_queued_and_waiting_runs_hold_no_journal_slot(tmp_path):
+def test_queued_runs_hold_no_journal_slot(tmp_path):
     store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
     store.MAX_JOURNAL_RUNS = 1
     try:
         for i in range(5):  # admitted but not yet executing: no slot consumed
             assert store.reserve('alice', f'k{i}', 'fp', f'run_{i}', {'status': 'queued'})[0] == 'created'
-        store.acquire_journal('run_0', 'alice')
+        assert store.acquire_journal('run_0', 'alice')
         assert store.reserve('bob', 'b', 'fp', 'run_b', {'status': 'queued'}) == ('capacity', None)
-        store.release_journal('run_0')  # waiting_for_approval gives the slot back
+        store.release_journal('run_0', final=True)  # the executor exits
         assert store.reserve('bob', 'b', 'fp', 'run_b', {'status': 'queued'})[0] == 'created'
     finally:
         store.close()

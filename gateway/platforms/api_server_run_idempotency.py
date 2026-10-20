@@ -73,8 +73,9 @@ class RunIdempotencyStore:
 
     RETENTION_SECONDS = 24 * 60 * 60
     ACKNOWLEDGED_RETENTION_SECONDS = 24 * 60 * 60
-    # Journal allowance for runs that are actively executing (queued or approval-waiting runs
-    # hold none). Admission is refused while the global or the caller's own budget is full;
+    # Journal allowance for runs whose executor is live, from start until it exits (queued runs
+    # hold none; a parked approval or a stopping run keeps its slot). Admission is refused while
+    # the global or the caller's own budget is full and ``acquire_journal`` re-checks at start;
     # the per-principal cap keeps one caller from exhausting the shared allowance.
     MAX_JOURNAL_RUNS = 32
     MAX_JOURNAL_RUNS_PER_SCOPE = 8
@@ -414,15 +415,20 @@ class RunIdempotencyStore:
             return True
         return sum(1 for owner in self._journal_runs.values() if owner == scope) >= self.MAX_JOURNAL_RUNS_PER_SCOPE
 
-    def acquire_journal(self, run_id: str, scope: str) -> None:
-        """Account an executing run against the journal allowance (idempotent).
+    def acquire_journal(self, run_id: str, scope: str) -> bool:
+        """Take a journal slot for a run about to execute; ``False`` when the budget is full.
 
-        An admitted run is never refused here: admission already checked the budget, and a
-        brief overshoot from runs queued together is bounded by API concurrency.
+        Admission only checks the slots of runs already executing, so runs admitted together
+        must each pass the global and per-scope caps again here. API concurrency is no bound:
+        it may be unlimited. Idempotent for the holder; a closed journal never reopens.
         """
         with self._enqueue_lock:
-            if run_id not in self._closed_journals:
-                self._journal_runs[run_id] = scope
+            if run_id in self._journal_runs:
+                return True
+            if run_id in self._closed_journals or self._journal_capacity_reached_locked(scope):
+                return False
+            self._journal_runs[run_id] = scope
+            return True
 
     def release_journal(self, run_id: str, *, final: bool = False) -> None:
         """Return a run's allowance. ``final`` also closes its journal to late frames; a slot

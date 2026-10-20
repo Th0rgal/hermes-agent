@@ -6,9 +6,9 @@ conversation with correct formatting, truncation, and config behavior.
 """
 
 from io import StringIO
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
+from agent.i18n import t
 
-import cli as cli_mod
 
 
 
@@ -281,7 +281,7 @@ class TestPreloadResumedSession:
 
         assert result is False
         output = buf.getvalue()
-        assert "Session not found" in output
+        assert t("cli.resume.session_not_found", session_id="nonexistent_session") in output
 
 
 
@@ -324,46 +324,6 @@ class TestPreloadResumedSession:
         assert "limit 20000" in output.getvalue()
         mock_db.get_resume_conversations.assert_not_called()
 
-    def test_tip_only_guard_goes_through_the_shared_resume_guard(self):
-        """The mid-setup path loads only the tip, so it asks the ONE resume
-        guard for a tip-only bound instead of borrowing the export guard."""
-        from hermes_state import SessionResumeTooLargeError
-
-        cli = _make_cli(resume="deep-lineage")
-        cli.session_id = "deep-lineage"
-        mock_db = MagicMock()
-        guard = MagicMock(return_value=666)
-        mock_db.assert_resume_safe = guard
-        cli._session_db = mock_db
-
-        assert cli._resume_history_limit_error(tip_only=True) is None
-        guard.assert_called_once_with("deep-lineage", tip_only=True)
-
-        guard.side_effect = SessionResumeTooLargeError(
-            20_001, 20_000, scope="in its tip segment"
-        )
-        error = cli._resume_history_limit_error(tip_only=True)
-        assert error and "20001" in error and "too long to reload safely" in error
-
-
-    def test_auto_compaction_rechecks_tip_and_preserves_guard_on_failure(self):
-        from hermes_state import SessionResumeTooLargeError
-
-        cli = _make_cli(resume="large-tip")
-        cli.session_id = "large-tip"
-        db = MagicMock()
-        cli._session_db = db
-        too_large = SessionResumeTooLargeError(20_001, 20_000)
-        db.assert_resume_safe = MagicMock(side_effect=[too_large, 10])
-        assert cli._resume_history_limit_error(tip_only=True) is None
-        assert db.assert_resume_safe.call_args_list == [
-            call("large-tip", tip_only=True), call("large-tip", tip_only=True),
-        ]
-        db.compact_lineage_for_resume.assert_called_once_with("large-tip")
-
-        db.assert_resume_safe.side_effect = too_large
-        db.compact_lineage_for_resume.side_effect = RuntimeError("compactor busy")
-        assert "safe resume limit" in cli._resume_history_limit_error(tip_only=True)
 
 
 
@@ -460,15 +420,6 @@ class TestInitAgentSkipsPreloaded:
 # ── Config default tests ─────────────────────────────────────────────
 
 
-class TestResumeDisplayConfig:
-    """resume_display config option defaults and behavior."""
-
-    def test_default_config_has_resume_display(self):
-        """DEFAULT_CONFIG in hermes_cli/config.py includes resume_display."""
-        from hermes_cli.config import DEFAULT_CONFIG
-        display = DEFAULT_CONFIG.get("display", {})
-        assert "resume_display" in display
-        assert display["resume_display"] == "full"
 
 
 

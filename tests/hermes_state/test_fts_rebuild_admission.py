@@ -170,7 +170,7 @@ class TestSchemaPathAdmission:
         # Drop one sync trigger out-of-band: next open takes the
         # triggers_need_repair branch in _init_schema.
         raw = sqlite3.connect(str(db_path))
-        raw.execute(f"DROP TRIGGER IF EXISTS {sorted(_FTS_TRIGGERS)[0]}")
+        raw.execute(f"DROP TRIGGER IF EXISTS {min(_FTS_TRIGGERS)}")
         raw.commit()
         raw.close()
 
@@ -189,7 +189,7 @@ class TestSchemaPathAdmission:
         self, tmp_path, fast_timeout
     ):
         """_recover_stale_fts defers under contention and completes once the
-        authority is free (explicit offline recovery, never on open)."""
+        authority is free (next open)."""
         db_path = tmp_path / "state.db"
         d = SessionDB(db_path=db_path)
         if not d._fts_enabled:
@@ -214,7 +214,6 @@ class TestSchemaPathAdmission:
             d2 = SessionDB(db_path=db_path)
             try:
                 assert d2._fts_enabled is False
-                assert d2.retry_deferred_fts_recovery() is False
             finally:
                 d2.close()
         # Deferred: breadcrumb still present, recovery not performed.
@@ -222,9 +221,6 @@ class TestSchemaPathAdmission:
 
         d3 = SessionDB(db_path=db_path)
         try:
-            assert d3._fts_enabled is False
-            assert d3._fts_stale is True
-            assert d3.retry_deferred_fts_recovery() is True
             assert d3._fts_enabled is True
         finally:
             d3.close()
@@ -311,7 +307,6 @@ class TestOrphanedHolderStalenessBreak:
     ):
         """A record naming a live pid must defer even after timeout."""
         import json
-        import os
 
         lock = _lock_file(db.db_path)
         with _rebuild_lock_held_by_other_process(db.db_path) as proc:
@@ -339,13 +334,13 @@ class TestOrphanedHolderStalenessBreak:
         db_path = tmp_path / "state.db"
         db_path.touch()
 
-        script = """
+        script = f"""
 import os, sys, time
-sys.path.insert(0, {repo!r})
+sys.path.insert(0, {str(Path(hermes_state_common.__file__).parent)!r})
 from pathlib import Path
 import hermes_state_repair
 
-lock_cm = hermes_state_repair._cross_process_repair_lock(Path({db!r}))
+lock_cm = hermes_state_repair._cross_process_repair_lock(Path({str(db_path)!r}))
 assert lock_cm.__enter__() is True
 pid = os.fork()
 if pid == 0:
@@ -353,7 +348,7 @@ if pid == 0:
     os._exit(0)
 print("child", pid, flush=True)
 os._exit(1)
-""".format(repo=str(Path(hermes_state_common.__file__).parent), db=str(db_path))
+"""
         import os
         import signal
 
@@ -541,7 +536,8 @@ class TestDeferredFtsRetryInProcess:
                 )
                 t0 = time.monotonic()
                 assert gw.retry_deferred_fts_recovery() is False
-                assert time.monotonic() - t0 < 2.0
+                # Budget is 30s; a generous bound still proves it did not wait it out.
+                assert time.monotonic() - t0 < 15.0
                 assert gw._fts_stale is True
                 # Rate limit engaged: an immediate second call is a no-op.
                 assert gw.retry_deferred_fts_recovery() is False

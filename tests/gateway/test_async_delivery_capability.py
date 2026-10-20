@@ -163,9 +163,7 @@ class TestAdapterCapabilityFlag:
         from gateway.platforms.api_server import APIServerAdapter
         from gateway.session_context import clear_session_vars, get_session_env
 
-        from gateway.config import PlatformConfig
-
-        tokens = APIServerAdapter(PlatformConfig(enabled=True))._bind_api_server_session(
+        tokens = APIServerAdapter._bind_api_server_session(
             chat_id="c1", session_key="sk1", session_id="sid1"
         )
         try:

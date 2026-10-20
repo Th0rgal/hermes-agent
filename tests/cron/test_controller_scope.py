@@ -229,8 +229,9 @@ def test_stable_context_precedes_real_preloaded_skill_and_budget(tmp_path, monke
     assert find_stable_prefix(first) == find_stable_prefix(second)
     assert find_stable_prefix(first) is not None
     skill.write_text(skill.read_text() + " safe context" * 1500)
-    with pytest.raises(ControllerScopeError, match="maximum is 16000.*preloaded skills"):
-        scheduler._build_job_prompt(config)
+    assert len(scheduler._build_job_prompt(config)) > 16_000
+    with pytest.raises(ControllerScopeError, match="maximum is 16000.*preloaded skills are separate"):
+        scheduler._build_job_prompt(job(skills=["controller-test"], prompt="safe context " * 1500))
     ordinary = {"id": "ordinary", "prompt": "unchanged"}
     plain = scheduler._build_job_prompt(ordinary)
     assert "CONTROLLER CONTEXT" not in plain
@@ -238,14 +239,14 @@ def test_stable_context_precedes_real_preloaded_skill_and_budget(tmp_path, monke
 
 
 @pytest.fixture
-def local_scheduler(tmp_path, monkeypatch):
+def local_scheduler(tmp_path, monkeypatch, cron_owner):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (tmp_path / "config.yaml").write_text("model:\n  default: test-model\ncron:\n  preflight: false\n")
     monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", lambda **kw: {
         "api_key": "test-key", "provider": "test-provider", "base_url": None,
         "api_mode": None, "command": None, "args": None,
     })
-    monkeypatch.setattr("tools.mcp_tool.discover_mcp_tools", lambda: [])
+    monkeypatch.setattr("tools.mcp_tool_discovery.discover_mcp_tools", lambda: [])
     monkeypatch.setattr(scheduler, "get_fallback_chain", lambda cfg: [])
     monkeypatch.setattr(scheduler, "_guard_job_credential_exfil", lambda config: None)
     # Real session DB, local provider boundary. No provider or MCP network call.

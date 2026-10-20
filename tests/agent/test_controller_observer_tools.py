@@ -31,11 +31,11 @@ def agent():
         "parameters": {"type": "object", "properties": {}},
     }} for name in names]
     with (
-        patch("run_agent.get_tool_definitions", return_value=definitions),
-        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("model_tools.get_tool_definitions", return_value=definitions),
+        patch("model_tools.check_toolset_requirements", return_value={}),
         patch("hermes_cli.config.load_config", return_value={}),
         patch("hermes_cli.config.load_config_readonly", return_value={}),
-        patch("run_agent.OpenAI"),
+        patch("agent.process_bootstrap.OpenAI"),
     ):
         result = AIAgent(
             api_key="test-key", base_url="https://example.invalid/v1",
@@ -64,7 +64,7 @@ def test_observer_blocks_agent_owned_and_executable_tools_before_any_handler(age
     ))
     messages = []
     with (
-        patch("run_agent.handle_function_call", side_effect=AssertionError("registry handler reached")),
+        patch("model_tools.handle_function_call", side_effect=AssertionError("registry handler reached")),
         patch.object(agent, "_dispatch_delegate_task", side_effect=AssertionError("child launched")),
         bind_controller_scope(observer_scope()),
     ):
@@ -101,7 +101,7 @@ def test_registry_entry_cannot_bypass_observer_with_other_toolsets(tmp_path, nam
 @pytest.mark.parametrize("execution", ["sequential", "concurrent", "direct"])
 def test_unscoped_agent_can_still_dispatch_executable_tool(agent, execution):
     messages = []
-    with patch("run_agent.handle_function_call", return_value=json.dumps({"ok": True})) as handler:
+    with patch("model_tools.handle_function_call", return_value=json.dumps({"ok": True})) as handler:
         if execution == "direct":
             result = agent._invoke_tool("execute_code", {"code": "print(1)"}, "interactive")
         else:

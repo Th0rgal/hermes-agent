@@ -296,6 +296,7 @@ def test_journal_admission_preserves_accepted_runs_and_retry_keys(tmp_path):
     store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
     store.MAX_JOURNAL_RUNS = 1
     assert store.reserve('alice', 'first', 'fp1', 'run_one', {'status': 'running'})[0] == 'created'
+    store.acquire_journal('run_one', 'alice')  # the executor marks the run running
     assert store.reserve('alice', 'next', 'fp2', 'run_two', {'status': 'running'}) == ('capacity', None)
     assert store.lookup('alice', 'next', 'fp2') == ('missing', None)
     assert store.reserve('alice', 'first', 'fp1', 'ignored', {'status': 'running'})[0] == 'reused'
@@ -467,4 +468,31 @@ def test_storage_contention_does_not_exhaust_agent_executor_after_disconnects(tm
         asyncio.run(exercise())
     finally:
         release.set()
+        store.close()
+
+
+def test_queued_and_waiting_runs_hold_no_journal_slot(tmp_path):
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    store.MAX_JOURNAL_RUNS = 1
+    try:
+        for i in range(5):  # admitted but not yet executing: no slot consumed
+            assert store.reserve('alice', f'k{i}', 'fp', f'run_{i}', {'status': 'queued'})[0] == 'created'
+        store.acquire_journal('run_0', 'alice')
+        assert store.reserve('bob', 'b', 'fp', 'run_b', {'status': 'queued'}) == ('capacity', None)
+        store.release_journal('run_0')  # waiting_for_approval gives the slot back
+        assert store.reserve('bob', 'b', 'fp', 'run_b', {'status': 'queued'})[0] == 'created'
+    finally:
+        store.close()
+
+
+def test_per_principal_cap_does_not_exhaust_other_principals(tmp_path):
+    store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    store.MAX_JOURNAL_RUNS, store.MAX_JOURNAL_RUNS_PER_SCOPE = 10, 2
+    try:
+        for i in range(2):
+            store.reserve('alice', f'k{i}', 'fp', f'run_a{i}', {'status': 'queued'})
+            store.acquire_journal(f'run_a{i}', 'alice')
+        assert store.reserve('alice', 'k9', 'fp', 'run_a9', {'status': 'queued'}) == ('capacity', None)
+        assert store.reserve('bob', 'k0', 'fp', 'run_b0', {'status': 'queued'})[0] == 'created'
+    finally:
         store.close()

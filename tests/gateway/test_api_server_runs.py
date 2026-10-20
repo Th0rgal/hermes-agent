@@ -2220,3 +2220,30 @@ async def test_delayed_agent_callback_cannot_resurrect_terminal_run(adapter, kin
     await asyncio.sleep(0)
     assert adapter._run_statuses[run_id] == {"status": "completed"}
     assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_run_that_raises_mid_run_releases_its_journal_slot(adapter, tmp_path):
+    _use_idempotency_db(adapter, tmp_path / "slots.db")
+    store = adapter._run_idempotency_store
+    store.MAX_JOURNAL_RUNS = store.MAX_JOURNAL_RUNS_PER_SCOPE = 1
+    adapter._max_concurrent_runs = 0
+    async with TestClient(TestServer(_create_runs_app(adapter))) as cli:
+        with patch.object(adapter, "_create_agent") as create:
+            agent = MagicMock()
+            agent.run_conversation.side_effect = RuntimeError("boom mid-run")
+            agent.session_prompt_tokens = agent.session_completion_tokens = agent.session_total_tokens = 0
+            create.return_value = agent
+            # Worst case: the terminal journal write itself fails, so finish_run never frees the slot.
+            store.finish_run = MagicMock(side_effect=RuntimeError("journal down"))
+            for i in range(4):  # each run crashes; the next must still be admitted
+                response = await cli.post(
+                    "/v1/runs", json={"input": f"crash {i}"}, headers={"Idempotency-Key": f"leak-{i}"})
+                assert response.status == 202, await response.text()
+                run_id = (await response.json())["run_id"]
+                for _ in range(200):
+                    if adapter._run_statuses.get(run_id, {}).get("status") == "failed" and not store.journal_slots():
+                        break
+                    await asyncio.sleep(0.02)
+                assert adapter._run_statuses[run_id]["status"] == "failed"
+                assert store.journal_slots() == {}

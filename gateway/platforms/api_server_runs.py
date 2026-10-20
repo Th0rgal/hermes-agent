@@ -299,6 +299,28 @@ def _close_run_state(self) -> None:
         logger.debug("Failed to close run idempotency store for %s", self.name, exc_info=True)
 
 
+def _account_journal_slot(self, run_id: str, status: str) -> None:
+    """Only an executing run holds a journal slot: queued and approval-waiting runs do not, and
+    terminal runs give theirs back through ``finish_run`` / the executor's ``finally``."""
+    if run_id not in getattr(self, "_run_idempotency_ids", ()):
+        return
+    store = self._run_idempotency_store
+    try:
+        if status == "running":
+            store.acquire_journal(run_id, self._run_owners.get(run_id, ""))
+        elif status not in TERMINAL_STATUSES:
+            store.release_journal(run_id)
+    except Exception:
+        logger.debug("Journal slot accounting failed for %s", run_id, exc_info=True)
+
+
+def _release_journal_slot(self, run_id: str) -> None:
+    """Executor exit: whatever path ended the run, its journal slot must not leak."""
+    if run_id in getattr(self, "_run_idempotency_ids", ()):
+        with suppress(Exception):
+            self._run_idempotency_store.release_journal(run_id, final=True)
+
+
 def _set_run_status(self, run_id: str, status: str, *, _persist: bool = True, **fields: Any) -> dict[str, Any]:
     """Update pollable run status without exposing private agent objects."""
     now = time.time()
@@ -316,6 +338,7 @@ def _set_run_status(self, run_id: str, status: str, *, _persist: bool = True, **
     if status != "waiting_for_approval":
         current.pop("approval", None)
     self._run_statuses[run_id] = current
+    _account_journal_slot(self, run_id, status)
     should_persist = (
         status != previous_status
         or status in TERMINAL_STATUSES
@@ -1097,6 +1120,7 @@ async def _execute_run_via_live_owner(self, run: _RunLaunch, home, record: dict[
     finally:
         with suppress(Exception):
             run.put_event(None)  # sentinel: close the SSE stream
+        _release_journal_slot(self, run_id)
         _retire_live_run(self, run_id)
 
 
@@ -1239,6 +1263,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         _unregister_approval_notify(run.approval_session_key)
         with suppress(Exception):
             loop.call_soon(run.put_event, None)  # close after the queued events
+        _release_journal_slot(self, run_id)
         _retire_live_run(self, run_id)
 
 

@@ -73,9 +73,11 @@ class RunIdempotencyStore:
 
     RETENTION_SECONDS = 24 * 60 * 60
     ACKNOWLEDGED_RETENTION_SECONDS = 24 * 60 * 60
-    # Reserve a journal allowance before admitting work, even if API concurrency is unlimited.
-    # Existing runs retain their budget when admission is saturated.
+    # Journal allowance for runs that are actively executing (queued or approval-waiting runs
+    # hold none). Admission is refused while the global or the caller's own budget is full;
+    # the per-principal cap keeps one caller from exhausting the shared allowance.
     MAX_JOURNAL_RUNS = 32
+    MAX_JOURNAL_RUNS_PER_SCOPE = 8
     MAX_RUN_PENDING_BYTES = 8 * 1024 * 1024
     MAX_RUN_PENDING_BATCHES = 64
     MAX_BATCH_EVENTS = 128
@@ -150,7 +152,7 @@ class RunIdempotencyStore:
         self._terminal_writes = {}
         self._closed_journals = set()
         self._open_batches = {}
-        self._journal_runs = set()
+        self._journal_runs: dict[str, str] = {}  # run_id -> owning scope
         self._tighten_permissions()
 
     async def call_async(self, operation, *args, **kwargs):
@@ -212,7 +214,7 @@ class RunIdempotencyStore:
                         self._run_pending.pop(run_id, None)
                         self._run_pending_bytes.pop(run_id, None)
                         if run_id in self._closed_journals:
-                            self._journal_runs.discard(run_id)
+                            self._journal_runs.pop(run_id, None)
                     if isinstance(payload, dict):
                         payload["payloads"].clear()
 
@@ -305,7 +307,7 @@ class RunIdempotencyStore:
                 self._terminal_writes[run_id] = future
                 future.add_done_callback(lambda done: self._write_finished(run_id, done))
             if not self._run_pending.get(run_id):
-                self._journal_runs.discard(run_id)
+                self._journal_runs.pop(run_id, None)
             return future
 
     def _write_terminal(self, run_id: str, status_json: str, payload: str) -> dict:
@@ -393,7 +395,7 @@ class RunIdempotencyStore:
                 self._conn.commit()
                 return _outcome(row, fingerprint)
             with self._enqueue_lock:
-                if len(self._journal_runs) >= self.MAX_JOURNAL_RUNS:
+                if self._journal_capacity_reached_locked(scope):
                     self._conn.commit()
                     return "capacity", None
             self._conn.execute(
@@ -404,10 +406,37 @@ class RunIdempotencyStore:
                 (scope, key, fingerprint, run_id, encoded, int(owner_pid or 0), int(owner_started or 0),
                  retention_until, now, now))
             self._conn.commit()
-            if status.get("status") not in TERMINAL_STATUSES:
-                with self._enqueue_lock:
-                    self._journal_runs.add(run_id)
             return "created", _record(run_id, encoded, owner_pid, owner_started, now) | {"status": status}
+
+    def _journal_capacity_reached_locked(self, scope: str) -> bool:
+        """Caller holds _enqueue_lock."""
+        if len(self._journal_runs) >= self.MAX_JOURNAL_RUNS:
+            return True
+        return sum(1 for owner in self._journal_runs.values() if owner == scope) >= self.MAX_JOURNAL_RUNS_PER_SCOPE
+
+    def acquire_journal(self, run_id: str, scope: str) -> None:
+        """Account an executing run against the journal allowance (idempotent).
+
+        An admitted run is never refused here: admission already checked the budget, and a
+        brief overshoot from runs queued together is bounded by API concurrency.
+        """
+        with self._enqueue_lock:
+            if run_id not in self._closed_journals:
+                self._journal_runs[run_id] = scope
+
+    def release_journal(self, run_id: str, *, final: bool = False) -> None:
+        """Return a run's allowance. ``final`` also closes its journal to late frames; a slot
+        with frames still being written is freed by the writer once they land."""
+        with self._enqueue_lock:
+            if final:
+                self._closed_journals.add(run_id)
+                if self._run_pending.get(run_id):
+                    return
+            self._journal_runs.pop(run_id, None)
+
+    def journal_slots(self) -> dict[str, str]:
+        with self._enqueue_lock:
+            return dict(self._journal_runs)
 
     def lookup(self, scope: str, key: str, fingerprint: str, *, retention_until: float = 0):
         """Return ``missing``, ``reused`` or ``conflict`` without reserving."""
@@ -449,7 +478,7 @@ class RunIdempotencyStore:
                     self._closed_journals.discard(stale_run)
                     self._event_writes.pop(stale_run, None)
                     self._event_errors.pop(stale_run, None)
-                    self._journal_runs.discard(stale_run)
+                    self._journal_runs.pop(stale_run, None)
                 self._conn.execute(
                     "DELETE FROM run_events WHERE run_id IN (SELECT run_id FROM run_idempotency WHERE scope=? AND idempotency_key=?)",
                     (stale_scope, stale_key))
@@ -508,7 +537,8 @@ class RunIdempotencyStore:
             self._conn.execute("INSERT INTO run_events(run_id,payload) VALUES (?,?)",
                                (run_id, json.dumps(event, ensure_ascii=False)))
             self._conn.commit()
-            return status
+        self.release_journal(run_id, final=True)
+        return status
 
     def queue_status(self, run_id: str, status: dict[str, Any]):
         """Order status snapshots with journal writes without blocking the API loop."""
@@ -537,7 +567,7 @@ class RunIdempotencyStore:
                 "SELECT run_id FROM run_idempotency WHERE scope=? AND idempotency_key=?", (scope, key)).fetchone()
             if row is not None:
                 with self._enqueue_lock:
-                    self._journal_runs.discard(row[0])
+                    self._journal_runs.pop(row[0], None)
                 self._conn.execute("DELETE FROM run_events WHERE run_id=?", (row[0],))
             self._conn.execute("DELETE FROM run_idempotency WHERE scope=? AND idempotency_key=?", (scope, key))
             self._conn.commit()

@@ -622,6 +622,33 @@ class _RunLaunch:
         _publish_run_event(self.owner, self.run_id, event)
 
 
+async def _await_reservation(self, admission, run_id: str) -> tuple[str, Any, bool]:
+    """Keep the request's admission/drain slot until the atomic reservation resolves: a disconnect
+    must not leave an accepted key with no executor and a live owner. Returns ``(outcome, record,
+    cancelled)``; a run whose reservation failed or was not created is forgotten first."""
+    cancelled = False
+    try:
+        while True:
+            try:
+                outcome, record = await asyncio.shield(admission)
+                break
+            except asyncio.CancelledError:
+                if admission.cancelled():
+                    raise
+                cancelled = True
+    except Exception:
+        _forget_run(self, run_id, self._run_streams, self._run_streams_created,
+                    self._run_approval_sessions, self._run_statuses, self._run_owners)
+        raise
+    if outcome != "created":
+        _forget_run(
+            self, run_id, self._run_streams, self._run_streams_created, self._run_approval_sessions,
+            self._run_statuses, self._run_owners)
+        if cancelled:
+            raise asyncio.CancelledError
+    return outcome, record, cancelled
+
+
 def _forget_run(self, run_id: str, *tables) -> None:
     """Drop *run_id* from the given run-keyed dicts/sets, then release its owner stamp."""
     for table in tables:
@@ -883,27 +910,8 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
             idempotency_scope, idempotency_key, idempotency_fingerprint, run_id, initial_status,
             owner_pid=self._run_owner_pid, owner_started=self._run_owner_started,
             retention_until=_room_retention_until(request)))
-        # Keep the request's admission/drain slot until the atomic reservation resolves.
-        # A disconnect must not leave an accepted key with no executor and a live owner.
-        try:
-            while True:
-                try:
-                    outcome, record = await asyncio.shield(admission)
-                    break
-                except asyncio.CancelledError:
-                    if admission.cancelled():
-                        raise
-                    admission_cancelled = True
-        except Exception:
-            _forget_run(self, run_id, self._run_streams, self._run_streams_created,
-                        self._run_approval_sessions, self._run_statuses, self._run_owners)
-            raise
+        outcome, record, admission_cancelled = await _await_reservation(self, admission, run_id)
         if outcome != "created":
-            _forget_run(
-                self, run_id, self._run_streams, self._run_streams_created, self._run_approval_sessions,
-                self._run_statuses, self._run_owners)
-            if admission_cancelled:
-                raise asyncio.CancelledError
             return await _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
         self._run_idempotency_ids.add(run_id)
     launch = _RunLaunch(
@@ -931,18 +939,24 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
         if refused is not None:
             return refused
     self._activate_admitted_request()
+    _start_run_task(self, launch, admitted, _api_server=_api_server)
+    if admission_cancelled:
+        raise asyncio.CancelledError
+    return _accepted_response(run_id, "started", gateway_session_key, replayed=False)
+
+
+def _start_run_task(self, launch: _RunLaunch, admitted, *, _api_server) -> None:
+    """Start the admitted run's executor (a live Bot Chat owner's receipt, or the agent here)."""
     if admitted is not None:
-        task = self._active_run_tasks[run_id] = asyncio.create_task(
+        task = self._active_run_tasks[launch.run_id] = asyncio.create_task(
             _execute_run_via_live_owner(self, launch, *admitted, _api_server=_api_server))
     else:
-        task = self._active_run_tasks[run_id] = asyncio.create_task(_execute_run(self, launch, _api_server=_api_server))
+        task = self._active_run_tasks[launch.run_id] = asyncio.create_task(
+            _execute_run(self, launch, _api_server=_api_server))
     with suppress(TypeError):
         self._background_tasks.add(task)  # tracked for shutdown drain
     if hasattr(task, "add_done_callback"):
         task.add_done_callback(self._background_tasks.discard)
-    if admission_cancelled:
-        raise asyncio.CancelledError
-    return _accepted_response(run_id, "started", gateway_session_key, replayed=False)
 
 
 def _retarget_to_delivered_chat(self, launch: _RunLaunch, admitted) -> None:
@@ -1047,7 +1061,7 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
 
 def _make_approval_notify(self, run: _RunLaunch, *, _api_server) -> Callable[[dict[str, Any]], None]:
     """Approval-request bridge: redact, stamp the event envelope, park the run status, enqueue."""
-    run_id, q, loop = run.run_id, run.queue, asyncio.get_running_loop()
+    run_id, loop = run.run_id, asyncio.get_running_loop()
 
     def _approval_notify(approval_data: dict[str, Any]) -> None:
         if self._run_statuses.get(run_id, {}).get("status") in TERMINAL_STATUSES:
@@ -1338,6 +1352,32 @@ async def _handle_get_run(self, request: web.Request, *, _api_server) -> web.Res
     return err or web.json_response(status)
 
 
+async def _json_run_events(self, request: web.Request, run_id: str, *, _api_server) -> web.Response:
+    """``?format=json&after=N``: one page of the durable event journal after cursor *N*."""
+    try:
+        after = int(request.query.get("after", "0"))
+        if not 0 <= after <= (1 << 63) - 1:
+            raise ValueError()
+    except ValueError:
+        return _json_error(_api_server._openai_error, "Invalid event cursor", status=400)
+    try:
+        await self._durable_run_status(request, run_id)
+        reservation = await self._run_idempotency_store.call_async(
+            self._run_idempotency_store.status_for_run, self._run_idempotency_scope(request), run_id)
+        if reservation is None or not reservation.get("journal_enabled"):
+            return _json_error(
+                _api_server._openai_error,
+                "This run has no event journal. Only runs started with an Idempotency-Key after the replay upgrade support replay.",
+                code="run_replay_unsupported", status=409)
+        events = await self._run_idempotency_store.call_async(
+            self._run_idempotency_store.events, self._run_idempotency_scope(request), run_id, after)
+    except Exception:
+        logger.exception("Durable run replay failed for %s", run_id)
+        return _json_error(_api_server._openai_error, "Durable event replay is unavailable", status=503)
+    return web.json_response({"events": events, "cursor": events[-1]["id"] if events else str(after),
+                              "has_more": len(events) == 500})
+
+
 async def _handle_run_events(self, request: web.Request, *, _api_server) -> web.StreamResponse:
     """GET /v1/runs/{run_id}/events — stream structured agent lifecycle events."""
     # Same door as GET /v1/runs/{id}: a room grant that may poll the run may stream it.
@@ -1348,28 +1388,7 @@ async def _handle_run_events(self, request: web.Request, *, _api_server) -> web.
     if not await self._request_owns_run(request, run_id):
         return _run_not_found(_api_server._openai_error, run_id)
     if request.query.get("format") == "json":
-        try:
-            after = int(request.query.get("after", "0"))
-            if not 0 <= after <= (1 << 63) - 1:
-                raise ValueError()
-        except ValueError:
-            return _json_error(_api_server._openai_error, "Invalid event cursor", status=400)
-        try:
-            await self._durable_run_status(request, run_id)
-            reservation = await self._run_idempotency_store.call_async(
-                self._run_idempotency_store.status_for_run, self._run_idempotency_scope(request), run_id)
-            if reservation is None or not reservation.get("journal_enabled"):
-                return _json_error(
-                    _api_server._openai_error,
-                    "This run has no event journal. Only runs started with an Idempotency-Key after the replay upgrade support replay.",
-                    code="run_replay_unsupported", status=409)
-            events = await self._run_idempotency_store.call_async(
-                self._run_idempotency_store.events, self._run_idempotency_scope(request), run_id, after)
-        except Exception:
-            logger.exception("Durable run replay failed for %s", run_id)
-            return _json_error(_api_server._openai_error, "Durable event replay is unavailable", status=503)
-        return web.json_response({"events": events, "cursor": events[-1]["id"] if events else str(after),
-                                  "has_more": len(events) == 500})
+        return await _json_run_events(self, request, run_id, _api_server=_api_server)
     # Allow subscribing slightly before the run is registered (race window).
     # Confirm the force-kill actually reaped the process before we clear its PID file / scoped locks.
     # SIGKILL can fail to take (e.g. an uninterruptible-sleep or zombie-reaping parent), and if we blindly

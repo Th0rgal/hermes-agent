@@ -4488,18 +4488,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     _handle_room_member_grant_refresh = _room_grant_delegate("_handle_room_member_grant_refresh")
     _handle_room_member_grant_revoke = _room_grant_delegate("_handle_room_member_grant_revoke")
 
-    async def _durable_run_status(self, request: web.Request, run_id: str) -> dict[str, Any] | None:
-        return await _api_runs._durable_run_status(self, request, run_id)
+    _durable_run_status = _api_runs._durable_run_status
 
     @_admit_api_agent_request
     async def _handle_runs(self, request: web.Request) -> web.Response:
         return await _api_runs._handle_runs(self, request, _api_server=sys.modules[__name__])
 
-    async def _request_owns_run(self, request: web.Request, run_id: str) -> bool:
-        return await _api_runs._request_owns_run(self, request, run_id)
+    _request_owns_run = _api_runs._request_owns_run
 
-    def _release_run_owner_if_forgotten(self, run_id: str) -> None:
-        _api_runs._release_run_owner_if_forgotten(self, run_id)
+    _release_run_owner_if_forgotten = _api_runs._release_run_owner_if_forgotten
 
     _handle_get_run = _run_route_delegate("_handle_get_run")
     _handle_run_events = _run_route_delegate("_handle_run_events")
@@ -4702,8 +4699,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 await self._runner.cleanup()
                 self._runner = None
         finally:
-            # The journal may be draining slow SQLite writes. Keep teardown cancellable.
-            try:
+            try:  # the journal may be draining slow SQLite writes: keep teardown cancellable
                 await asyncio.to_thread(_api_runs._close_run_state, self)
             finally:
                 self._close_cached_session_dbs()

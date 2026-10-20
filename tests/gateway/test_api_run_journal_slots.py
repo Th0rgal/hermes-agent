@@ -52,6 +52,20 @@ def _gated_agent_factory(release: threading.Event):
     return create_agent, stats
 
 
+def _record_refusals(store):
+    """Record each refused slot request: a queued run re-checks on every poll tick."""
+    real, refused = store.acquire_journal, []
+
+    def acquire(run_id, scope):
+        granted = real(run_id, scope)
+        if not granted:
+            refused.append(run_id)
+        return granted
+
+    store.acquire_journal = acquire
+    return refused
+
+
 async def _start(cli, key):
     response = await cli.post("/v1/runs", json={"input": key}, headers={"Idempotency-Key": key})
     return response.status, (await response.json()).get("run_id")
@@ -87,6 +101,7 @@ async def test_concurrent_starts_never_execute_past_the_journal_cap(adapter):
         return result
 
     store.reserve = reserve_together
+    refused = _record_refusals(store)
     release = threading.Event()
     create_agent, stats = _gated_agent_factory(release)
     async with TestClient(TestServer(_create_runs_app(adapter))) as cli:
@@ -95,7 +110,7 @@ async def test_concurrent_starts_never_execute_past_the_journal_cap(adapter):
             assert [status for status, _ in started] == [202] * 4
             run_ids = [run_id for _, run_id in started]
             await async_wait_until(lambda: stats["active"] >= 2, timeout=5)
-            await asyncio.sleep(0.5)  # queued runs re-poll several times meanwhile
+            await async_wait_until(lambda: len(refused) >= 6, timeout=5)  # both queued runs re-polled
             assert stats["peak"] == 2
             assert len(store.journal_slots()) == 2
             statuses = sorted(adapter._run_statuses[run_id]["status"] for run_id in run_ids)
@@ -119,11 +134,12 @@ async def test_run_waiting_for_a_slot_can_be_stopped_without_executing(adapter):
         return result
 
     store.reserve = reserve_then_fill
+    refused = _record_refusals(store)
     async with TestClient(TestServer(_create_runs_app(adapter))) as cli:
         with patch.object(adapter, "_create_agent") as create:
             status, run_id = await _start(cli, "waits")
             assert status == 202
-            await asyncio.sleep(0.3)
+            await async_wait_until(lambda: len(refused) >= 2, timeout=5)
             assert adapter._run_statuses[run_id]["status"] == "queued"
             assert (await cli.post(f"/v1/runs/{run_id}/stop")).status == 200
             await async_wait_until(lambda: adapter._run_statuses[run_id]["status"] == "cancelled", timeout=5)
@@ -187,7 +203,6 @@ async def test_stopping_run_keeps_its_slot_until_the_executor_exits(adapter):
             await async_wait_until(lambda: stats["active"] == 1, timeout=5)
             stop = await cli.post(f"/v1/runs/{run_id}/stop")
             assert (await stop.json())["status"] == "stopping"
-            await asyncio.sleep(0.2)
             assert adapter._run_statuses[run_id]["status"] == "stopping"
             assert run_id in store.journal_slots()
             assert (await _start(cli, "during-stop"))[0] == 429

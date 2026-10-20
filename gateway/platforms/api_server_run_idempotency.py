@@ -347,7 +347,7 @@ class RunIdempotencyStore:
                 pending.result(timeout=self.REPLAY_WAIT_SECONDS)  # callers use to_thread; includes this run's preceding frames
             except TimeoutError as exc:
                 raise RuntimeError("Run event replay is temporarily unavailable; retry") from exc
-            except Exception as exc:
+            except Exception as exc:  # health: allow BLE001 -- any writer failure fails this run's replay closed
                 self._event_errors.setdefault(run_id, exc)
         if run_id in self._event_errors:
             raise RuntimeError("Run event persistence failed; replay is unavailable") from self._event_errors[run_id]

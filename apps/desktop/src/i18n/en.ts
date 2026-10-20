@@ -3118,7 +3118,6 @@ export const en: Translations = {
     background: count => `${count} Background`,
     goalActive: 'Goal active',
     goalBlocked: 'Goal blocked',
-    projectObjective: 'Project objective',
     goalDone: 'Goal done',
     goalPaused: 'Goal paused',
     goalWaiting: 'Goal waiting',
@@ -3686,10 +3685,6 @@ export const en: Translations = {
       connectionCloudTooltip: host => `Hermes Cloud · ${host}`,
       connectionSshTooltip: host => `SSH · ${host}`,
       connectionRemoteTooltip: host => `Remote · ${host}`,
-      thisMac: 'This Mac',
-      runNatively: 'Run on this Mac',
-      runNativelyHint:
-        'This assistant is on a remote or virtualized workspace. Click to switch to the native runtime on this Mac.',
       backendLabel: version => `backend v${version}`,
       commit: sha => `commit ${sha}`,
       branch: branch => `branch ${branch}`,
@@ -4001,8 +3996,6 @@ export const en: Translations = {
     thread: {
       loadingSession: 'Loading session',
       showEarlier: 'Show earlier messages',
-      deliveryRunCount: count => (count === 1 ? '1 report' : `${count} reports`),
-      viewFilter: { all: 'All', mine: 'Mine', reports: 'Reports' },
       loadingResponse: 'Hermes is loading a response',
       loadingLocalModel: model => `Loading ${model} into memory`,
       processingPrompt: 'Processing prompt',

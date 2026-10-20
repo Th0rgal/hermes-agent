@@ -2569,7 +2569,6 @@ export const ja = defineLocale({
     background: count => `バックグラウンド ${count} 件`,
     goalActive: '目標進行中',
     goalBlocked: '目標がブロックされています',
-    projectObjective: 'プロジェクト目標',
     goalDone: '目標達成',
     goalPaused: '目標一時停止中',
     goalWaiting: '目標待機中',
@@ -3054,9 +3053,6 @@ export const ja = defineLocale({
       connectionCloudTooltip: host => `Hermes Cloud · ${host}`,
       connectionSshTooltip: host => `SSH · ${host}`,
       connectionRemoteTooltip: host => `Remote · ${host}`,
-      thisMac: 'この Mac',
-      runNatively: 'この Mac で実行',
-      runNativelyHint: 'このアシスタントはリモートまたは仮想化ワークスペース上です。クリックしてこの Mac のネイティブ実行に切り替えます。',
       backendLabel: version => `バックエンド v${version}`,
       commit: sha => `コミット ${sha}`,
       branch: branch => `ブランチ ${branch}`,
@@ -3337,8 +3333,6 @@ export const ja = defineLocale({
     thread: {
       loadingSession: 'セッションを読み込み中',
       showEarlier: '以前のメッセージを表示',
-      deliveryRunCount: count => (count === 1 ? '1 件のレポート' : `${count} 件のレポート`),
-      viewFilter: { all: 'すべて', mine: '自分', reports: 'レポート' },
       loadingResponse: 'Hermes が応答を読み込み中',
       resumeWhenBackgroundDone: count =>
         count === 1

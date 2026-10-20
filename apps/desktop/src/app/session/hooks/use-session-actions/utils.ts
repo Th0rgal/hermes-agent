@@ -144,6 +144,7 @@ function preserveStructuralParts(message: ChatMessage, previous: ChatMessage): C
 // COMPARED: fields whose change must trigger a re-render (setMessages).
 // IGNORED:  fields that are intentionally not compared — display-only metadata
 //           or reference identity the runtime already guarantees.
+//   timestamp  — presentation-only (sort/age display), never affects transcript equality
 //   attachmentRefs — composer-side metadata; already reconciled in reconcileResumeMessages
 //   rowId — durable backend identity; stable for a given row, never changes what's painted
 //
@@ -168,7 +169,6 @@ const COMPARED_FIELDS = [
   'branchGroupId',
   'interim',
   'reactions',
-  'delivery',
   'timestamp',
   'completedAt',
   // Turn wall-clock duration — stamps the visible "⏱ 38s" badge, so a change
@@ -285,10 +285,7 @@ export function chatMessagesEquivalent(a: ChatMessage, b: ChatMessage): boolean 
     // Interim gates the action footer, so flipping it must repaint (e.g. a
     // previewed final settling onto a sealed interim bubble restores the bar).
     (a.interim ?? false) !== (b.interim ?? false) ||
-    !chatReactionsEquivalent(a.reactions, b.reactions) ||
-    // Compared by label, not identity — projection rebuilds the object on
-    // every pass, and only a visible label change should repaint the divider.
-    a.delivery?.label !== b.delivery?.label
+    !chatReactionsEquivalent(a.reactions, b.reactions)
   ) {
     return false
   }
@@ -528,15 +525,6 @@ const withAuthoritativeTurnState = (local: ChatMessage, authoritative: ChatMessa
 
   return merged
 }
-
-const isObservedCronDisplayMessage = (message: ChatMessage): boolean =>
-  message.role === 'assistant' &&
-  // Projection lifts the scheduler sentinel into ChatMessage.delivery; the
-  // raw-sentinel fallback covers rows built outside toChatMessages.
-  (message.delivery !== undefined || chatMessageText(message).trimStart().startsWith('[Cron delivery:'))
-
-const isNonTurnDisplayMessage = (message: ChatMessage): boolean =>
-  isGatewaySystemMarker(message) || isObservedCronDisplayMessage(message)
 
 export function preserveLocalPendingTurnMessages(
   nextMessages: ChatMessage[],
@@ -845,33 +833,8 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
       message => textWithoutReferenceLines(chatMessageText(message)) === textWithoutReferenceLines(text)
     )
 
-  // A retained *failed* turn (`inflight.error`) is the one case where the
-  // latest user run can legitimately be another turn: rows persisted after the
-  // failure by a mission-callback wake, a cron delivery or another client push
-  // the failed prompt out of the latest run. If that prompt exists anywhere in
-  // the transcript and a committed assistant reply follows it, the turn is
-  // history — do not paint it again as a pending bubble. Live turns keep the
-  // strict latest-run rule so a newly accepted repeat still shows.
-  const persistedWithCommittedReply = (text: string): boolean => {
-    const wanted = textWithoutReferenceLines(text)
-
-    const index = messages.findLastIndex(
-      message => message.role === 'user' && textWithoutReferenceLines(chatMessageText(message)) === wanted
-    )
-
-    if (index < 0) {
-      return false
-    }
-
-    return messages
-      .slice(index + 1)
-      .some(message => message.role === 'assistant' && !isLiveTailRow(message) && chatMessageText(message).trim().length > 0)
-  }
-
   const inflightUserAlreadyPersisted =
-    projection[safelyPersistedInflightUser] === true ||
-    (Boolean(inflightUser) && persistedInLatestRun(inflightUser)) ||
-    (Boolean(inflightUser) && Boolean(inflightError) && !inflightStreaming && persistedWithCommittedReply(inflightUser))
+    projection[safelyPersistedInflightUser] === true || (Boolean(inflightUser) && persistedInLatestRun(inflightUser))
 
   if (inflightUser && !inflightUserAlreadyPersisted) {
     // A synthetic starting prompt (process_complete, hidden, …) carries the

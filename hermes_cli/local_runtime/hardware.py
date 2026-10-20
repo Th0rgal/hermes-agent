@@ -98,7 +98,21 @@ def _ram_bytes() -> tuple[int, int]:
                 if pages > 0:
                     avail = pages * page
             return total, avail
-        # POSIX
+        # POSIX. Prefer /proc/meminfo MemAvailable (reclaimable cache included).
+        # getconf _AVPHYS_PAGES is only truly-free pages, so Linux file cache
+        # made the statusbar read ~96% used on an otherwise idle 64 GiB host.
+        if os.path.exists("/proc/meminfo"):
+            info: dict[str, int] = {}
+            with open("/proc/meminfo", encoding="utf-8") as fh:
+                for line in fh:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0].endswith(":"):
+                        with suppress(ValueError):
+                            info[parts[0][:-1]] = int(parts[1]) * 1024
+            total = info.get("MemTotal", 0)
+            avail = info.get("MemAvailable") or info.get("MemFree") or 0
+            if total > 0:
+                return total, avail
         page = int(_stdout("getconf", "PAGE_SIZE") or 4096)
         total = int(_stdout("getconf", "_PHYS_PAGES") or 0) * page
         avail = total // 2  # conservative when _AVPHYS is unavailable

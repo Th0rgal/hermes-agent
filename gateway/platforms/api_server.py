@@ -2494,6 +2494,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "chat_completions": True, "chat_completions_streaming": True,
             "responses_api": True, "responses_streaming": True, "run_submission": True,
             "runs_idempotency": _api_runs._idempotency_capabilities(self, store_type=RunIdempotencyStore),
+            "run_events_replay": self._run_idempotency_store.durable,
             **_STATIC_FEATURE_FLAGS,
             "run_unknown_resolution": getattr(runner, "session_authority", None) is not None,
             "cors": bool(self._cors_origins),
@@ -4487,18 +4488,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     _handle_room_member_grant_refresh = _room_grant_delegate("_handle_room_member_grant_refresh")
     _handle_room_member_grant_revoke = _room_grant_delegate("_handle_room_member_grant_revoke")
 
-    def _durable_run_status(self, request: web.Request, run_id: str) -> dict[str, Any] | None:
-        return _api_runs._durable_run_status(self, request, run_id)
+    _durable_run_status = _api_runs._durable_run_status
 
     @_admit_api_agent_request
     async def _handle_runs(self, request: web.Request) -> web.Response:
         return await _api_runs._handle_runs(self, request, _api_server=sys.modules[__name__])
 
-    def _request_owns_run(self, request: web.Request, run_id: str) -> bool:
-        return _api_runs._request_owns_run(self, request, run_id)
+    _request_owns_run = _api_runs._request_owns_run
 
-    def _release_run_owner_if_forgotten(self, run_id: str) -> None:
-        _api_runs._release_run_owner_if_forgotten(self, run_id)
+    _release_run_owner_if_forgotten = _api_runs._release_run_owner_if_forgotten
 
     _handle_get_run = _run_route_delegate("_handle_get_run")
     _handle_run_events = _run_route_delegate("_handle_run_events")
@@ -4691,7 +4689,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 store.close()
             except Exception:
                 logger.debug("Failed to close response store for %s", self.name, exc_info=True)
-        _api_runs._close_run_state(self)
         with suppress(Exception):
             await asyncio.to_thread(self._memory_sessions.close_all)
         try:
@@ -4702,8 +4699,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 await self._runner.cleanup()
                 self._runner = None
         finally:
-            self._close_cached_session_dbs()
-            self._app = None
+            try:  # the journal may be draining slow SQLite writes: keep teardown cancellable
+                await asyncio.to_thread(_api_runs._close_run_state, self)
+            finally:
+                self._close_cached_session_dbs()
+                self._app = None
         logger.info("[%s] API server stopped", self.name)
 
     async def send(

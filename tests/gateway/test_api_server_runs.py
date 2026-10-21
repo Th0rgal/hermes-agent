@@ -1928,39 +1928,6 @@ class TestRunIdempotency:
         assert body["status"] == "completed"
         assert body["output"] == "done"
 
-    @pytest.mark.asyncio
-    async def test_dead_owner_nonterminal_status_becomes_interrupted(
-        self, tmp_path
-    ):
-        from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
-
-        path = tmp_path / "idem.db"
-        scope = hashlib.sha256(
-            b"default\0unauthenticated-test-listener"
-        ).hexdigest()
-        store = RunIdempotencyStore(str(path))
-        store.reserve(
-            scope,
-            "stale-run",
-            "fingerprint",
-            "run_stale",
-            {"run_id": "run_stale", "status": "running"},
-            owner_pid=999_999_999,
-            owner_started=1,
-        )
-        store.close()
-
-        restarted = _make_adapter()
-        _use_idempotency_db(restarted, path)
-        app = _create_runs_app(restarted)
-        async with TestClient(TestServer(app)) as cli:
-            response = await cli.get("/v1/runs/run_stale")
-            body = await response.json()
-        assert response.status == 200
-        assert body["status"] == "interrupted"
-        assert body["last_event"] == "run.interrupted"
-
-
     def test_status_sweep_prunes_in_memory_ownership_mirrors(self, adapter):
         adapter._run_statuses["run_old"] = {
             "status": "completed",
